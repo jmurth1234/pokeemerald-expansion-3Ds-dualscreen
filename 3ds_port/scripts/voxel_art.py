@@ -70,24 +70,26 @@ class Graphics:
 class Pair:
     """A primary/secondary tileset pair: what one map draws from."""
 
-    def __init__(self, primary, secondary):
+    def __init__(self, primary, secondary, num_primary=TILES_PER_TILESET):
         self.gfx = (Graphics(primary), Graphics(secondary))
         self.meta = (read_u16(METATILES[primary]) if primary in METATILES else [],
                      read_u16(METATILES[secondary]) if secondary in METATILES else [])
         self.attr = (read_u16(ATTRIBUTES[primary]) if primary in ATTRIBUTES else [],
                      read_u16(ATTRIBUTES[secondary]) if secondary in ATTRIBUTES else [])
+        # Emerald splits at 512, the expansion's FRLG layouts at 640.
+        self.num_primary = num_primary
 
     def entries(self, metatile):
-        which = 0 if metatile < TILES_PER_TILESET else 1
-        index = metatile - which * TILES_PER_TILESET
+        which = 0 if metatile < self.num_primary else 1
+        index = metatile - which * self.num_primary
         table = self.meta[which]
         if (index + 1) * 8 > len(table):
             return None
         return table[index * 8:index * 8 + 8]
 
     def attribute(self, metatile):
-        which = 0 if metatile < TILES_PER_TILESET else 1
-        index = metatile - which * TILES_PER_TILESET
+        which = 0 if metatile < self.num_primary else 1
+        index = metatile - which * self.num_primary
         table = self.attr[which]
         return table[index] if index < len(table) else 0
 

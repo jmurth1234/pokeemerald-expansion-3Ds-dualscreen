@@ -69,7 +69,10 @@ in the releases.
 
 - Engine: [pret/pokeemerald](https://github.com/pret/pokeemerald) decompilation,
   pinned in [`upstream.lock`](upstream.lock), plus the port's changes in
-  [`patches/pokeemerald/`](patches/pokeemerald).
+  [`patches/pokeemerald/`](patches/pokeemerald). The port also builds on
+  [rh-hideout/pokeemerald-expansion](https://github.com/rh-hideout/pokeemerald-expansion)
+  (`expansion/1.17.0`, patches in
+  [`patches/pokeemerald-expansion/`](patches/pokeemerald-expansion)).
 - Port: [`3ds_port/`](3ds_port) — ARM11 backend (libctru, Citro2D/Citro3D),
   GPU compositor, NDSP audio, bottom-screen UI, voxel overworld.
 - Data: generated on the player's computer by the
@@ -101,6 +104,9 @@ On Linux and macOS the builder runs from source:
 ```
 python tools/bootstrap.py        # pinned upstream + patches + port -> build/upstream
 python tools/bootstrap.py --make # also builds the 3DSX there
+
+# the same port on pokeemerald-expansion (build/upstream by default):
+python tools/bootstrap.py --upstream pokeemerald-expansion --make
 ```
 
 Requirements, the development loop (loose data, data packs, host tests) and

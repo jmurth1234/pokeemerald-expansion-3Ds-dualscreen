@@ -5,9 +5,11 @@
     python tools/bootstrap.py --make -j8      # and build the 3DSX there
     python tools/bootstrap.py --clean         # start again from the pinned commit
 
-1. Reads upstream.lock and fetches exactly that commit of pret/pokeemerald into
-   build/upstream (a shallow fetch of one commit).
-2. Applies patches/pokeemerald/*.patch in order. The tree is reset to the
+1. Reads upstream.lock and fetches exactly the pinned commit of the selected
+   upstream into build/upstream (a shallow fetch of one commit). The default
+   is pret/pokeemerald; --upstream pokeemerald-expansion builds the same port
+   on rh-hideout/pokeemerald-expansion instead.
+2. Applies patches/<upstream>/*.patch in order. The tree is reset to the
    pinned commit first whenever the patch set changed since the last run.
 3. Places 3ds_port/, builder/ and tools/ inside it, so the Makefile's relative
    paths (../tools/port_common, ../builder) resolve as in development.
@@ -56,6 +58,8 @@ def fetch(tree: Path, repo: str, commit: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", type=Path, default=ROOT / "build" / "upstream")
+    ap.add_argument("--upstream", default="pokeemerald",
+                    help="upstream.lock section / patches/ directory to build")
     ap.add_argument("--clean", action="store_true", help="reset the tree to the pinned commit first")
     ap.add_argument("--make", action="store_true", help="build the tools and the 3DSX afterwards")
     ap.add_argument("-j", "--jobs", type=int, default=4)
@@ -63,9 +67,11 @@ def main() -> int:
     args = ap.parse_args()
 
     lock = tomllib.loads((ROOT / "upstream.lock").read_text(encoding="utf-8"))
-    repo, commit = lock["pokeemerald"]["repository"], lock["pokeemerald"]["commit"]
+    if args.upstream not in lock:
+        raise SystemExit("bootstrap: no [%s] section in upstream.lock" % args.upstream)
+    repo, commit = lock[args.upstream]["repository"], lock[args.upstream]["commit"]
     tree = args.dir.resolve()
-    patches = sorted((ROOT / "patches" / "pokeemerald").glob("*.patch"))
+    patches = sorted((ROOT / "patches" / args.upstream).glob("*.patch"))
     marker = tree / ".emerald3ds-patches"
     digest = patch_digest(patches)
 

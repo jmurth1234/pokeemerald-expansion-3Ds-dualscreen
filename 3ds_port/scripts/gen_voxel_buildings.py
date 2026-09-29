@@ -193,6 +193,10 @@ def _inside(shape, x, y):
     return False
 
 
+class ArtMismatch(Exception):
+    """The drawing no longer matches a spec (another tileset's art)."""
+
+
 def interior_specs(spec):
     """Expand an `interior` spec: a room cut into pieces, one model each.
 
@@ -320,7 +324,7 @@ def interior_specs(spec):
                             fill[(x, y)] = fpx[src]
                             break
         if not mine and not pc.get("walls"):
-            raise SystemExit("%s: piece %s claims no pixel" % (spec["name"], pc["name"]))
+            raise ArtMismatch("%s: piece %s claims no pixel" % (spec["name"], pc["name"]))
         drawn.append((mine, fill))
     # the room with what the pieces hide filled in: where hidden faces are
     # dressed from
@@ -455,19 +459,27 @@ def interior_specs(spec):
     return out
 
 
-def build_models(only=None):
+def build_models(only=None, allow_mismatch=False):
     models = []
     layouts = {}
     expanded = []
     for spec in specs.SPECS:
-        if "components" in spec:
-            expanded += component_specs(spec, layouts)
-        elif "kit" in spec:
-            expanded += kit_specs(spec)
-        elif "interior" in spec:
-            expanded += interior_specs(spec)
-        else:
-            expanded.append(spec)
+        try:
+            if "components" in spec:
+                expanded += component_specs(spec, layouts)
+            elif "kit" in spec:
+                expanded += kit_specs(spec)
+            elif "interior" in spec:
+                expanded += interior_specs(spec)
+            else:
+                expanded.append(spec)
+        except ArtMismatch as e:
+            # A tree whose art differs from the reference (the expansion's
+            # FRLG tilesets) cannot reproduce this model; leave it flat.
+            if not allow_mismatch:
+                raise
+            print("voxel buildings: skipping %s (%s)" % (spec.get("name", "?"), e))
+            continue
     for spec in expanded:
         if only and not spec["name"].startswith(only):
             continue
@@ -587,7 +599,7 @@ def find_placements(model, layouts_json):
     template = [ref.metatile(x + i, y + j) for j in range(h) for i in range(w)]
     core = [(i, j) for j in range(r0, r1) for i in range(w) if (i, j) in model.owned]
     core.sort(key=lambda c: (c[1], c[0]))
-    primary_only = all(template[j * w + i] < vb.NUM_PRIMARY for i, j in core)
+    primary_only = all(template[j * w + i] < ref.num_primary for i, j in core)
     found = []
     for index, entry in enumerate(layouts_json):
         if entry.get("primary_tileset") != ref.primary:
@@ -974,11 +986,13 @@ def main():
     ap.add_argument("--cams", default=None)
     ap.add_argument("--output", default=None)
     ap.add_argument("--town", default=None, help="render a whole layout, e.g. LAYOUT_OLDALE_TOWN")
+    ap.add_argument("--allow-art-mismatch", action="store_true",
+                    help="skip models whose reference art this tree does not carry")
     args = ap.parse_args()
     out = args.preview or os.path.join(PORT, "build", "buildings")
     os.makedirs(out, exist_ok=True)
     failed = False
-    models = build_models(args.only)
+    models = build_models(args.only, allow_mismatch=args.allow_art_mismatch)
     for model in models:
         wrong, missing, extra = vb.ortho_check(model, os.path.join(out, model.name + "_ortho.png"),
                                                exact=model.spec.get("exact"))

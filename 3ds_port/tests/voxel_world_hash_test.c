@@ -23,6 +23,18 @@ bool VoxelAtlas_IsVoid(const VoxelMapInstance *inst, int metatile) { (void)inst;
 const void *Port_ResolveAssetPointer(const void *p) { return p; }
 u32 Port_GetAssetSizeExact(const void *p) { (void)p; return 0; }
 void LZDecompressWram(const u32 *src, void *dst) { (void)src; (void)dst; }
+#ifdef PORT_EXPANSION
+/* The expansion's decompress.c and metatile_behavior.c are the ROM's; the test
+ * links nothing from them, so it supplies the calls the voxel units make. */
+void FastLZ77UnCompWram(const u32 *src, void *dst) { (void)src; (void)dst; }
+bool8 MetatileBehavior_IsSurfableWaterOrUnderwater(u8 b) { (void)b; return FALSE; }
+bool8 MetatileBehavior_IsPuddle(u8 b) { return b == MB_PUDDLE; }
+bool8 MetatileBehavior_IsShallowFlowingWater(u8 b) { (void)b; return FALSE; }
+bool8 MetatileBehavior_IsCounter(u8 b) { (void)b; return FALSE; }
+bool8 MetatileBehavior_IsPC(u8 b) { (void)b; return FALSE; }
+bool8 MetatileBehavior_IsSecretBasePC(u8 b) { (void)b; return FALSE; }
+bool8 MetatileBehavior_IsPlayerRoomPCOn(u8 b) { (void)b; return FALSE; }
+#endif
 void CB2_Overworld(void) {}
 void CB2_OverworldBasic(void) {}
 const struct MapHeader *const GetMapHeaderFromConnection(const struct MapConnection *c)

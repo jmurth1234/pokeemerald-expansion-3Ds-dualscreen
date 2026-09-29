@@ -16,12 +16,21 @@ GAME_ARCH := $(ARCH)
 ASM_PSEUDO_OP_CONV := sed -e 's/\.4byte/\.int/g;s/\.2byte/\.short/g'
 AS := $(DEVKITARM)/bin/arm-none-eabi-as
 CPPTOOL := $(DEVKITARM)/bin/arm-none-eabi-cpp
-ASFLAGS := -mcpu=mpcore --defsym MODERN=1 --defsym PORTABLE=1 --defsym UBFIX=1 -I$(ROOT)
+ASFLAGS := -mcpu=mpcore --defsym MODERN=1 --defsym PORTABLE=1 --defsym UBFIX=1 --defsym PLATFORM_3DS=1 -I$(ROOT)
 
 # Game translation units see the port bridge (compat/port_platform.h): the
 # hooks in the shared tree that route resources, scripts and saves to the
 # ARM11 backend are compiled in with PORT_BRIDGE.
 BRIDGE_FLAGS := -DPORT_BRIDGE
+
+# The expansion carries FRLG tilesets whose art differs from the reference
+# drawings the buildings are modelled from; there a model that no longer
+# matches its drawing is skipped and left flat instead of failing the build.
+VOXEL_BUILDINGS_FLAGS := $(if $(wildcard $(ROOT)/include/config/caps.h),--allow-art-mismatch,)
+
+# Host tests compile game-side voxel units and need the same upstream switch
+# the 3DS build uses.
+PORT_EXPANSION_DEF := $(if $(wildcard $(ROOT)/include/config/caps.h),-DPORT_EXPANSION,)
 
 # The compile runs from the repository root (preproc resolves charmap and
 # include paths there), so every search path is absolute.
@@ -33,6 +42,9 @@ FULLCFLAGS := $(GAME_ARCH) $(filter-out $(ARCH),$(GAMECFLAGS))
 ROOT_C_SRCS := $(wildcard $(ROOT)/src/*.c $(ROOT)/src/*/*.c $(ROOT)/src/*/*/*.c)
 # GBA-only link/multiboot programs; 3ds_compat.c provides their entry points.
 ROOT_C_SRCS := $(filter-out $(ROOT)/src/berry_fix_program.c $(ROOT)/src/ereader_screen.c $(ROOT)/src/mystery_gift_menu.c $(ROOT)/src/mystery_event_menu.c,$(ROOT_C_SRCS))
+# The expansion's AGB print library is Thumb-only emulator debug output; the
+# port logs through its own backend instead.
+ROOT_C_SRCS := $(filter-out $(ROOT)/src/libisagbprn.c,$(ROOT_C_SRCS))
 
 ROOT_DATA_SRCS := $(wildcard $(ROOT)/data/*.s)
 ROOT_DATA_SRCS := $(filter-out $(ROOT)/data/multiboot_berry_glitch_fix.s $(ROOT)/data/multiboot_ereader.s \
@@ -41,7 +53,13 @@ ROOT_DATA_SRCS := $(filter-out $(ROOT)/data/multiboot_berry_glitch_fix.s $(ROOT)
 ROOT_DATA_SRCS := $(filter-out $(ROOT)/data/maps.s,$(ROOT_DATA_SRCS))
 # Script sections are assembled but not linked: their pointers are unaligned,
 # so they move to RomFS and land in a reserved region (gen_script_bundle.py).
-SCRIPT_DATA_SRCS := battle_ai_scripts battle_anim_scripts battle_scripts_1 battle_scripts_2 	contest_ai_scripts event_scripts field_effect_scripts
+# The expansion moved the battle AI to C and has no data/battle_ai_scripts.s;
+# keep only the sections this tree actually has.
+SCRIPT_DATA_SRCS := $(patsubst $(ROOT)/data/%.s,%,$(wildcard \
+	$(ROOT)/data/battle_ai_scripts.s $(ROOT)/data/battle_anim_scripts.s \
+	$(ROOT)/data/battle_scripts_1.s $(ROOT)/data/battle_scripts_2.s \
+	$(ROOT)/data/contest_ai_scripts.s $(ROOT)/data/event_scripts.s \
+	$(ROOT)/data/field_effect_scripts.s))
 SCRIPT_DATA_OBJS := $(patsubst %,build/root/data/%.o,$(SCRIPT_DATA_SRCS))
 ROOT_DATA_SRCS := $(filter-out $(patsubst %,$(ROOT)/data/%.s,$(SCRIPT_DATA_SRCS)),$(ROOT_DATA_SRCS))
 
@@ -65,6 +83,10 @@ FULL_DATA_OBJS += build/root/3ds_script_blob.o build/root/3ds_script_keep.o
 # sections are not: a PATT command puts a 32-bit pointer at whatever offset the
 # preceding bytes leave it on, and 3dsxtool rejects unaligned relocations.
 FULL_DATA_OBJS += build/root/3ds_song_blob.o
+# The expansion's decompressor calls ARM helpers defined in src/decompress_asm.s;
+# assemble them too (the vanilla tree has no such file, so this is a no-op there).
+ROOT_ASM_SRCS := $(wildcard $(ROOT)/src/decompress_asm.s)
+FULL_DATA_OBJS += $(patsubst $(ROOT)/%.s,build/root/%.o,$(ROOT_ASM_SRCS))
 BACKEND_SRCS := src/3ds_assets.c src/3ds_map_loader.c src/3ds_compat.c
 BACKEND_SRCS += src/3ds_game_full.c src/3ds_game_bridge.c src/3ds_script_loader.c
 BACKEND_SRCS += src/3ds_bottom_ui.c
@@ -171,6 +193,12 @@ build/root/data/%.o: $(ROOT)/data/%.s Makefile full.mk
 		| "$(PREPROC)" -ie data/$*.s charmap.txt | $(ASM_PSEUDO_OP_CONV) - \
 		| "$(AS)" $(ASFLAGS) -o $(CURDIR)/$@
 
+# Port-only assembly in the game's src/ (the expansion's decompress_asm.s).
+# It has no charmap literals, so it is assembled directly.
+build/root/src/%.o: $(ROOT)/src/%.s Makefile full.mk
+	@mkdir -p $(dir $@)
+	"$(AS)" $(ASFLAGS) -o $@ $<
+
 # The samples are .incbin'd from paths relative to the repository root, and the
 # generic data rule already assembles from there. Only the dependency is new,
 # unless a sample overlay redirects some of the .incbin paths.
@@ -192,7 +220,7 @@ build/root/sound/songs/%.o: $(ROOT)/sound/songs/%.s
 # for the options to drift, so the conversion is delegated to it - in one call
 # for every song, because each recursive make parses the whole root Makefile.
 ROOT_MID_DEPS := $(wildcard $(ROOT)/sound/songs/midi/*.mid) $(ROOT)/sound/songs/midi/midi.cfg
-build/midi.stamp: $(ROOT_MID_DEPS)
+build/midi.stamp: $(ROOT_MID_DEPS) | build/graphics.stamp
 	+$(MAKE) -C $(ROOT) $(patsubst $(ROOT)/%,%,$(ROOT_MID_SRCS))
 	@mkdir -p build
 	@touch $@
@@ -200,8 +228,11 @@ $(ROOT_MID_SRCS): build/midi.stamp ;
 .SECONDARY: $(ROOT_MID_SRCS)
 
 # Per-map header/events/connections includes, generated by mapjson for any map
-# that does not have them yet (a fresh upstream tree has none).
-build/map_includes.stamp: $(wildcard $(ROOT)/data/maps/*/map.json) $(ROOT)/data/layouts/layouts.json
+# that does not have them yet (a fresh upstream tree has none). The root-make
+# steps above can rewrite the same files through `mapjson groups`, so this runs
+# after them to keep the two writers from racing.
+build/map_includes.stamp: $(wildcard $(ROOT)/data/maps/*/map.json) $(ROOT)/data/layouts/layouts.json | build/graphics.stamp
+	+$(MAKE) -C $(ROOT) include/constants/map_groups.h data/maps/groups.inc data/maps/headers.inc data/maps/connections.inc data/maps/events.inc
 	"$(PYTHON)" $(SCRIPTS)/gen_missing_map_includes.py
 	@mkdir -p build
 	@touch $@
@@ -289,6 +320,27 @@ map-includes:
 
 -include $(BACKEND_OBJS:.o=.d)
 
+# The port's host generators read the tree's own art (tilesets and the intro
+# scene). The root Makefile owns the .4bpp/.gbapal rules and the port build
+# does not include them, so ask it for exactly the files the port needs. This
+# also gives a fresh `bootstrap --make` tree its generated graphics.
+PORT_ART_TARGETS := $(patsubst $(ROOT)/%.png,$(ROOT)/%.4bpp,$(wildcard $(ROOT)/data/tilesets/*/*/tiles.png))
+PORT_ART_TARGETS += $(patsubst $(ROOT)/%.pal,$(ROOT)/%.gbapal,$(wildcard $(ROOT)/data/tilesets/*/*/palettes/*.pal))
+PORT_ART_TARGETS += $(ROOT)/graphics/intro/scene_1/bg.4bpp
+# The expansion generates the Move Reminder's tutor table from JSON with a root
+# Makefile rule; game code includes it, so the port build must ask for it too.
+ifneq ($(wildcard $(ROOT)/src/data/pokemon/special_movesets.json),)
+PORT_ART_TARGETS += $(ROOT)/src/data/tutor_moves.h
+endif
+ifneq ($(wildcard $(ROOT)/tools/learnset_helpers/make_teachables.py),)
+PORT_ART_TARGETS += $(ROOT)/src/data/pokemon/teachable_learnsets.h
+endif
+.PHONY: build/graphics.stamp
+build/graphics.stamp: FORCE
+	@mkdir -p build
+	+$(MAKE) -C $(ROOT) $(patsubst $(ROOT)/%,%,$(PORT_ART_TARGETS))
+	@touch $@
+
 ifeq ($(VOXEL),1)
 # What every cell of every layout IS (the console reads its signposts).
 # Solved on the host because it needs the map's warps, its neighbours and a
@@ -297,7 +349,7 @@ ifeq ($(VOXEL),1)
 # rather than keeping a copy that could drift.
 romfs/voxel/regions.bin: scripts/gen_voxel_regions.py scripts/voxel_cells.py scripts/voxel_art.py \
 		src/voxel/voxel_regions.h \
-		$(ROOT)/data/layouts/layouts.json
+		$(ROOT)/data/layouts/layouts.json | build/graphics.stamp
 	@mkdir -p $(@D)
 	"$(PYTHON)" scripts/gen_voxel_regions.py
 
@@ -317,19 +369,19 @@ romfs/voxel/trees.rgba5551: scripts/gen_voxel_trees.py \
 # by a single pixel, so a spec that stops matching fails the build here.
 romfs/voxel/buildings.bin: scripts/gen_voxel_buildings.py scripts/voxel_building.py \
 		scripts/voxel_building_specs.py scripts/dump_region_art.py \
-		$(ROOT)/data/layouts/layouts.json
+		$(ROOT)/data/layouts/layouts.json | build/graphics.stamp
 	@mkdir -p $(@D)
-	"$(PYTHON)" scripts/gen_voxel_buildings.py --output $@
+	"$(PYTHON)" scripts/gen_voxel_buildings.py --output $@ $(VOXEL_BUILDINGS_FLAGS)
 
 # Terrain relief read off the drawing: gen_voxel_relief.py explains it.
 romfs/voxel/relief.bin: scripts/gen_voxel_relief.py scripts/voxel_cells.py \
 		scripts/voxel_art.py scripts/voxel_building.py scripts/dump_region_art.py \
-		$(ROOT)/data/layouts/layouts.json
+		$(ROOT)/data/layouts/layouts.json | build/graphics.stamp
 	@mkdir -p $(@D)
 	"$(PYTHON)" scripts/gen_voxel_relief.py --output $@
 
-romfs/stage/leaves.bin: scripts/gen_intro_margins.py $(ROOT)/graphics/intro/scene_1/bg.4bpp \
-		$(wildcard $(ROOT)/graphics/intro/scene_1/bg?_map.bin)
+romfs/stage/leaves.bin: scripts/gen_intro_margins.py \
+		$(wildcard $(ROOT)/graphics/intro/scene_1/bg?_map.bin) | build/graphics.stamp
 	@mkdir -p $(@D)
 	"$(PYTHON)" scripts/gen_intro_margins.py --output $@
 
@@ -343,7 +395,7 @@ verify-voxel-world: build/voxel_world_hash_test.exe
 
 build/voxel_world_hash_test.exe: tests/voxel_world_hash_test.c src/voxel/voxel_world.c src/voxel/voxel_world.h
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=gnu99 -O2 -DPORTABLE -DMODERN=1 -D__INTELLISENSE__ \
+	$(HOSTCC) -std=gnu99 -O2 -DPORTABLE -DMODERN=1 -D__INTELLISENSE__ $(PORT_EXPANSION_DEF) \
 		-iquote compat -iquote ../include -Isrc/voxel tests/voxel_world_hash_test.c -o $@
 
 verify: verify-voxel-arena

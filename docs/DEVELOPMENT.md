@@ -25,6 +25,19 @@ clones pret/pokeemerald at the commit pinned in `upstream.lock` into
 decomp tools and the 3DSX there (`--jobs N`). Re-running it refreshes the
 port files without touching the upstream checkout unless `--clean` is given.
 
+`--upstream pokeemerald-expansion` builds the same port on the
+`rh-hideout/pokeemerald-expansion` tag pinned in `upstream.lock` instead,
+applying `patches/pokeemerald-expansion/*.patch`:
+
+```
+python tools/bootstrap.py --upstream pokeemerald-expansion --make
+```
+
+The port code is shared: where the trees differ it branches on
+`PORT_EXPANSION` (defined for expansion builds), and the graphics and
+generated headers the port reads from the tree are built on demand by the
+port Makefile.
+
 ## Building
 
 From `build/upstream/3ds_port` (devkitPro's shell on Windows, or `build.ps1`):

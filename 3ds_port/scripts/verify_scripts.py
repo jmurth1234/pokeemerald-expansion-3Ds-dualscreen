@@ -113,6 +113,22 @@ def main() -> int:
         problems.append("the recorded reference address is not AgbMain's; rebasing would be wrong")
 
     low, high = loaded_range(elf)
+    # The expansion's scripts also reference read-only tables that live in the
+    # NOLOAD .gamedata region, filled from the data pack at start-up: the
+    # address is reserved and valid at run time, so accept it too.
+    data_low = symbols.get("__ctr_gamedata")
+    data_high = symbols.get("__ctr_gamedata_end")
+
+    # The expansion tags script commands that call Script_RequestEffects with
+    # ROM_SIZE (0x02000000) so the interpreter can tell them apart; the loader
+    # writes the tagged address and the game masks the flag. Accept both.
+    script_flag = 0x02000000
+
+    def loaded(address: int) -> bool:
+        if low <= address < high or low <= (address & ~script_flag) < high:
+            return True
+        return data_low is not None and data_high is not None and data_low <= address < data_high
+
     sites = struct.unpack_from(f"<{internal + external}I", relocs, HEADER.size)
     bad_site = bad_internal = bad_external = 0
     for index, site in enumerate(sites):
@@ -123,7 +139,7 @@ def main() -> int:
         if index < internal:
             if target >= len(payload):
                 bad_internal += 1
-        elif not (low <= target < high):
+        elif not loaded(target):
             bad_external += 1
     if bad_site:
         problems.append(f"{bad_site} relocation site(s) outside the payload")

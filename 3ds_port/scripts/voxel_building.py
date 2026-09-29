@@ -92,16 +92,25 @@ class LayoutArt:
         self.w, self.h = entry["width"], entry["height"]
         self.primary, self.secondary = entry["primary_tileset"], entry["secondary_tileset"]
         self.ts = Tilesets(self.primary, self.secondary)
-        self.pm = read_u16(self.mts[self.primary])
-        self.sm = read_u16(self.mts[self.secondary])
+        self.pm = read_u16(self.mts[self.primary]) if self.primary in self.mts else []
+        self.sm = read_u16(self.mts[self.secondary]) if self.secondary in self.mts else []
+        # The expansion ships FRLG layouts alongside Emerald's; their blocks
+        # split primary/secondary metatiles at 640 instead of 512. A tileset's
+        # own table can be shorter than the split (the shared Building table
+        # holds 8), so the layout version, not the table length, decides.
+        self.num_primary = 640 if entry.get("layout_version") == "frlg" else NUM_PRIMARY
 
     def metatile(self, x, y):
         return self.blocks[y * self.w + x] & 0x3FF
 
     def entries(self, m):
-        if m < NUM_PRIMARY:
-            return self.pm[m * 8:m * 8 + 8]
-        return self.sm[(m - NUM_PRIMARY) * 8:(m - NUM_PRIMARY) * 8 + 8]
+        if m < self.num_primary:
+            entries = self.pm[m * 8:m * 8 + 8]
+        else:
+            entries = self.sm[(m - self.num_primary) * 8:(m - self.num_primary) * 8 + 8]
+        # A layout may name a tileset the tree does not carry (the expansion's
+        # unused maps); a blank metatile keeps the generators going.
+        return entries if len(entries) == 8 else [0] * 8
 
     def subtiles(self, m, layer):
         """Four 8x8 blocks of (rgb, colour index), flips applied, row major."""

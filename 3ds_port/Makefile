@@ -36,7 +36,7 @@ SOURCES += src/3ds_data.c src/3ds_pak.c src/3ds_settings.c
 SOURCES += src/3ds_video.c src/3ds_video_decode.c src/3ds_bottom_screen.c
 LIBS := -lcitro2d -lcitro3d $(LIBS)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
-GAMEFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -DMODERN=1 -DUBFIX -D__INTELLISENSE__
+GAMEFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -DMODERN=1 -DUBFIX -D__INTELLISENSE__ -DTESTING=0
 GAMEFLAGS += -iquote include -iquote ../include -iquote ../include/constants -iquote ..
 # VOXEL=0 compiles the voxel overworld out entirely.
 VOXEL ?= 1
@@ -66,6 +66,16 @@ CPPFLAGS += -DCTR_DATA_BACKEND=$(DATA_BACKEND)
 # Legacy code has existing warnings; platform code remains -Werror.
 GAMECFLAGS := $(filter-out -Werror,$(CFLAGS)) -fsigned-char -fno-strict-aliasing
 GAMECFLAGS += -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration
+# The expansion's headers use enum bitfields wider than 8 bits and its ROM
+# builds with int-sized enums (-mabi=apcs-gnu); devkitARM defaults to short
+# enums. Keep the two builds' layouts identical.
+ifneq ($(wildcard $(ROOT)/include/config/caps.h),)
+GAMECFLAGS += -fno-short-enums
+# The expansion reserves __INTELLISENSE__ for editor-only declarations; its
+# global.h takes the asset stubs from PORT_BRIDGE instead. PORT_EXPANSION
+# also selects the apcs-gnu-compatible 64-bit alignment in gba/types.h.
+GAMEFLAGS := $(filter-out -D__INTELLISENSE__,$(GAMEFLAGS)) -DPORT_EXPANSION
+endif
 # Optional per-machine settings (e.g. SAMPLE_OVERLAY_DIR), never committed.
 -include local.mk
 include full.mk

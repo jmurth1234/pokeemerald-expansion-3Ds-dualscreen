@@ -12,7 +12,7 @@ from pathlib import Path
 from . import pak
 from .errors import BuilderError
 from .recipe import Recipe, RecipeError, build_entry
-from .rom import load_rom
+from .rom import SUPPORTED_SHA1, load_rom
 from .voxel import run_generators
 from .vtree import build_tree
 
@@ -51,6 +51,14 @@ class Payload:
                                "Extract the whole ZIP again and run the builder from there.")
 
 
+def expected_rom_sha1() -> str:
+    """The ROM SHA-1 the release's recipe names, or the stock vanilla ROM."""
+    try:
+        return Recipe.load(Payload(default_payload()).recipe).rom_sha1
+    except (OSError, RecipeError):
+        return SUPPORTED_SHA1
+
+
 class Progress:
     """Maps sub-task progress onto one bar: callback(fraction, message)."""
 
@@ -70,12 +78,12 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
     """Generate emerald3ds.pak from the ROM. Returns a summary."""
     report = Progress(progress)
     payload.check(need_executables=False)
-    report(0.0, "Checking the ROM")
-    rom = load_rom(rom_path)
     try:
         recipe = Recipe.load(payload.recipe)
     except (OSError, RecipeError) as exc:
         raise BuilderError("The release's recipe could not be read.", str(exc)) from exc
+    report(0.0, "Checking the ROM")
+    rom = load_rom(rom_path, recipe.rom_sha1)
     if recipe.rom_sha1 != rom.sha1:
         raise BuilderError("This release expects a different ROM.")
 

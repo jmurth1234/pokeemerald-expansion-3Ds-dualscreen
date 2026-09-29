@@ -13,7 +13,8 @@ from . import __version__
 from .build import Payload, build_pack, default_payload
 from .errors import BuilderError
 from .install import APP_DIR, find_sd_cards, install
-from .rom import load_rom
+from .recipe import Recipe, RecipeError
+from .rom import SUPPORTED_SHA1, load_rom
 
 TITLE = "Pokémon Emerald 3Ds Dual Screen Builder"
 
@@ -86,7 +87,11 @@ class App:
             self.rom_status.config(text="", foreground="")
             return
         try:
-            rom = load_rom(Path(path))
+            expected = Recipe.load(self.payload.recipe).rom_sha1
+        except (OSError, RecipeError):
+            expected = SUPPORTED_SHA1
+        try:
+            rom = load_rom(Path(path), expected)
         except BuilderError as exc:
             self.rom_status.config(text="X  " + exc.message, foreground="#b00020")
             return

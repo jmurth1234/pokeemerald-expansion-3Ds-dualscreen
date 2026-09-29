@@ -35,7 +35,59 @@ MAKE_ASSET_TIMEOUT_SECONDS = 120
 GENERATE_ON_DEMAND_PREFIXES = (
     "graphics/",
     "data/tilesets/",
+    # The expansion's INCGFX assets are generated under build/assets/ by the
+    # root Makefile (the same files its preproc would inline).
+    "build/assets/",
 )
+# Where the root Makefile writes generated INCGFX assets (ASSETS_DIR_NAME).
+ASSETS_DIR = "build/assets/"
+# Assets the port's own bottom-screen UI loads by path. The game may not link
+# them (so the passes above never see them), but the pack still needs them.
+ALWAYS_COPY_ASSETS = (
+    "graphics/party_menu/slot_main.bin",
+    "graphics/party_menu/slot_main_no_hp.bin",
+    "graphics/party_menu/slot_wide.bin",
+    "graphics/party_menu/slot_wide_no_hp.bin",
+    "graphics/party_menu/slot_wide_empty.bin",
+)
+
+
+def incgfx_asset_path(kind: str, args: str) -> str | None:
+    """The generated file for an INCGFX_U8/U16/U32/COMP call.
+
+    Mirrors tools/preproc/c_file.cpp TryConvertIncgfx: the file is
+    <assets dir>/<source><arguments with non-alphanumerics as '_'><extensions>,
+    with '.smol' appended for INCGFX_COMP.
+    """
+    strings = re.findall(r'"([^"]*)"', args)
+    if len(strings) < 2:
+        return None
+    source, extensions = strings[0], strings[1]
+    arguments = strings[2] if len(strings) > 2 else ""
+    if kind == "COMP":
+        extensions += ".smol"
+    arguments_as_path = "".join(c if c.isalnum() else "_" for c in arguments)
+    return ASSETS_DIR + source + arguments_as_path + extensions
+
+
+def group_asset_paths(init: str) -> list[str]:
+    """The asset files of a grouped initializer, in order.
+
+    Groups mix INCBIN_* and INCGFX_*; each call contributes its own file.
+    """
+    out: list[str] = []
+    call_pattern = re.compile(
+        r'INCGFX_(U8|U16|U32|COMP)\s*\(([^)]*)\)'
+        r'|INCBIN_U(?:8|16|32)\s*\(\s*"([^"]+)"'
+    )
+    for m in call_pattern.finditer(init):
+        if m.group(1):
+            rel = incgfx_asset_path(m.group(1), m.group(2))
+            if rel:
+                out.append(rel)
+        else:
+            out.append(m.group(3))
+    return out
 
 
 def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
@@ -46,6 +98,13 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
     # four different files then claim the same asset.
     direct_pattern = re.compile(
         r"((?:static\s+)?const\s+[^;=]+?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*=\s*INCBIN_U(?:8|16|32)\s*\((.*?)\)\s*;)",
+        re.S,
+    )
+    # The expansion declares most graphics with INCGFX_*; its preproc inlines
+    # the generated file, the port keeps a stub and needs the same file here.
+    incgfx_pattern = re.compile(
+        r"((?:static\s+)?const\s+[^;=]+?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*=\s*"
+        r"INCGFX_(U8|U16|U32|COMP)\s*\(([^)]*)\)\s*;)",
         re.S,
     )
     grouped_pattern = re.compile(
@@ -70,15 +129,34 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
                 result.append((src_path.relative_to(ROOT), sym, paths, is_static))
                 seen.add(sym)
 
+        for m in incgfx_pattern.finditer(text):
+            decl = m.group(1)
+            sym = m.group(2)
+            if sym in seen:
+                continue
+            rel = incgfx_asset_path(m.group(3), m.group(4))
+            if rel:
+                is_static = "static" in decl.split("=")[0]
+                result.append((src_path.relative_to(ROOT), sym, [rel], is_static))
+                seen.add(sym)
+
         for m in grouped_pattern.finditer(text):
             decl = m.group(1)
             sym = m.group(2)
             init = m.group(3)
-            paths = path_pattern.findall(init)
 
             if sym in seen:
                 continue
-            if not paths or "INCBIN_" not in init:
+            if "INCGFX_" in init:
+                paths = group_asset_paths(init)
+            elif "INCBIN_" in init:
+                # A grouped initializer can also hold plain strings (names,
+                # text); only path-looking ones are assets.
+                paths = [p for p in path_pattern.findall(init)
+                         if "/" in p and re.search(r"\.[A-Za-z0-9]+$", p)]
+            else:
+                continue
+            if not paths:
                 continue
 
             is_static = "static" in decl.split("=")[0]
@@ -220,6 +298,14 @@ def main() -> None:
 
     incbins = parse_incbins_by_source()
     generate_missing(incbins)
+
+    # Files the port's own UI reads by path, whether or not the game links them.
+    for rel in ALWAYS_COPY_ASSETS:
+        src = ROOT / rel
+        if src.exists():
+            dst = FS_DIR / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
     sym_addrs, sym_addrs_by_name = parse_symbol_addresses_from_map()
 
     entries: list[tuple[int, int, str]] = []

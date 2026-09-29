@@ -114,10 +114,10 @@ class MapEvents:
 _PAIRS = {}
 
 
-def pair_for(primary, secondary):
-    key = (primary, secondary)
+def pair_for(primary, secondary, num_primary=NUM_PRIMARY):
+    key = (primary, secondary, num_primary)
     if key not in _PAIRS:
-        _PAIRS[key] = voxel_art.Pair(primary, secondary)
+        _PAIRS[key] = voxel_art.Pair(primary, secondary, num_primary)
     return _PAIRS[key]
 
 
@@ -132,6 +132,9 @@ class Layout:
         self.secondary = entry["secondary_tileset"]
         self.attr = (read_u16(ATTRIBUTES[self.primary]) if self.primary in ATTRIBUTES else [],
                      read_u16(ATTRIBUTES[self.secondary]) if self.secondary in ATTRIBUTES else [])
+        # The expansion's FRLG layouts split primary/secondary metatiles at
+        # 640 instead of Emerald's 512; the layout version says which.
+        self.num_primary = 640 if entry.get("layout_version") == "frlg" else NUM_PRIMARY
         self.outdoor = self.layout_id in events.outdoor
         self.warps = sorted(events.warps.get(self.layout_id, ()))
         self.signs = events.signs.get(self.layout_id, set())
@@ -156,9 +159,9 @@ class Layout:
     def attributes(self, metatile):
         if metatile is None:
             return 0
-        which = 0 if metatile < NUM_PRIMARY else 1
+        which = 0 if metatile < self.num_primary else 1
         table = self.attr[which]
-        index = metatile - which * NUM_PRIMARY
+        index = metatile - which * self.num_primary
         return table[index] if index < len(table) else 0
 
     def behaviour(self, x, y):
@@ -173,7 +176,7 @@ class Layout:
     def foliage(self, metatile):
         """Share of a metatile's drawn pixels that are leaves."""
         if metatile not in self._foliage:
-            pair = pair_for(self.primary, self.secondary)
+            pair = pair_for(self.primary, self.secondary, self.num_primary)
             drawn = dict(pair.layer_pixels(metatile, 0))
             drawn.update(pair.layer_pixels(metatile, 1))
             green = sum(1 for r, g, b in drawn.values() if g > 64 and g > r + 16 and g > b + 16)

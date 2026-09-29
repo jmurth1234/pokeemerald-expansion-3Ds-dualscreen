@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The port also builds on
+  [rh-hideout/pokeemerald-expansion](https://github.com/rh-hideout/pokeemerald-expansion)
+  (`expansion/1.17.0`): `python tools/bootstrap.py --upstream
+  pokeemerald-expansion`. The port code is shared and branches on
+  `PORT_EXPANSION`; the expansion tree's graphics and generated headers are
+  built on demand by the port Makefile.
+- The builder now accepts the ROM named by the release's recipe, so an
+  expansion-based release works with the expansion ROM it was built from.
+
 ## 0.1.1 — 2026-09-27
 
 - The voxel overworld is now off by default. It is switched on from the new

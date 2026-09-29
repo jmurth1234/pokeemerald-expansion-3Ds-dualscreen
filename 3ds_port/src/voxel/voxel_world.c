@@ -164,19 +164,31 @@ bool Voxel_LoadTiles(const void *tilesetPtr, uint8_t *dest, uint32_t destSize)
     if (tileset->isCompressed)
     {
         /*
-         * LZ77UnCompWram cannot be told how large the destination is, so the
+         * A decompressor cannot be told how large the destination is, so the
          * header is read first and a payload that does not fit is refused
          * rather than allowed to run off the end of the scratch buffer.
+         *
+         * The expansion tilesets are not vanilla LZ77: they carry a smol
+         * header (mode 1/6 and up), whose first bytes are not a size. Ask the
+         * engine for the real size and let it dispatch on the mode.
          */
         const u8 *packed = Port_ResolveAssetPointer(tileset->tiles);
         u32 size;
 
         if (packed == NULL)
             return false;
+#ifdef PORT_EXPANSION
+        size = GetDecompressedDataSize((const u32 *)packed);
+#else
         size = (u32)packed[1] | ((u32)packed[2] << 8) | ((u32)packed[3] << 16);
+#endif
         if (size == 0 || size > destSize)
             return false;
+#ifdef PORT_EXPANSION
+        DecompressDataWithHeaderWram((const u32 *)packed, dest);
+#else
         LZDecompressWram((const u32 *)packed, dest);
+#endif
         return true;
     }
 

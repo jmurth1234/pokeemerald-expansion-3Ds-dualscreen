@@ -62,7 +62,9 @@ def main() -> None:
     if not (args.blob or args.bundle):
         parser.error("choose --blob and/or --bundle")
 
-    objects = [build_dir / rel for rel in SCRIPT_OBJECTS]
+    # data/battle_ai_scripts.o only exists in vanilla pokeemerald; the
+    # expansion moved the battle AI to C, so skip whatever is missing.
+    objects = [build_dir / rel for rel in SCRIPT_OBJECTS if (build_dir / rel).exists()]
     sections, offsets, size = BUNDLE.load(objects, tmp)
     if args.blob:
         BUNDLE.write_blob_asm(offsets, size, port / "build" / "3ds_script_blob.s")

@@ -57,6 +57,7 @@
 #include "item.h"
 #include "item_icon.h"
 #include "item_menu.h"
+#include "malloc.h"
 #include "menu.h"
 #include "new_game.h"
 #include "overworld.h"
@@ -85,6 +86,11 @@
 #include "constants/songs.h"
 #include "constants/trainers.h"
 #include "port_platform.h"
+
+#ifdef PORT_EXPANSION
+/* The expansion's graphics carry a header; its decompressor reads it. */
+#include "decompress.h"
+#endif
 
 #include "3ds_data.h"
 #include "3ds_bottom.h"
@@ -119,7 +125,31 @@ void CtrPokenavList_SetSelected(u16 selected);
 void CtrPokenavMatchCall_SetOption(u16 cursor);
 void CtrMonMarkings_SetCursor(s8 cursor);
 void SetPokemonCryStereo(u32 val);
+#ifndef PORT_EXPANSION
 extern const struct PokedexEntry gPokedexEntries[];
+#else
+/* The expansion keeps its option-menu strings file-static in option_menu.c and
+ * its PORT_BRIDGE build has no _() charmap macro, so carry copies here. */
+static const u8 gText_TextSpeed[] = {CHAR_T,CHAR_E,CHAR_X,CHAR_T,CHAR_SPACE,CHAR_S,CHAR_P,CHAR_E,CHAR_E,CHAR_D,EOS};
+static const u8 gText_BattleScene[] = {CHAR_B,CHAR_A,CHAR_T,CHAR_T,CHAR_L,CHAR_E,CHAR_SPACE,CHAR_S,CHAR_C,CHAR_E,CHAR_N,CHAR_E,EOS};
+static const u8 gText_BattleStyle[] = {CHAR_B,CHAR_A,CHAR_T,CHAR_T,CHAR_L,CHAR_E,CHAR_SPACE,CHAR_S,CHAR_T,CHAR_Y,CHAR_L,CHAR_E,EOS};
+static const u8 gText_Sound[] = {CHAR_S,CHAR_O,CHAR_U,CHAR_N,CHAR_D,EOS};
+static const u8 gText_ButtonMode[] = {CHAR_B,CHAR_U,CHAR_T,CHAR_T,CHAR_O,CHAR_N,CHAR_SPACE,CHAR_M,CHAR_O,CHAR_D,CHAR_E,EOS};
+static const u8 gText_Frame[] = {CHAR_F,CHAR_R,CHAR_A,CHAR_M,CHAR_E,EOS};
+static const u8 gText_TextSpeedSlow[] = {CHAR_S,CHAR_L,CHAR_O,CHAR_W,EOS};
+static const u8 gText_TextSpeedMid[] = {CHAR_M,CHAR_I,CHAR_D,EOS};
+static const u8 gText_TextSpeedFast[] = {CHAR_F,CHAR_A,CHAR_S,CHAR_T,EOS};
+static const u8 gText_BattleSceneOn[] = {CHAR_O,CHAR_N,EOS};
+static const u8 gText_BattleSceneOff[] = {CHAR_O,CHAR_F,CHAR_F,EOS};
+static const u8 gText_BattleStyleShift[] = {CHAR_S,CHAR_H,CHAR_I,CHAR_F,CHAR_T,EOS};
+static const u8 gText_BattleStyleSet[] = {CHAR_S,CHAR_E,CHAR_T,EOS};
+static const u8 gText_SoundMono[] = {CHAR_M,CHAR_O,CHAR_N,CHAR_O,EOS};
+static const u8 gText_SoundStereo[] = {CHAR_S,CHAR_T,CHAR_E,CHAR_R,CHAR_E,CHAR_O,EOS};
+static const u8 gText_FrameType[] = {CHAR_T,CHAR_Y,CHAR_P,CHAR_E,EOS};
+static const u8 gText_ButtonTypeNormal[] = {CHAR_N,CHAR_O,CHAR_R,CHAR_M,CHAR_A,CHAR_L,EOS};
+static const u8 gText_ButtonTypeLR[] = {CHAR_L,CHAR_R,EOS};
+static const u8 gText_ButtonTypeLEqualsA[] = {CHAR_L,CHAR_EQUALS,CHAR_A,EOS};
+#endif
 
 /* start_menu.c's MENU_ACTION_* (the enum is private to that file). */
 enum { START_POKEDEX, START_POKEMON, START_BAG, START_POKENAV, START_NONE = 0xFF };
@@ -291,6 +321,7 @@ static void DrawTypeIcon(u8 type, int x, int y);
 /* Resources                                                                */
 /* ------------------------------------------------------------------------ */
 
+#ifndef PORT_EXPANSION
 static void *ReadRomfs(const char *path, u32 *outSize)
 {
     char full[128];
@@ -350,6 +381,7 @@ static bool8 PalFile(const char *path, Pal *dst, int count, bool8 compressed)
     free(raw);
     return TRUE;
 }
+#endif /* !PORT_EXPANSION */
 
 /* An uncompressed game palette; the pointer may be an asset stub. */
 static void PalSymbol(const void *src, Pal *dst, int count)
@@ -359,6 +391,73 @@ static void PalSymbol(const void *src, Pal *dst, int count)
     if (res)
         ToPals(dst, res, count);
 }
+
+#ifdef PORT_EXPANSION
+/*
+ * The expansion declares its graphics with INCGFX_*: RomFS holds a generated
+ * file, compressed in one of the game's own header formats (.smol, .smolTM,
+ * .8bpp.smol) or left raw (.4bpp, .gbapal). A symbol stub is resolved through
+ * Port_ResolveAssetPointer; a file the game keeps static is read by its
+ * generated path under build/assets/. DecompressDataWithHeaderVram handles
+ * every compressed form and GetDecompressedDataSize gives its output size.
+ */
+static void *DecompData(const void *packed, u32 *outSize)
+{
+    u32 size = GetDecompressedDataSize((const u32 *)packed);
+    void *dst;
+
+    if (size == 0 || size > 0x100000)
+        return NULL;
+    dst = malloc(size);
+    if (!dst)
+        return NULL;
+    DecompressDataWithHeaderVram((const u32 *)packed, dst);
+    if (outSize)
+        *outSize = size;
+    return dst;
+}
+
+static void *DecompSymbol(const void *src, u32 *outSize)
+{
+    const void *res = src ? Port_ResolveAssetPointer(src) : NULL;
+
+    return res ? DecompData(res, outSize) : NULL;
+}
+
+/* A generated file, by its path under the RomFS (build/assets/...). */
+static void *ReadDataPath(const char *path, u32 *outSize)
+{
+    void *data = CtrData_Load(path, outSize);
+
+    if (!data)
+        CtrLog_Write(CTR_LOG_ERROR, "bottom: %s missing", path);
+    return data;
+}
+
+static void *DecompPath(const char *path, u32 *outSize)
+{
+    void *packed = ReadDataPath(path, NULL);
+    void *data = packed ? DecompData(packed, outSize) : NULL;
+
+    free(packed);
+    return data;
+}
+
+/* An uncompressed generated palette file, read raw. */
+static bool8 PalPath(const char *path, Pal *dst, int count)
+{
+    u32 size = 0;
+    u16 *raw = ReadDataPath(path, &size);
+
+    if (!raw)
+        return FALSE;
+    if ((int)(size / 32) < count)
+        count = size / 32;
+    ToPals(dst, raw, count);
+    free(raw);
+    return TRUE;
+}
+#endif
 
 /* The screens of the button column, top to bottom. */
 enum { SCR_MAP, SCR_POKEMON, SCR_BAG, SCR_CARD, SCR_POKEDEX, SCR_POKENAV, SCR_SAVE, SCR_OPTION, SCR_COUNT };
@@ -430,6 +529,11 @@ static struct
 
 static void LoadItemIcon(Icon *icon, const void *tiles, const void *pal)
 {
+#ifdef PORT_EXPANSION
+    icon->tiles = DecompSymbol(tiles, NULL);
+    icon->size = 3;
+    PalSymbol(pal, &icon->pal, 1);
+#else
     u16 *raw = Unlz(pal, NULL);
 
     icon->tiles = Unlz(tiles, NULL);
@@ -439,11 +543,28 @@ static void LoadItemIcon(Icon *icon, const void *tiles, const void *pal)
         ToPals(&icon->pal, raw, 1);
         free(raw);
     }
+#endif
 }
 
 /* Both players' trainer picture and bag, so nothing is decoded in a frame. */
 static void LoadGenderResources(void)
 {
+#ifdef PORT_EXPANSION
+    for (u8 gender = MALE; gender <= FEMALE; ++gender)
+    {
+        u16 pic = gFacilityClassToPicIndex[gender == FEMALE ? FACILITY_CLASS_MAY : FACILITY_CLASS_BRENDAN];
+        u32 size = 0;
+        u8 *all = DecompSymbol(gender == FEMALE ? gBagFemaleTiles : gBagMaleTiles, &size);
+
+        PalSymbol(GetTrainerFrontPicPalette(pic), &sRes.trainerPicPal[gender], 1);
+        sRes.trainerPic[gender] = DecompSymbol(GetTrainerFrontPicData(pic), NULL);
+        /* Only the first of the six frames, the closed bag, is shown. */
+        if (all && size >= 64 * 32 && (sRes.bagTiles[gender] = malloc(64 * 32)) != NULL)
+            memcpy(sRes.bagTiles[gender], all, 64 * 32);
+        free(all);
+    }
+    PalSymbol(gBagPalette, &sRes.bagPal, 1);
+#else
     for (u8 gender = MALE; gender <= FEMALE; ++gender)
     {
         u16 pic = gFacilityClassToPicIndex[gender == FEMALE ? FACILITY_CLASS_MAY : FACILITY_CLASS_BRENDAN];
@@ -470,18 +591,46 @@ static void LoadGenderResources(void)
             free(pal);
         }
     }
+#endif
 }
 
 static void LoadResources(void)
 {
+#ifndef PORT_EXPANSION
     static const char *const cardPals[5] = {
         "trainer_card/green.gbapal", "trainer_card/bronze.gbapal", "trainer_card/copper.gbapal",
         "trainer_card/silver.gbapal", "trainer_card/gold.gbapal",
     };
+#endif
     u32 size;
+
+#ifdef PORT_EXPANSION
+    /* The game's .smol decompressor allocates from the game heap, which
+     * AgbMain only initializes after this runs. Set it up first; AgbMain
+     * re-initializes it once it starts. */
+    if (HeapHead() == NULL)
+        InitHeap(gHeap, HEAP_SIZE);
+#endif
 
     PalSymbol(GetOverworldTextboxPalettePtr(), &sRes.text, 1);
 
+#ifdef PORT_EXPANSION
+    sRes.partyTiles = DecompSymbol(gPartyMenuBg_Gfx, &size);
+    sRes.partyTileCount = size / 32;
+    {
+        const u16 *raw = Port_ResolveAssetPointer(gPartyMenuBg_Pal);
+        if (raw)
+            memcpy(sRes.partyRaw, raw, sizeof(sRes.partyRaw));
+        ToPals(sRes.partyPal, sRes.partyRaw, 11);
+    }
+    sRes.slotMain = ReadDataPath("graphics/party_menu/slot_main.bin", NULL);
+    sRes.slotMainNoHp = ReadDataPath("graphics/party_menu/slot_main_no_hp.bin", NULL);
+    sRes.slotWide = ReadDataPath("graphics/party_menu/slot_wide.bin", NULL);
+    sRes.slotWideNoHp = ReadDataPath("graphics/party_menu/slot_wide_no_hp.bin", NULL);
+    sRes.slotWideEmpty = ReadDataPath("graphics/party_menu/slot_wide_empty.bin", NULL);
+    sRes.ballTiles = DecompSymbol(gPartyMenuPokeballSmall_Gfx, NULL);
+    PalSymbol(gPartyMenuPokeball_Pal, &sRes.ballPal, 1);
+#else
     sRes.partyTiles = UnlzFile("party_menu/bg.4bpp.lz", &size);
     sRes.partyTileCount = size / 32;
     {
@@ -500,10 +649,17 @@ static void LoadResources(void)
     sRes.slotWideEmpty = ReadRomfs("party_menu/slot_wide_empty.bin", NULL);
     sRes.ballTiles = UnlzFile("party_menu/pokeball_small.4bpp.lz", NULL);
     PalFile("party_menu/pokeball.gbapal.lz", &sRes.ballPal, 1, TRUE);
+#endif
 
+#ifdef PORT_EXPANSION
+    sRes.boxTiles = DecompSymbol(gBattleTextboxTiles, &size);
+    sRes.boxTileCount = size / 32;
+    PalSymbol(gBattleTextboxPalette, sRes.boxPal, 2);
+#else
     sRes.boxTiles = UnlzFile("battle_interface/textbox.4bpp.lz", &size);
     sRes.boxTileCount = size / 32;
     PalFile("battle_interface/textbox.gbapal.lz", sRes.boxPal, 2, TRUE);
+#endif
     DarkPal(&sRes.boxPalDark[0], &sRes.boxPal[0]);
     DarkPal(&sRes.boxPalDark[1], &sRes.boxPal[1]);
 
@@ -513,19 +669,56 @@ static void LoadResources(void)
     LoadItemIcon(&sRes.column[SCR_BAG], gItemIcon_BerryPouch, gItemIconPalette_BerryPouch);
     LoadItemIcon(&sRes.column[SCR_CARD], gItemIcon_ContestPass, gItemIconPalette_ContestPass);
     LoadItemIcon(&sRes.column[SCR_POKEDEX], gItemIcon_FameChecker, gItemIconPalette_FameChecker);
+#ifdef PORT_EXPANSION
+    LoadItemIcon(&sRes.column[SCR_SAVE], GetItemIconPic(ITEM_LETTER), GetItemIconPalette(ITEM_LETTER));
+#else
     LoadItemIcon(&sRes.column[SCR_SAVE], GetItemIconPicOrPalette(ITEM_LETTER, 0), GetItemIconPicOrPalette(ITEM_LETTER, 1));
+#endif
     LoadItemIcon(&sRes.column[SCR_OPTION], gItemIcon_TeachyTV, gItemIconPalette_TeachyTV);
+#ifdef PORT_EXPANSION
+    sRes.column[SCR_POKENAV].tiles = DecompPath("build/assets/graphics/pokenav/nav_icon.png.4bpp.smol", NULL);
+    sRes.column[SCR_POKENAV].size = 4;
+    PalPath("build/assets/graphics/pokenav/nav_icon.png.gbapal", &sRes.column[SCR_POKENAV].pal, 1);
+#else
     sRes.column[SCR_POKENAV].tiles = UnlzFile("pokenav/nav_icon.4bpp.lz", NULL);
     sRes.column[SCR_POKENAV].size = 4;
     PalFile("pokenav/nav_icon.gbapal", &sRes.column[SCR_POKENAV].pal, 1, FALSE);
+#endif
 
+#ifdef PORT_EXPANSION
+    sRes.typeTiles = DecompSymbol(gMoveTypes_Gfx, NULL);
+    PalSymbol(gMoveTypes_Pal, sRes.typePal, 3);
+    sRes.statusTiles = DecompSymbol(gStatusGfx_Icons, NULL);
+    PalSymbol(gStatusPal_Icons, &sRes.statusPal, 1);
+#else
     sRes.typeTiles = UnlzFile("types/move_types.4bpp.lz", NULL);
     PalFile("types/move_types.gbapal.lz", sRes.typePal, 3, TRUE);
     sRes.statusTiles = UnlzFile("interface/status_icons.4bpp.lz", NULL);
     PalFile("interface/status_icons.gbapal.lz", &sRes.statusPal, 1, TRUE);
+#endif
     for (int i = 0; i < 3; ++i)
         PalSymbol(gMonIconPaletteTable[i].data, &sRes.monIconPal[i], 1);
 
+#ifdef PORT_EXPANSION
+    sRes.mapTiles = DecompPath("build/assets/graphics/pokenav/region_map/map.png_num_tiles_233__Wnum_tiles.8bpp.smol", &size);
+    sRes.mapTileCount = size / 64;
+    sRes.mapMap = DecompPath("build/assets/graphics/pokenav/region_map/map.bin.smolTM", NULL);
+    {
+        u16 *raw = ReadDataPath("build/assets/graphics/pokenav/region_map/map.pal.gbapal", &size);
+        if (raw)
+        {
+            for (u32 i = 0; i < 32 && i < size / 2; ++i)
+                sRes.mapPal[i] = Rgb565(raw[i]);
+            free(raw);
+        }
+    }
+    sRes.playerIcon[MALE] = ReadDataPath("build/assets/graphics/pokenav/region_map/brendan_icon.png.4bpp", NULL);
+    sRes.playerIcon[FEMALE] = ReadDataPath("build/assets/graphics/pokenav/region_map/may_icon.png.4bpp", NULL);
+    PalPath("build/assets/graphics/pokenav/region_map/brendan_icon.png.gbapal", &sRes.playerIconPal[MALE], 1);
+    PalPath("build/assets/graphics/pokenav/region_map/may_icon.png.gbapal", &sRes.playerIconPal[FEMALE], 1);
+    sRes.cursorTiles = DecompPath("build/assets/graphics/pokenav/region_map/cursor_small.png.4bpp.smol", NULL);
+    PalPath("build/assets/graphics/pokenav/region_map/cursor.pal.gbapal", &sRes.cursorPal, 1);
+#else
     sRes.mapTiles = UnlzFile("pokenav/region_map/map.8bpp.lz", &size);
     sRes.mapTileCount = size / 64;
     sRes.mapMap = UnlzFile("pokenav/region_map/map.bin.lz", NULL);
@@ -544,7 +737,23 @@ static void LoadResources(void)
     PalFile("pokenav/region_map/may_icon.gbapal", &sRes.playerIconPal[FEMALE], 1, FALSE);
     sRes.cursorTiles = UnlzFile("pokenav/region_map/cursor_small.4bpp.lz", NULL);
     PalFile("pokenav/region_map/cursor.gbapal", &sRes.cursorPal, 1, FALSE);
+#endif
 
+#ifdef PORT_EXPANSION
+    sRes.cardTiles = DecompSymbol(gHoennTrainerCard_Gfx, &size);
+    sRes.cardTileCount = size / 32;
+    sRes.cardFront = DecompSymbol(gHoennTrainerCardFront_Tilemap, NULL);
+    sRes.cardBg = DecompSymbol(gHoennTrainerCardBg_Tilemap, NULL);
+    PalSymbol(gHoennTrainerCardGreen_Pal, sRes.cardPal[0], 3);
+    PalPath("build/assets/graphics/trainer_card/bronze.pal.gbapal", sRes.cardPal[1], 3);
+    PalPath("build/assets/graphics/trainer_card/copper.pal.gbapal", sRes.cardPal[2], 3);
+    PalPath("build/assets/graphics/trainer_card/silver.pal.gbapal", sRes.cardPal[3], 3);
+    PalPath("build/assets/graphics/trainer_card/gold.pal.gbapal", sRes.cardPal[4], 3);
+    PalPath("build/assets/graphics/trainer_card/female_bg.pal.gbapal", &sRes.cardFemaleBg, 1);
+    PalPath("build/assets/graphics/trainer_card/badges.png.gbapal", &sRes.badgePal, 1);
+    PalPath("build/assets/graphics/trainer_card/star.pal.gbapal", &sRes.starPal, 1);
+    sRes.badgeTiles = DecompPath("build/assets/graphics/trainer_card/badges.png.4bpp.smol", NULL);
+#else
     sRes.cardTiles = UnlzFile("trainer_card/tiles.4bpp.lz", &size);
     sRes.cardTileCount = size / 32;
     sRes.cardFront = UnlzFile("trainer_card/front.bin.lz", NULL);
@@ -555,6 +764,7 @@ static void LoadResources(void)
     PalFile("trainer_card/badges.gbapal", &sRes.badgePal, 1, FALSE);
     PalFile("trainer_card/star.gbapal", &sRes.starPal, 1, FALSE);
     sRes.badgeTiles = UnlzFile("trainer_card/badges.4bpp.lz", NULL);
+#endif
 
     LoadGenderResources();
 
@@ -602,7 +812,11 @@ static const u8 *MonIcon(u16 iconSpecies, bool8 deoxysForm)
     if (iconSpecies >= SPECIES_EGG + 28 || iconSpecies == SPECIES_NONE || !sIconBudget)
         return NULL;
     sIconBudget = FALSE;
+#ifdef PORT_EXPANSION
+    src = Port_ResolveAssetPointer(gSpeciesInfo[iconSpecies].iconSprite);
+#else
     src = Port_ResolveAssetPointer(gMonIconTable[iconSpecies]);
+#endif
     if (!src)
         return NULL;
     /* Deoxys keeps its alternate form in the same file, 0x400 in. */
@@ -628,7 +842,9 @@ static int ItemIcon(u16 item)
     int victim = 0;
     u32 size = 0;
     u8 *tiles;
+#ifndef PORT_EXPANSION
     u16 *pal;
+#endif
 
     for (int i = 0; i < ITEM_ICON_SLOTS; ++i)
     {
@@ -643,6 +859,16 @@ static int ItemIcon(u16 item)
     if (!sIconBudget)
         return -1;
     sIconBudget = FALSE;
+#ifdef PORT_EXPANSION
+    tiles = DecompSymbol(GetItemIconPic(item), &size);
+    sItemIcons[victim].valid = tiles && size >= sizeof(sItemIcons[victim].tiles);
+    if (sItemIcons[victim].valid)
+    {
+        memcpy(sItemIcons[victim].tiles, tiles, sizeof(sItemIcons[victim].tiles));
+        PalSymbol(GetItemIconPalette(item), &sItemIcons[victim].pal, 1);
+    }
+    free(tiles);
+#else
     tiles = Unlz(GetItemIconPicOrPalette(item, 0), &size);
     pal = Unlz(GetItemIconPicOrPalette(item, 1), NULL);
     sItemIcons[victim].valid = tiles && pal && size >= sizeof(sItemIcons[victim].tiles);
@@ -653,6 +879,7 @@ static int ItemIcon(u16 item)
     }
     free(tiles);
     free(pal);
+#endif
     sItemIcons[victim].item = item;
     sItemIcons[victim].loaded = TRUE;
     sItemIcons[victim].age = ++sIconClock;
@@ -682,7 +909,9 @@ static int FrontPic(u16 species)
     int victim = sPics[0].age <= sPics[1].age ? 0 : 1;
     u32 size = 0;
     u8 *tiles;
+#ifndef PORT_EXPANSION
     u16 *pal;
+#endif
 
     for (int i = 0; i < 2; ++i)
         if (sPics[i].species == species && species)
@@ -693,6 +922,16 @@ static int FrontPic(u16 species)
     if (!sIconBudget || species == SPECIES_NONE || species >= NUM_SPECIES)
         return -1;
     sIconBudget = FALSE;
+#ifdef PORT_EXPANSION
+    tiles = DecompSymbol(gSpeciesInfo[species].frontPic, &size);
+    sPics[victim].valid = tiles && size >= sizeof(sPics[victim].tiles);
+    if (sPics[victim].valid)
+    {
+        memcpy(sPics[victim].tiles, tiles, sizeof(sPics[victim].tiles));
+        PalSymbol(gSpeciesInfo[species].palette, &sPics[victim].pal, 1);
+    }
+    free(tiles);
+#else
     tiles = Unlz(gMonFrontPicTable[species].data, &size);
     pal = Unlz(gMonPaletteTable[species].data, NULL);
     sPics[victim].valid = tiles && pal && size >= sizeof(sPics[victim].tiles);
@@ -703,6 +942,7 @@ static int FrontPic(u16 species)
     }
     free(tiles);
     free(pal);
+#endif
     sPics[victim].species = species;
     sPics[victim].age = ++sIconClock;
     return sPics[victim].valid ? victim : -1;
@@ -895,6 +1135,52 @@ static const u8 *Ascii(const char *text)
     }
     out[n] = EOS;
     return out;
+}
+
+/* The expansion replaces the name tables with accessors. */
+static const u8 *SpeciesName(u16 species)
+{
+#ifdef PORT_EXPANSION
+    return GetSpeciesName(species);
+#else
+    return gSpeciesNames[species];
+#endif
+}
+
+static u8 MoveType(u16 move)
+{
+#ifdef PORT_EXPANSION
+    return gMovesInfo[move].type;
+#else
+    return gBattleMoves[move].type;
+#endif
+}
+
+static const u8 *MoveName(u16 move)
+{
+#ifdef PORT_EXPANSION
+    return GetMoveName(move);
+#else
+    return gMoveNames[move];
+#endif
+}
+
+static const u8 *NatureName(u8 nature)
+{
+#ifdef PORT_EXPANSION
+    return gNaturesInfo[nature].name;
+#else
+    return gNatureNamePointers[nature];
+#endif
+}
+
+static const u8 *AbilityName(u8 ability)
+{
+#ifdef PORT_EXPANSION
+    return gAbilitiesInfo[ability].name;
+#else
+    return gAbilityNames[ability];
+#endif
 }
 
 static const u8 *Number(u32 value, int digits, enum StringConvertMode mode)
@@ -1227,7 +1513,11 @@ static void IconRect(const AnimIcon *icon, int *x0, int *y0, int *x1, int *y1)
 static void DrawIconFrame(const AnimIcon *icon)
 {
     const u8 *tiles = MonIcon(icon->iconSpecies, icon->deoxys);
+#ifdef PORT_EXPANSION
+    u8 pal = GetMonIconPaletteIndexFromSpecies(icon->iconSpecies);
+#else
     u8 pal = gMonIconPaletteIndices[icon->iconSpecies];
+#endif
     int ox = sOX;
 
     sOX = 0;
@@ -1436,7 +1726,11 @@ static void FastForward(void)
  */
 bool8 CtrBattleMenu_Active(void)
 {
+#ifdef PORT_EXPANSION
+    return sRes.ready && !(gBattleTypeFlags & (BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED | BATTLE_TYPE_CATCH_TUTORIAL));
+#else
     return sRes.ready && !(gBattleTypeFlags & (BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED | BATTLE_TYPE_WALLY_TUTORIAL));
+#endif
 }
 
 void CtrBattleMenu_Begin(void)
@@ -1464,7 +1758,9 @@ static u8 TakeBattleTap(u8 kind)
 
     sBattleTap = HIT_NONE;
     sAsk.kind = kind;
+#ifndef PORT_EXPANSION
     sAsk.battler = gActiveBattler;
+#endif
     return tap;
 }
 
@@ -1472,6 +1768,10 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari)
 {
     u8 tap = TakeBattleTap(ASK_ACTION), next = *cursor;
     u16 dpad = gMain.newKeys & DPAD_ANY;
+#ifdef PORT_EXPANSION
+    /* The controller hands us &gActionSelectionCursor[battler]. */
+    sAsk.battler = cursor - gActionSelectionCursor;
+#endif
 
     /* FIGHT on top; BAG, POKéMON and RUN in a row under it. */
     gMain.newKeys &= ~DPAD_ANY;
@@ -1503,6 +1803,10 @@ void CtrBattleMenu_MoveInput(u8 *cursor, const u16 *moves)
     u8 tap = TakeBattleTap(ASK_MOVE), next = *cursor, count = 0;
     u16 dpad = gMain.newKeys & DPAD_ANY;
     bool8 cancel = sMoveCancel;
+#ifdef PORT_EXPANSION
+    /* The controller hands us &gMoveSelectionCursor[battler]. */
+    sAsk.battler = cursor - gMoveSelectionCursor;
+#endif
 
     for (int i = 0; i < MAX_MON_MOVES; ++i)
         if (moves[i] != MOVE_NONE)
@@ -1557,6 +1861,10 @@ void CtrBattleMenu_TargetInput(void)
 {
     u8 tap = TakeBattleTap(ASK_TARGET);
 
+#ifdef PORT_EXPANSION
+    /* Target input follows move input for the same battler. */
+    sAsk.battler = sAsked.battler;
+#endif
     if (tap == HIT_TARGET_LEFT) gMain.newKeys |= DPAD_LEFT;
     else if (tap == HIT_TARGET_RIGHT) gMain.newKeys |= DPAD_RIGHT;
     else if (tap == HIT_TARGET_OK) gMain.newKeys |= A_BUTTON;
@@ -1587,7 +1895,7 @@ static void SnapshotMon(MonView *view, struct Pokemon *mon)
     /* The party menu leaves the symbol off a Nidoran still named after its
      * species: the name already says it. */
     if ((species == SPECIES_NIDORAN_M || species == SPECIES_NIDORAN_F)
-     && StringCompare(view->nick, gSpeciesNames[species]) == 0)
+     && StringCompare(view->nick, SpeciesName(species)) == 0)
         view->gender = MON_GENDERLESS;
 }
 
@@ -1712,7 +2020,11 @@ static void SnapshotBag(ViewState *s)
     if (sBagTapped >= count)
         sBagTapped = -1;
     s->pocket = sBagPocket;
+#ifdef PORT_EXPANSION
+    s->keyPocket = sBagPocket == POCKET_KEY_ITEMS;
+#else
     s->keyPocket = sBagPocket == KEYITEMS_POCKET;
+#endif
     s->bagCount = count;
     s->bagScroll = sBagScroll;
     s->bagCursor = sBagTapped;
@@ -1721,11 +2033,20 @@ static void SnapshotBag(ViewState *s)
         u16 i = sBagScroll + r;
         if (i >= count)
             break;
+#ifdef PORT_EXPANSION
+        s->items[r] = GetBagItemId(sBagPocket, i);
+        s->qty[r] = GetBagItemQuantity(sBagPocket, i);
+#else
         s->items[r] = BagGetItemIdByPocketPosition(sBagPocket + 1, i);
         s->qty[r] = BagGetQuantityByPocketPosition(sBagPocket + 1, i);
+#endif
     }
     if (sBagTapped >= 0)
+#ifdef PORT_EXPANSION
+        s->descItem = GetBagItemId(sBagPocket, sBagTapped);
+#else
         s->descItem = BagGetItemIdByPocketPosition(sBagPocket + 1, sBagTapped);
+#endif
 }
 
 static void SnapshotCard(ViewState *s)
@@ -1801,7 +2122,11 @@ static void SnapshotBattler(BattlerView *v, u8 battler)
 {
     struct Pokemon *mon;
 
+#ifdef PORT_EXPANSION
+    if (battler >= gBattlersCount || (gAbsentBattlerFlags & (1u << battler)))
+#else
     if (battler >= gBattlersCount || (gAbsentBattlerFlags & gBitTable[battler]))
+#endif
         return;
     /* Shown once the game shows its healthbox, so nothing is revealed early. */
     if (gHealthboxSpriteIds[battler] >= MAX_SPRITES || gSprites[gHealthboxSpriteIds[battler]].invisible
@@ -1992,7 +2317,11 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
         SnapshotBattle(s);
         s->battler = b;
         s->cursor = sMoveCancel ? MAX_MON_MOVES : gMoveSelectionCursor[b];
+#ifdef PORT_EXPANSION
+        memcpy(&s->moves4, &gBattleResources->bufferA[b][4], sizeof(s->moves4));
+#else
         memcpy(&s->moves4, &gBattleBufferA[b][4], sizeof(s->moves4));
+#endif
         break;
     }
     case MODE_BATTLE_INFO:
@@ -2308,7 +2637,7 @@ static void DrawSummary(const ViewState *s)
     StringCopy(text, gText_LevelSymbol);
     StringAppend(text, Number(m->level, 3, STR_CONV_MODE_LEFT_ALIGN));
     DrawStrRight(&sNormal, text, 228, 8, TXT_DARK, TXT_LIGHT);
-    DrawStr(&sSmall, gSpeciesNames[m->species], 44, 26, TXT_DARK, TXT_LIGHT);
+    DrawStr(&sSmall, SpeciesName(m->species), 44, 26, TXT_DARK, TXT_LIGHT);
     DrawTypeIcon(s->types[0], 150, 24);
     if (s->types[1] != s->types[0])
         DrawTypeIcon(s->types[1], 186, 24);
@@ -2334,8 +2663,8 @@ static void DrawSummary(const ViewState *s)
         else
             DrawStrRight(&sSmall, Number(s->stats[i], 3, STR_CONV_MODE_LEFT_ALIGN), x + 100, y, TXT_DARK, TXT_LIGHT);
     }
-    DrawStr(&sSmall, gNatureNamePointers[s->nature], 12, 108, TXT_BLUE, TXT_LBLUE);
-    DrawStr(&sSmall, gAbilityNames[s->ability], 124, 108, TXT_BLUE, TXT_LBLUE);
+    DrawStr(&sSmall, NatureName(s->nature), 12, 108, TXT_BLUE, TXT_LBLUE);
+    DrawStr(&sSmall, AbilityName(s->ability), 124, 108, TXT_BLUE, TXT_LBLUE);
 
     /* Moves. */
     DrawBox(BOX_MENU, 0, 136, 30, 10);
@@ -2344,8 +2673,8 @@ static void DrawSummary(const ViewState *s)
         int y = 142 + i * 16;
         if (!s->moves[i])
             continue;
-        DrawTypeIcon(gBattleMoves[s->moves[i]].type, 10, y);
-        DrawStr(&sSmall, gMoveNames[s->moves[i]], 48, y + 1, TXT_DARK, TXT_LIGHT);
+        DrawTypeIcon(MoveType(s->moves[i]), 10, y);
+        DrawStr(&sSmall, MoveName(s->moves[i]), 48, y + 1, TXT_DARK, TXT_LIGHT);
         StringCopy(text, gText_MoveInterfacePP);
         StringAppend(text, Ascii(" "));
         StringAppend(text, Number(s->pp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
@@ -2625,7 +2954,18 @@ static void DrawDex(const ViewState *s)
     if (s->dexDetail)
     {
         u16 species = NationalPokedexNumToSpecies(s->dexDetail);
+#ifdef PORT_EXPANSION
+        u16 dexHeight = gSpeciesInfo[species].height;
+        u16 dexWeight = gSpeciesInfo[species].weight;
+        const u8 *dexCategory = gSpeciesInfo[species].categoryName;
+        const u8 *dexDescription = gSpeciesInfo[species].description;
+#else
         const struct PokedexEntry *entry = &gPokedexEntries[s->dexDetail];
+        u16 dexHeight = entry->height;
+        u16 dexWeight = entry->weight;
+        const u8 *dexCategory = entry->categoryName;
+        const u8 *dexDescription = entry->description;
+#endif
         bool8 caught = GetSetPokedexFlag(s->dexDetail, FLAG_GET_CAUGHT);
         int pic = FrontPic(species);
 
@@ -2636,17 +2976,17 @@ static void DrawDex(const ViewState *s)
         StringAppend(text, Number(s->national ? s->dexDetail : NationalToHoennOrder(s->dexDetail), 3,
                                   STR_CONV_MODE_LEADING_ZEROS));
         DrawStr(&sNormal, text, 88, 12, TXT_DARK, TXT_LIGHT);
-        DrawStr(&sNormal, gSpeciesNames[species], 88, 30, TXT_DARK, TXT_LIGHT);
+        DrawStr(&sNormal, SpeciesName(species), 88, 30, TXT_DARK, TXT_LIGHT);
         DrawTypeIcon(gSpeciesInfo[species].types[0], 88, 50);
         if (gSpeciesInfo[species].types[1] != gSpeciesInfo[species].types[0])
             DrawTypeIcon(gSpeciesInfo[species].types[1], 124, 50);
         if (caught)
         {
-            u32 inches = (entry->height * 10000 / 254 + 50) / 100; /* decimetres to inches */
-            u32 pounds = (entry->weight * 100000 / 4536 + 50) / 100; /* hectograms to 0.1 lbs */
+            u32 inches = (dexHeight * 10000 / 254 + 50) / 100; /* decimetres to inches */
+            u32 pounds = (dexWeight * 100000 / 4536 + 50) / 100; /* hectograms to 0.1 lbs */
             u8 *p;
 
-            DrawStr(&sSmall, entry->categoryName, 88, 70, TXT_DARK, TXT_LIGHT);
+            DrawStr(&sSmall, dexCategory, 88, 70, TXT_DARK, TXT_LIGHT);
             StringCopy(text, Ascii("HT "));
             p = StringAppend(text, Number(inches / 12, 2, STR_CONV_MODE_LEFT_ALIGN));
             p[0] = CHAR_SGL_QUOTE_RIGHT;
@@ -2658,7 +2998,7 @@ static void DrawDex(const ViewState *s)
             StringAppend(text, Ascii(" lbs."));
             DrawStr(&sSmall, text, 150, 82, TXT_DARK, TXT_LIGHT);
             DrawBox(BOX_MESSAGE, 0, 96, 30, 15);
-            DrawStr(&sSmall, entry->description, 18, 106, TXT_WHITE, TXT_DARK);
+            DrawStr(&sSmall, dexDescription, 18, 106, TXT_WHITE, TXT_DARK);
         }
         DrawLabelButton(64, 216, 14, 3, gText_Cancel2, s->pressed == HIT_BACK, TRUE, HIT_BACK);
         return;
@@ -2688,7 +3028,7 @@ static void DrawDex(const ViewState *s)
         StringCopy(text, Ascii("No."));
         StringAppend(text, Number(s->national ? num : s->dexScroll + r + 1, 3, STR_CONV_MODE_LEADING_ZEROS));
         DrawStr(&sSmall, text, 30, y + 6, TXT_DARK, TXT_WHITE);
-        DrawStr(&sNormal, seen ? gSpeciesNames[NationalPokedexNumToSpecies(num)] : Ascii("----------"), 84, y + 4,
+        DrawStr(&sNormal, seen ? SpeciesName(NationalPokedexNumToSpecies(num)) : Ascii("----------"), 84, y + 4,
                 TXT_DARK, TXT_WHITE);
         if (seen)
             AddHit(8, y, 192, 24, HIT_ROW + r);
@@ -2895,7 +3235,7 @@ static void DrawBattleActions(const ViewState *s)
         for (int i = 0, x = 160 - (count * 40 - 8) / 2; i < MAX_MON_MOVES; ++i)
             if (s->moves4.moves[i] != MOVE_NONE)
             {
-                DrawTypeIcon(gBattleMoves[s->moves4.moves[i]].type, x, 104);
+                DrawTypeIcon(MoveType(s->moves4.moves[i]), x, 104);
                 x += 40;
             }
     }
@@ -2930,7 +3270,13 @@ static void DrawBattleMoves(const ViewState *s)
         int x = i & 1 ? 164 : 12, y = i & 2 ? 140 : 64;
         u16 move = s->moves4.moves[i];
         bool8 on = move != MOVE_NONE && (s->cursor == i || s->pressed == HIT_MOVE + i);
+#ifdef PORT_EXPANSION
+        const struct MoveInfo *data = &gMovesInfo[move];
+        u8 curPP = s->moves4.currentPP[i], maxPP = s->moves4.maxPP[i];
+#else
         const struct BattleMove *data = &gBattleMoves[move];
+        u8 curPP = s->moves4.currentPp[i], maxPP = s->moves4.maxPp[i];
+#endif
         u8 text[20];
 
         DrawBoxEx(BOX_MENU, x, y, 18, 9, on);
@@ -2940,14 +3286,14 @@ static void DrawBattleMoves(const ViewState *s)
             continue;
         }
         AddHit(x, y, 144, 72, HIT_MOVE + i);
-        DrawStr(&sNormal, gMoveNames[move], x + 14, y + 9, s->moves4.currentPp[i] ? LABEL_FG(on) : TXT_RED,
-                s->moves4.currentPp[i] ? LABEL_SH(on) : TXT_LRED);
+        DrawStr(&sNormal, MoveName(move), x + 14, y + 9, curPP ? LABEL_FG(on) : TXT_RED,
+                curPP ? LABEL_SH(on) : TXT_LRED);
         DrawTypeIcon(data->type, x + 14, y + 30);
         StringCopy(text, gText_MoveInterfacePP);
         StringAppend(text, Ascii(" "));
-        StringAppend(text, Number(s->moves4.currentPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
+        StringAppend(text, Number(curPP, 2, STR_CONV_MODE_RIGHT_ALIGN));
         StringAppend(text, gText_Slash);
-        StringAppend(text, Number(s->moves4.maxPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
+        StringAppend(text, Number(maxPP, 2, STR_CONV_MODE_RIGHT_ALIGN));
         DrawStrRight(&sSmall, text, x + 130, y + 32, LABEL_FG(on), LABEL_SH(on));
         {
             int tx = DrawStr(&sSmall, Ascii("POW "), x + 14, y + 50, LABEL_FG(on), LABEL_SH(on));
@@ -3708,7 +4054,13 @@ static void OpenSave(void)
 /* A game menu entry: SUMMARY is shown here, the rest runs in the game. */
 static void ChooseMenuEntry(u8 index)
 {
+#ifdef PORT_EXPANSION
+    /* The expansion's party menu uses its own "SUMMARY" compound string. */
+    if (sShown.mode == MODE_PARTY_MENU && index < sShown.menuCount
+     && StringCompare(sShown.menuNames[index], gText_Summary2) == 0)
+#else
     if (sShown.mode == MODE_PARTY_MENU && index < sShown.menuCount && sShown.menuNames[index] == gText_Summary5)
+#endif
     {
         sSummary = gPartyMenu.slotId;
         Press(B_BUTTON); /* close the submenu; the summary is drawn here */

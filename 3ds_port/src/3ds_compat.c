@@ -163,11 +163,21 @@ static struct
     u8 *raw;
     u32 size;
 } sLatinFonts[] = {
+#ifdef PORT_EXPANSION
+    /* The expansion generates its fonts under build/assets/ with the source
+     * name kept; these are the same glyph sets the vanilla names point at. */
+    { gFontSmallNarrowLatinGlyphs, "build/assets/graphics/fonts/latin_small_narrow.png.latfont", NULL, 0 },
+    { gFontSmallLatinGlyphs,       "build/assets/graphics/fonts/latin_small.png.latfont",        NULL, 0 },
+    { gFontNarrowLatinGlyphs,      "build/assets/graphics/fonts/latin_narrow.png.latfont",       NULL, 0 },
+    { gFontShortLatinGlyphs,       "build/assets/graphics/fonts/latin_short.png.latfont",        NULL, 0 },
+    { gFontNormalLatinGlyphs,      "build/assets/graphics/fonts/latin_normal.png.latfont",       NULL, 0 },
+#else
     { gFontSmallNarrowLatinGlyphs, "graphics/fonts/small_narrow.latfont", NULL, 0 },
     { gFontSmallLatinGlyphs,       "graphics/fonts/small.latfont",        NULL, 0 },
     { gFontNarrowLatinGlyphs,      "graphics/fonts/narrow.latfont",       NULL, 0 },
     { gFontShortLatinGlyphs,       "graphics/fonts/short.latfont",        NULL, 0 },
     { gFontNormalLatinGlyphs,      "graphics/fonts/normal.latfont",       NULL, 0 },
+#endif
 };
 
 static bool LoadLatinFont(unsigned index)
@@ -423,3 +433,40 @@ u32 VerifyFlashSector(u16 sectorNum, u8 *src)
 {
     return VerifyFlashSectorNBytes(sectorNum, src, gFlash != NULL ? gFlash->sector.size : 0);
 }
+
+#ifdef PORT_EXPANSION
+/*
+ * The expansion's game tree references a few symbols the vanilla tree either
+ * defined elsewhere or never needed, and excludes the GBA-only mgba print
+ * library (its logs go through the port backend). Keep the link complete; the
+ * ones on debug/assert paths are deliberately inert on the 3DS.
+ */
+bool32 CheckHeap(void) { return TRUE; }
+void ReInitializeEWRAM(void) {}
+
+bool32 MgbaOpen(void) { return TRUE; }
+void MgbaPrintf(s32 level, const char *pBuf, ...) { (void)level; (void)pBuf; }
+void MgbaAssert(const char *pFile, s32 nLine, const char *pExpression, bool32 nStopProgram)
+{
+    (void)nStopProgram;
+    Port_Log_Printf("ASSERT %s:%d %s", pFile != NULL ? pFile : "?", (int)nLine,
+                    pExpression != NULL ? pExpression : "?");
+}
+
+/* Only assertf.c's crash screen calls this, and the port has its own. */
+void BitUnPack(const void *src, void *dest, const void *args)
+{
+    (void)src;
+    (void)dest;
+    (void)args;
+}
+
+/*
+ * expansion's ld_script_modern.ld defines the initial callback and the segment
+ * bounds; the port's linker template has no equivalent, so declare them here.
+ */
+void CB2_InitCopyrightScreenAfterBootup(void);
+void gInitialMainCB2(void) { CB2_InitCopyrightScreenAfterBootup(); }
+char __iwram_end[1];
+u8 __rom_end[1];
+#endif

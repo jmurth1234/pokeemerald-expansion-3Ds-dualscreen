@@ -122,7 +122,17 @@ class RomTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(BuilderError) as ctx:
                 romlib.load_rom(self._write(tmp, bytes(data)))
-            self.assertIn("not an unmodified", ctx.exception.message)
+            self.assertIn("not the one this release was built from", ctx.exception.message)
+
+    def test_recipe_rom_is_accepted(self):
+        # A release's recipe names its own ROM (an expansion build, say); the
+        # builder accepts exactly that SHA instead of only the stock one.
+        data = bytearray(b"\xff" * romlib.ROM_SIZE)
+        data[0xA0:0xB0] = b"POKEMON EMERBPEE"
+        sha1 = hashlib.sha1(bytes(data)).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            rom = romlib.load_rom(self._write(tmp, bytes(data)), sha1)
+            self.assertEqual(rom.sha1, sha1)
 
     def test_zip_must_hold_one_rom(self):
         with tempfile.TemporaryDirectory() as tmp:
