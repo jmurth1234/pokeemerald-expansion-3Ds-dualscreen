@@ -50,6 +50,13 @@ float VoxelBuildings_MaxTop(void);
 bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
                            int *groundMetatile, float *top);
 
+/*
+ * The cell's footprint when the model covers only part of it (a railing's
+ * line): 16 rows, bit x of row z set where its solid stands over that pixel.
+ * NULL for a cell the model covers as a box, or does not cover.
+ */
+const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, int y);
+
 /* Appends every model whose top-left cell lies in [x0,x1) x [y0,y1), with
  * its placement's ground patches. */
 void VoxelBuildings_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,

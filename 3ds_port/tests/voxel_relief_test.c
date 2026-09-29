@@ -27,7 +27,7 @@ const VoxelMapInstance *VoxelWorld_GetInstanceAt(int x, int y)
 int main(int argc, char **argv)
 {
     VoxelMapInstance inst = {0};
-    const int8_t *g;
+    const int16_t *g;
 
     assert(argc == 3);
     inst.layoutId = atoi(argv[1]);

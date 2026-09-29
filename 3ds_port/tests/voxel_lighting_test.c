@@ -16,6 +16,10 @@ static VoxelMapInstance sMaps[2] = {
 /* A modelled building three tiles tall, across the seam of two maps. */
 #define HOUSE_TOP 3.0f
 static bool sHousePresent = true, sTreePresent;
+/* A railing along a row: layout 2's cell (8, 10), world (12, 10), its line
+ * the cell's two southern pixel rows, 0.75 tall. */
+static bool sRailPresent;
+static const uint16_t sRailMask[16] = {[14] = 0xFFFF, [15] = 0xFFFF};
 static int sOffsetX, sOffsetZ;
 
 unsigned VoxelWorld_InstanceCount(void) { return 2; }
@@ -52,11 +56,23 @@ bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
 {
     int lx = x - inst->originX, ly = y - inst->originY;
 
+    if (sRailPresent && inst->layoutId == 2 && lx == 8 && ly == 10)
+    {
+        if (groundMetatile != NULL) *groundMetatile = 1;
+        if (top != NULL) *top = 0.75f;
+        return true;
+    }
     if (!sHousePresent || inst->layoutId != 2 || lx < 0 || lx >= 2 || ly < 4 || ly >= 6)
         return false;
     if (groundMetatile != NULL) *groundMetatile = 1;
     if (top != NULL) *top = HOUSE_TOP;
     return true;
+}
+const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, int y)
+{
+    if (sRailPresent && inst->layoutId == 2 && x - inst->originX == 8 && y - inst->originY == 10)
+        return sRailMask;
+    return NULL;
 }
 /* Raised to disable the ray ceiling, for the equivalence oracle. */
 static float sCeilingOverride;
@@ -274,13 +290,23 @@ int main(void)
             assert(builder.count <= VOXEL_CONTACT_VERTICES && builder.dropped == 0);
         }
 
+    /* A railing casts from its line, not from its cell: the ground just
+     * south-east of the line is in its shadow, the rest of its own cell -
+     * north of the line - in the sun. */
+    sRailPresent = true;
+    VoxelLighting_Reset();
+    assert(VoxelLighting_Sample(12.9f, 0, 11.1f) < 0.8f);
+    assert(VoxelLighting_Sample(12.9f, 0, 10.5f) > 0.9f);
+    sRailPresent = false;
+    VoxelLighting_Reset();
+
     sMaps[1].indoor = true;
     VoxelLighting_Reset();
     assert(VoxelLighting_Sample(3.5f, 0, 3.5f) == 1.0f);
     VoxelBuilder_Init(&builder, storage, VOXEL_CONTACT_VERTICES);
     VoxelLighting_Contact(&builder, 7, 7);
     assert(builder.count == 0);
-    puts("PASS lighting on: sample cache equivalence, ray ceiling, cell skipping, sun, AO, neighbour invalidation, rebase, seams, capacity, live trees, contact clipping, interiors");
+    puts("PASS lighting on: sample cache equivalence, ray ceiling, cell skipping, sun, AO, neighbour invalidation, rebase, seams, capacity, live trees, contact clipping, railing footprints, interiors");
 #else
     assert(builder.count == 6 && builder.dropped == 0);
     for (unsigned i = 0; i < builder.count; ++i) assert(storage[i].shade == 1.0f);

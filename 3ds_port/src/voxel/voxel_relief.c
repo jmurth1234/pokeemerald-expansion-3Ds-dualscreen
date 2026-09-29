@@ -3,11 +3,15 @@
  * scripts/gen_voxel_relief.py.
  *
  * Layout (little endian):
- *   "VXL1", u16 layouts, u16 side (5)
- *   layouts x 12: u16 layout id, u16 cells, u16 width, u16 height (top bit:
- *                 drawn), u32 offset
- *   cells x (2 + 25): u8 x, u8 y, int8 heights[25] (pixels, row major);
- *   a drawn map's cells have 25 more, the depth of each point (pixels)
+ *   "VXL3", u16 layouts, u16 side (5)
+ *   layouts x 14: u16 layout id, u16 cells, u16 width, u16 height (bit 15:
+ *                 drawn; bit 14: heights in units of 2 pixels), u32 offset,
+ *                 s16 base (pixels: the level the whole map stands at)
+ *   cells x (2 + 25): u8 x, u8 y, int8 heights[25] (row major, over the base)
+ *
+ * A point's depth is its height ((u, h, v + h)), so the file does not carry
+ * it. The heights are decoded to pixels at load: a drawn mountain can stand
+ * taller than a signed byte of pixels.
  */
 #include <math.h>
 #include <stdlib.h>
@@ -26,7 +30,8 @@
 #define VOXEL_RELIEF_PATH "voxel/relief.bin"
 #endif
 #define GRID (VOXEL_RELIEF_SIDE * VOXEL_RELIEF_SIDE)
-#define CELL_BYTES(l) (2 + ((l)->drawn ? 2 : 1) * GRID)
+#define CELL_BYTES (2 + GRID)
+#define ROW_BYTES 14
 
 /*
  * Cells are searched, not indexed: every map with a ledge has a few dozen
@@ -36,19 +41,21 @@
 typedef struct
 {
     uint16_t layoutId, width, height, count;
+    int16_t base;          /* pixels */
     bool drawn;            /* the relief is all of this map's terrain */
-    const uint8_t *cells;  /* into sBlob */
+    const uint8_t *cells;  /* into sBlob: x, y and the stored heights */
+    int16_t *heights;      /* GRID per cell, pixels */
     /* A drawn map's surface where it stands, for the sun to be stopped by:
      * its height (pixels) every lattice step of world X and Z, not of the
      * drawing's rows - a point of the drawing lies as far south as it is
      * high, so the table runs SURFACE_SPAN cells past the map's south edge. */
-    int8_t *surface;
+    int8_t *surface;       /* in units of 2 pixels */
     uint16_t surfaceW, surfaceH;
     float top;             /* its highest point, tiles */
 } ReliefLayout;
 
 #define SURFACE_SPAN 6
-static const uint8_t *Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y);
+static int Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y);
 static bool BuildSurface(ReliefLayout *l);
 
 static uint8_t *sBlob;
@@ -79,35 +86,45 @@ bool VoxelRelief_Init(void)
     fseek(file, 0, SEEK_SET);
     sBlob = size > 8 ? malloc((size_t)size) : NULL;
     if (sBlob == NULL || fread(sBlob, 1, (size_t)size, file) != (size_t)size
-     || memcmp(sBlob, "VXL1", 4) != 0 || U16(sBlob + 6) != VOXEL_RELIEF_SIDE)
+     || memcmp(sBlob, "VXL3", 4) != 0 || U16(sBlob + 6) != VOXEL_RELIEF_SIDE)
         goto fail;
     sLayoutCount = U16(sBlob + 4);
-    if (8 + 12u * sLayoutCount > (unsigned long)size)
+    if (8 + (unsigned long)ROW_BYTES * sLayoutCount > (unsigned long)size)
         goto fail;
     sLayouts = calloc(sLayoutCount ? sLayoutCount : 1, sizeof(*sLayouts));
     if (sLayouts == NULL)
         goto fail;
     for (unsigned i = 0; i < sLayoutCount; ++i)
     {
-        const uint8_t *row = sBlob + 8 + 12 * i;
+        const uint8_t *row = sBlob + 8 + ROW_BYTES * i;
         ReliefLayout *l = &sLayouts[i];
         unsigned cells = U16(row + 2);
         uint32_t offset = U32(row + 8);
 
         l->layoutId = (uint16_t)U16(row);
+        l->base = (int16_t)U16(row + 12);
         l->width = (uint16_t)U16(row + 4);
-        l->height = (uint16_t)(U16(row + 6) & 0x7FFF);
+        unsigned unit = (U16(row + 6) & 0x4000) ? 2 : 1;
+
+        l->height = (uint16_t)(U16(row + 6) & 0x3FFF);
         l->drawn = (U16(row + 6) & 0x8000) != 0;
         l->cells = sBlob + offset;
         l->count = (uint16_t)cells;
-        if (offset + (uint32_t)cells * CELL_BYTES(l) > (uint32_t)size)
+        if (offset + (uint32_t)cells * CELL_BYTES > (uint32_t)size)
             goto fail;
         for (unsigned k = 1; k < cells; ++k)
         {
-            const uint8_t *a = l->cells + (k - 1) * CELL_BYTES(l), *c = a + CELL_BYTES(l);
+            const uint8_t *a = l->cells + (k - 1) * CELL_BYTES, *c = a + CELL_BYTES;
             if (a[1] > c[1] || (a[1] == c[1] && a[0] >= c[0]))
                 goto fail;  /* not in row order: the search would miss cells */
         }
+        l->heights = malloc((size_t)(cells ? cells : 1) * GRID * sizeof(int16_t));
+        if (l->heights == NULL)
+            goto fail;
+        for (unsigned k = 0; k < cells; ++k)
+            for (unsigned g = 0; g < GRID; ++g)
+                l->heights[k * GRID + g] =
+                    (int16_t)((int8_t)l->cells[k * CELL_BYTES + 2 + g] * (int)unit);
     }
     fclose(file);
     for (unsigned i = 0; i < sLayoutCount; ++i)
@@ -130,7 +147,10 @@ fail:
 void VoxelRelief_Shutdown(void)
 {
     for (unsigned i = 0; sLayouts != NULL && i < sLayoutCount; ++i)
+    {
         free(sLayouts[i].surface);
+        free(sLayouts[i].heights);
+    }
     free(sLayouts);
     free(sBlob);
     sLayouts = NULL;
@@ -148,47 +168,50 @@ static const ReliefLayout *LayoutOf(const VoxelMapInstance *inst)
     return NULL;
 }
 
-static const uint8_t *Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y);
-
-const int8_t *VoxelRelief_Cell(const VoxelMapInstance *inst, int x, int y)
-{
-    const uint8_t *c = Find(LayoutOf(inst), inst, x, y);
-    return c ? (const int8_t *)(c + 2) : NULL;
-}
-
-const int8_t *VoxelRelief_Depth(const VoxelMapInstance *inst, int x, int y)
+float VoxelRelief_Base(const VoxelMapInstance *inst)
 {
     const ReliefLayout *l = LayoutOf(inst);
-    const uint8_t *c = Find(l, inst, x, y);
-    return c ? (const int8_t *)(c + 2 + (l->drawn ? GRID : 0)) : NULL;
+    return l != NULL ? l->base / 16.0f : 0.0f;
 }
 
-static const uint8_t *Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y)
+const int16_t *VoxelRelief_Cell(const VoxelMapInstance *inst, int x, int y)
+{
+    const ReliefLayout *l = LayoutOf(inst);
+    int k = Find(l, inst, x, y);
+    return k >= 0 ? l->heights + (unsigned)k * GRID : NULL;
+}
+
+const int16_t *VoxelRelief_Depth(const VoxelMapInstance *inst, int x, int y)
+{
+    return VoxelRelief_Cell(inst, x, y);
+}
+
+static int Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y)
 {
     unsigned lo = 0, hi, key;
 
     if (l == NULL)
-        return NULL;
+        return -1;
     x -= inst->originX;
     y -= inst->originY;
     if (x < 0 || y < 0 || x >= l->width || y >= l->height)
-        return NULL;
+        return -1;
     key = ((unsigned)y << 8) | (unsigned)x;
     hi = l->count;
     while (lo < hi)
     {
         unsigned mid = (lo + hi) / 2;
-        const uint8_t *c = l->cells + mid * CELL_BYTES(l);
+        const uint8_t *c = l->cells + mid * CELL_BYTES;
         unsigned at = ((unsigned)c[1] << 8) | c[0];
 
         if (at == key)
-            return c;
+            return (int)mid;
         if (at < key)
             lo = mid + 1;
         else
             hi = mid;
     }
-    return NULL;
+    return -1;
 }
 
 bool VoxelRelief_IsDrawn(const VoxelMapInstance *inst)
@@ -197,7 +220,7 @@ bool VoxelRelief_IsDrawn(const VoxelMapInstance *inst)
     return l != NULL && l->drawn;
 }
 
-bool VoxelRelief_IsSlope(const int8_t *grid)
+bool VoxelRelief_IsSlope(const int16_t *grid)
 {
     for (unsigned i = 1; grid != NULL && i < VOXEL_RELIEF_SIDE * VOXEL_RELIEF_SIDE; ++i)
         if (grid[i] != grid[0])
@@ -207,22 +230,24 @@ bool VoxelRelief_IsSlope(const int8_t *grid)
 
 float VoxelRelief_CellLift(const VoxelMapInstance *inst, int x, int y)
 {
-    const int8_t *g = VoxelRelief_Cell(inst, x, y);
+    const int16_t *g = VoxelRelief_Cell(inst, x, y);
     return g ? g[2 * VOXEL_RELIEF_SIDE + 2] / 16.0f : 0.0f;
 }
 
 float VoxelRelief_CellShift(const VoxelMapInstance *inst, int x, int y)
 {
-    const int8_t *g = VoxelRelief_Depth(inst, x, y);
+    const int16_t *g = VoxelRelief_Depth(inst, x, y);
     return g ? g[2 * VOXEL_RELIEF_SIDE + 2] / 16.0f : 0.0f;
 }
 
-static float Sample(const int8_t *g, float worldX, float worldZ);
+static float Sample(const int16_t *g, float worldX, float worldZ);
 
 float VoxelRelief_LiftAt(float worldX, float worldZ)
 {
     int x = (int)floorf(worldX), y = (int)floorf(worldZ);
-    return Sample(VoxelRelief_Cell(VoxelWorld_GetInstanceAt(x, y), x, y), worldX, worldZ);
+    const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
+
+    return VoxelRelief_Base(inst) + Sample(VoxelRelief_Cell(inst, x, y), worldX, worldZ);
 }
 
 float VoxelRelief_ShiftAt(float worldX, float worldZ)
@@ -231,7 +256,7 @@ float VoxelRelief_ShiftAt(float worldX, float worldZ)
     return Sample(VoxelRelief_Depth(VoxelWorld_GetInstanceAt(x, y), x, y), worldX, worldZ);
 }
 
-static float Sample(const int8_t *g, float worldX, float worldZ)
+static float Sample(const int16_t *g, float worldX, float worldZ)
 {
     int x = (int)floorf(worldX), y = (int)floorf(worldZ);
     float fx, fy, a, b;
@@ -257,7 +282,7 @@ static void Point(const ReliefLayout *l, unsigned i, unsigned j, int *h, int *d)
 {
     const unsigned n = VOXEL_RELIEF_SIDE - 1;
     unsigned x = i / n, y = j / n, a, b;
-    const uint8_t *c;
+    int k;
     VoxelMapInstance inst;
 
     if (x >= l->width) x = l->width - 1u;
@@ -266,9 +291,9 @@ static void Point(const ReliefLayout *l, unsigned i, unsigned j, int *h, int *d)
     b = j - y * n;
     memset(&inst, 0, sizeof(inst));
     inst.layoutId = l->layoutId;
-    c = Find(l, &inst, (int)x, (int)y);
-    *h = c ? (int8_t)c[2 + b * VOXEL_RELIEF_SIDE + a] : 0;
-    *d = c ? (int8_t)c[2 + (l->drawn ? GRID : 0) + b * VOXEL_RELIEF_SIDE + a] : *h;
+    k = Find(l, &inst, (int)x, (int)y);
+    *h = k >= 0 ? l->heights[(unsigned)k * GRID + b * VOXEL_RELIEF_SIDE + a] : 0;
+    *d = *h;
 }
 
 /* Each column of the drawing, walked down its rows, runs south through the
@@ -305,7 +330,7 @@ static bool BuildSurface(ReliefLayout *l)
 
                 if (t < 0.0f) t = 0.0f;
                 v = (int)(h0 + (h1 - h0) * t + 0.5f);
-                l->surface[k * w + i] = (int8_t)v;
+                l->surface[k * w + i] = (int8_t)(v >= 0 ? (v + 1) / 2 : -((1 - v) / 2));
                 if (v > top) top = v;
             }
             h0 = h1;
@@ -320,7 +345,7 @@ static float SurfacePoint(const ReliefLayout *l, int i, int k)
 {
     if (i < 0 || k < 0 || i >= l->surfaceW || k >= l->surfaceH)
         return 0.0f;
-    return l->surface[k * l->surfaceW + i];
+    return 2.0f * l->surface[k * l->surfaceW + i];
 }
 
 float VoxelRelief_SurfaceAt(float worldX, float worldZ)

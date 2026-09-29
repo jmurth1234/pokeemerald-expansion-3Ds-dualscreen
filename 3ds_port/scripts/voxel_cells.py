@@ -125,6 +125,17 @@ class MapEvents:
             for b in m.get("bg_events") or []:
                 if b.get("type") == "sign":
                     self.signs.setdefault(layout, set()).add((b["x"], b["y"]))
+        # A layout a script swaps in (Route 111 once the tower has fallen,
+        # Route 131 with the Sky Pillar, Sootopolis in the legends' battle)
+        # belongs to no map: it has its map's events, the map it is named
+        # after and drawn the size of.
+        for alt, base in alternate_layouts().items():
+            if base in self.outdoor:
+                self.outdoor.add(alt)
+            if base in self.warps:
+                self.warps[alt] = set(self.warps[base])
+            if base in self.signs:
+                self.signs[alt] = set(self.signs[base])
 
 
 _PAIRS = {}
@@ -151,8 +162,10 @@ class Layout:
         self.outdoor = self.layout_id in events.outdoor
         self.warps = sorted(events.warps.get(self.layout_id, ()))
         self.signs = events.signs.get(self.layout_id, set())
+        self.events = events
         self._memo = {}
         self._houses = None
+        self._lamps = None
         self._foliage = {}
         self._treads = {}
         self._covers = {}
@@ -257,16 +270,42 @@ class Layout:
 
     # ── the roles ─────────────────────────────────────────────────────────
 
+    def open_post(self, x, y):
+        """Blocked outdoors and walkable to the west, east and south."""
+        return (self.outdoor and self.blocked(x, y)
+                and not any(self.blocked(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1))))
+
     def is_signpost(self, x, y):
         """A post standing on its own outdoors: blocked, walkable to the west,
         east and south. A sign event is one; so is a post without an event
         (Rustboro's street lamps) when it does not cover the player (a rock or
         a bush drawn over whoever stands behind it is not a post), is not
         foliage or part of a house, and has open ground or a
-        different drawing to its north (a fence's run repeats itself)."""
+        different drawing to its north (a fence's run repeats itself).
+        A sign drawn with a post's metatile (post_metatiles) is one wherever
+        it stands, walkable to its south: Littleroot's house signs stand
+        against the house's wall."""
         if not self.outdoor or not self.blocked(x, y):
             return False
-        if any(self.blocked(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1))):
+        if (not self.blocked(x, y + 1) and not self.off_map(x, y + 1)
+                and post_key(self, self.metatile(x, y)) in post_metatiles(self.events)):
+            return True
+        if self.free_post(x, y):
+            return True
+        # A lamp drawn like the map's free-standing ones is one against a
+        # house's wall too, walkable to its south and on its other side:
+        # Rustboro's lamps beside the Center and the Mart.
+        if (self.blocked(x, y + 1) or self.off_map(x, y + 1)
+                or (self.metatile(x, y), self.metatile(x, y - 1)) not in self.lamps()):
+            return False
+        sides = [(x + dx, y) for dx in (-1, 1) if self.blocked(x + dx, y)]
+        return len(sides) == 1 and sides[0] in self.houses()
+
+    def free_post(self, x, y):
+        """A post open on three sides: a sign event, or a drawing that is
+        neither a cover, foliage nor a house, under open ground or another
+        drawing."""
+        if not self.open_post(x, y):
             return False
         if (x, y) in self.signs:
             return True
@@ -276,6 +315,18 @@ class Layout:
         if self.foliage(m) >= FOLIAGE or (x, y) in self.houses():
             return False
         return not self.blocked(x, y - 1) or self.metatile(x, y - 1) != m
+
+    def lamps(self):
+        """(post, head) metatiles of the posts that stand free with no sign
+        event and a head drawn in the open cell north of them: lamps."""
+        if self._lamps is None:
+            self._lamps = {(self.metatile(x, y), self.metatile(x, y - 1))
+                           for y in range(1, self.h) for x in range(self.w)
+                           if (x, y) not in self.signs and not self.blocked(x, y - 1)
+                           and pair_for(self.primary, self.secondary).layer_pixels(
+                               self.metatile(x, y - 1), 1)
+                           and self.free_post(x, y)}
+        return self._lamps
 
     def is_ledge_junction(self, x, y):
         """A blocked cell where a ledge turns a corner: ledges on two sides
@@ -314,6 +365,52 @@ class Layout:
             role = "shelf"
         self._memo[(x, y)] = role
         return role
+
+
+def post_key(layout, metatile):
+    """A metatile as the tileset it is drawn from names it."""
+    return (layout.primary if metatile < NUM_PRIMARY else layout.secondary, metatile)
+
+
+def post_metatiles(events):
+    """The metatiles signs are drawn with: every sign event's that stands
+    open on three sides somewhere (a town's sign in the middle of a square).
+    The same metatile against a wall is the same sign. Kept on `events`."""
+    if getattr(events, "posts", None) is None:
+        events.posts = set()        # the layouts read below ask it too
+        found = set()
+        with open(os.path.join(ROOT, "data", "layouts", "layouts.json"), encoding="utf-8") as f:
+            entries = json.load(f)["layouts"]
+        for entry in entries:
+            if not entry.get("id") or entry["id"] not in events.signs:
+                continue
+            layout = Layout(entry, events)
+            for (x, y) in layout.signs:
+                if not layout.off_map(x, y) and layout.open_post(x, y):
+                    found.add(post_key(layout, layout.metatile(x, y)))
+        events.posts = found
+    return events.posts
+
+
+def alternate_layouts():
+    """{layout no map uses: the layout of the map it stands in for} - one
+    named after a map's layout and drawn the same size."""
+    maps_dir = os.path.join(ROOT, "data", "maps")
+    used = set()
+    for name in os.listdir(maps_dir):
+        path = os.path.join(maps_dir, name, "map.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                used.add(json.load(f).get("layout"))
+    size = {e["id"]: (e["width"], e["height"]) for e in load_layouts() if e.get("id")}
+    out = {}
+    for lid in size:
+        if lid in used:
+            continue
+        bases = [b for b in used if b in size and lid.startswith(b + "_") and size[b] == size[lid]]
+        if bases:
+            out[lid] = max(bases, key=len)
+    return out
 
 
 def load_layouts():

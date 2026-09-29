@@ -3,7 +3,7 @@
  * scripts/gen_voxel_buildings.py writes the file and documents the models.
  *
  * Layout (little endian):
- *   "VXB5", u16 pages, models, pageModels, placements, heightBytes, 0,
+ *   "VXB6", u16 pages, models, pageModels, placements, heightBytes, masks,
  *   u32 vertices
  *   pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels
  *   models      x 16: u8 w, h; u16 ground; u32 firstVertex, vertexCount, heights
@@ -11,6 +11,10 @@
  *   placements  x 16: u16 layout, pageModel, x, y, ground, extraCount;
  *                     u32 extraFirst (sorted by layout)
  *   heightBytes       one byte per model cell, pixels; 255 = not the model's
+ *   padding to 2, u16 footprint per model cell: the index of its mask, or
+ *                     0xFFFF for a cell cast as a box
+ *   masks x 32        16 u16 rows; bit x of row z: the solid stands over that
+ *                     pixel of the cell (a railing's line, not its cell)
  *   padding to 4, vertices x 24: float x, y, z, u, v, shade (tiles, relative
  *                     to the top-left cell; u, v in pixels of the model's own
  *                     drawing, or of its page for a placement's ground patches)
@@ -67,6 +71,9 @@ static unsigned sPageModelCount;
 static BuildingPlacement *sPlacements;
 static unsigned sPlacementCount;
 static uint8_t *sHeights;
+static uint16_t *sFootprints;   /* one per height byte */
+static uint16_t *sMasks;        /* 16 rows each */
+static unsigned sMaskCount;
 static VoxelVertex *sVertices;
 static unsigned sVertexCount;
 static float sMaxTop;
@@ -157,13 +164,14 @@ bool VoxelBuildings_Init(void)
         return false;
     }
     if (fread(header, 1, sizeof(header), file) != sizeof(header)
-     || memcmp(header, "VXB5", 4) != 0)
+     || memcmp(header, "VXB6", 4) != 0)
         goto done;
     sPageCount = U16(header + 4);
     sModelCount = U16(header + 6);
     sPageModelCount = U16(header + 8);
     sPlacementCount = U16(header + 10);
     sHeightBytes = U16(header + 12);
+    sMaskCount = U16(header + 14);
     sVertexCount = U32(header + 16);
 
     sPages = malloc(sPageCount * sizeof(*sPages) + 1);
@@ -171,8 +179,11 @@ bool VoxelBuildings_Init(void)
     sPageModels = malloc(sPageModelCount * sizeof(*sPageModels) + 1);
     sPlacements = malloc(sPlacementCount * sizeof(*sPlacements) + 1);
     sHeights = malloc(sHeightBytes + 1);
+    sFootprints = malloc(sHeightBytes * sizeof(uint16_t) + 1);
+    sMasks = malloc(sMaskCount * 16 * sizeof(uint16_t) + 1);
     sVertices = malloc(sVertexCount * sizeof(VoxelVertex) + 1);
-    if (!sPages || !sModels || !sPageModels || !sPlacements || !sHeights || !sVertices)
+    if (!sPages || !sModels || !sPageModels || !sPlacements || !sHeights || !sVertices
+     || !sFootprints || !sMasks)
         goto done;
     if (!ReadRows(file, sPageCount, 8, row, TakePage)
      || !ReadRows(file, sModelCount, 16, row, TakeModel)
@@ -181,6 +192,15 @@ bool VoxelBuildings_Init(void)
         goto done;
     if (fread(sHeights, 1, sHeightBytes, file) != sHeightBytes)
         goto done;
+    if ((sHeightBytes & 1) != 0 && fseek(file, 1, SEEK_CUR) != 0)
+        goto done;
+    /* Little-endian u16s, the console's own order. */
+    if (fread(sFootprints, sizeof(uint16_t), sHeightBytes, file) != sHeightBytes
+     || fread(sMasks, 16 * sizeof(uint16_t), sMaskCount, file) != sMaskCount)
+        goto done;
+    for (unsigned i = 0; i < sHeightBytes; ++i)
+        if (sFootprints[i] != 0xFFFF && sFootprints[i] >= sMaskCount)
+            goto done;
     offset = ftell(file);
     if (offset < 0 || fseek(file, (4 - (offset & 3)) & 3, SEEK_CUR) != 0)
         goto done;
@@ -215,12 +235,17 @@ void VoxelBuildings_Shutdown(void)
     free(sPageModels);
     free(sPlacements);
     free(sHeights);
+    free(sFootprints);
+    free(sMasks);
     free(sVertices);
     sPages = NULL;
     sModels = NULL;
     sPageModels = NULL;
     sPlacements = NULL;
     sHeights = NULL;
+    sFootprints = NULL;
+    sMasks = NULL;
+    sMaskCount = 0;
     sVertices = NULL;
     sPageCount = sModelCount = sPageModelCount = sPlacementCount = sVertexCount = 0;
     sLastLayout = -1;
@@ -299,36 +324,59 @@ int VoxelBuildings_PageOf(const VoxelMapInstance *inst)
     return p ? (int)sPageModels[p[0].pageModel].page : -1;
 }
 
-bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
-                           int *groundMetatile, float *top)
+/* The model cell over world cell (x, y): the index of its height byte, or
+ * -1. The first placement that owns the cell answers. */
+static long ModelCell(const VoxelMapInstance *inst, int x, int y, unsigned *placement)
 {
     unsigned count;
     const BuildingPlacement *p = LayoutPlacements(inst, &count);
     int lx, ly;
 
     if (p == NULL)
-        return false;
+        return -1;
     lx = x - inst->originX;
     ly = y - inst->originY;
     for (unsigned i = 0; i < count; ++i)
     {
         const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
         int cx = lx - p[i].x, cy = ly - p[i].y;
-        uint8_t h;
+        unsigned k;
 
         if (cx < 0 || cy < 0 || cx >= m->w || cy >= m->h)
             continue;
         /* A hedge's rectangle holds the house it runs round. */
-        h = sHeights[m->heights + (unsigned)cy * m->w + (unsigned)cx];
-        if (h == 0xFF)
+        k = m->heights + (unsigned)cy * m->w + (unsigned)cx;
+        if (sHeights[k] == 0xFF)
             continue;
-        if (groundMetatile != NULL)
-            *groundMetatile = p[i].ground;
-        if (top != NULL)
-            *top = h / 16.0f;
-        return true;
+        if (placement != NULL)
+            *placement = i;
+        return (long)k;
     }
-    return false;
+    return -1;
+}
+
+bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
+                           int *groundMetatile, float *top)
+{
+    unsigned i, count;
+    long k = ModelCell(inst, x, y, &i);
+
+    if (k < 0)
+        return false;
+    if (groundMetatile != NULL)
+        *groundMetatile = LayoutPlacements(inst, &count)[i].ground;
+    if (top != NULL)
+        *top = sHeights[k] / 16.0f;
+    return true;
+}
+
+const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, int y)
+{
+    long k = ModelCell(inst, x, y, NULL);
+
+    if (k < 0 || sFootprints[k] == 0xFFFF)
+        return NULL;
+    return &sMasks[(unsigned)sFootprints[k] * 16u];
 }
 
 bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst,
@@ -368,27 +416,37 @@ bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst
             unsigned r = cursor->part;
             const VoxelVertex *v = &sVertices[first[r]];
 
-            for (; cursor->vertex + 2 < total[r]; cursor->vertex += 3)
+            /* The ground patches are ground: a quad a cell, lit like the
+             * terrain they lie on, so a shadow falls across them too. The
+             * model keeps the shading it was drawn with. */
+            unsigned step = r == 1 ? 6u : 3u;
+
+            for (; cursor->vertex + step - 1 < total[r]; cursor->vertex += step)
             {
                 uint32_t k = cursor->vertex;
-                VoxelVertex t[3] = { v[k], v[k + 1], v[k + 2] };
+                VoxelVertex t[6];
 
-                if (triangles == 0)
+                if (triangles < step / 3u)
                 {
                     builder->lift = 0.0f;
                     builder->shift = 0.0f;
                     return false;
                 }
-                --triangles;
+                triangles -= step / 3u;
 
-                for (int j = 0; j < 3; ++j)
+                for (unsigned j = 0; j < step; ++j)
                 {
+                    t[j] = v[k + j];
                     t[j].x += wx;
                     t[j].z += wz;
                     t[j].u = (ox[r] + t[j].u) * su;
                     t[j].v = 1.0f - (oy[r] + t[j].v) * sv;
                 }
-                VoxelBuilder_Tri(builder, &t[0], &t[1], &t[2]);
+                /* a patch is written a, b, c, a, c, d */
+                if (step == 6)
+                    VoxelBuilder_Quad(builder, &t[0], &t[1], &t[2], &t[5]);
+                else
+                    VoxelBuilder_Tri(builder, &t[0], &t[1], &t[2]);
             }
         }
         builder->lift = 0.0f;

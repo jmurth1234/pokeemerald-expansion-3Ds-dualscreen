@@ -3,6 +3,7 @@ silhouette, on synthetic cells and on real maps."""
 
 import pathlib
 import sys
+import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -12,8 +13,12 @@ from voxel_sign_mask import cutout_mask, ground_colours, metatile_mask  # noqa: 
 
 class FakeLayout:
     is_signpost = voxel_cells.Layout.is_signpost
+    open_post = voxel_cells.Layout.open_post
+    free_post = voxel_cells.Layout.free_post
+    primary, secondary = "primary", "secondary"
 
-    def __init__(self, blocked, signs, outdoor=True, drawn=None, covering=()):
+    def __init__(self, blocked, signs, outdoor=True, drawn=None, covering=(), posts=()):
+        self.events = types.SimpleNamespace(posts={("primary", m) for m in posts})
         self.w = len(blocked[0])
         self.h = len(blocked)
         self.outdoor = outdoor
@@ -32,6 +37,9 @@ class FakeLayout:
         return 0.0
 
     def houses(self):
+        return set()
+
+    def lamps(self):
         return set()
 
     def off_map(self, x, y):
@@ -62,6 +70,12 @@ def run():
     assert not FakeLayout(blocked, {(1, 1)}, outdoor=False).is_signpost(1, 1)
     blocked[1][0] = True
     assert not FakeLayout(blocked, {(1, 1)}).is_signpost(1, 1)         # a side is closed
+    # ...unless it is drawn as a sign stands elsewhere, open on three sides:
+    # a house's sign against its wall
+    drawn = [[0, 2, 0], [0, 3, 0], [0, 0, 0]]
+    assert FakeLayout(blocked, {(1, 1)}, drawn=drawn, posts={3}).is_signpost(1, 1)
+    blocked[2][1] = True
+    assert not FakeLayout(blocked, {(1, 1)}, drawn=drawn, posts={3}).is_signpost(1, 1)
 
     entry = next(e for e in voxel_cells.load_layouts() if e.get("id") == "LAYOUT_LITTLEROOT_TOWN")
     layout = voxel_cells.Layout(entry, voxel_cells.MapEvents())
@@ -69,6 +83,7 @@ def run():
     signs = [(x, y) for y in range(layout.h) for x in range(layout.w)
              if layout.role_at(x, y) == "signpost"]
     assert signs, "Littleroot Town has signs"
+    assert layout.signs <= set(signs), "every Littleroot sign, the houses' too"
     for x, y in signs:
         rows = metatile_mask(pair, layout, x, y)
         assert any(rows)
@@ -84,6 +99,8 @@ def run():
     lamps = [(x, y) for y in range(rustboro.h) for x in range(rustboro.w)
              if rustboro.role_at(x, y) == "signpost" and (x, y) not in rustboro.signs]
     assert len(lamps) >= 12, lamps
+    # and so are the two against the Center's and the Mart's walls
+    assert {(19, 38), (19, 45)} <= set(lamps), lamps
     print("PASS voxel signpost: sign events, lamps, open sides, silhouettes "
           "(%d real signs, %d Rustboro lamps)" % (len(signs), len(lamps)))
 

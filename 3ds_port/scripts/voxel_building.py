@@ -133,7 +133,7 @@ class LayoutArt:
             out.append(grid)
         return out
 
-    def building_art(self, x0, y0, w, h, ground, cells=None, ground_px=None):
+    def building_art(self, x0, y0, w, h, ground, cells=None, ground_px=None, upper=False):
         """RGBA image of the cells, with every ground pixel transparent.
 
         A bottom-layer 8x8 block that is one of the ground's is ground whole.
@@ -141,7 +141,9 @@ class LayoutArt:
         (a hedge's flank, a fence post) the test goes down to the pixel: with
         `ground_px`, a bottom-layer pixel equal to a ground metatile's pixel at
         the same place in its cell is ground too. `cells` limits the image to
-        the (cx, cy) cells that belong to the object.
+        the (cx, cy) cells that belong to the object. With `upper`, only the
+        upper layer: an object drawn whole on it (a railing) over a bottom
+        layer that is the map's ground, edges and all.
         """
         img = Image.new("RGBA", (w * 16, h * 16), (0, 0, 0, 0))
         px = img.load()
@@ -160,6 +162,8 @@ class LayoutArt:
                         rgb0, _ = low[q][k]
                         if i1:
                             px[X, Y] = rgb1 + (255,)
+                        elif upper:
+                            continue
                         elif not is_ground:
                             if ground_px and any(g[ly][lx] == rgb0 for g in ground_px):
                                 continue
@@ -851,8 +855,24 @@ class Relief:
     """
 
     def __init__(self, name, art, height, side, hull=0, bridge=0, foot=None, solid=False,
-                 back=None, top_tile=None, against=False):
+                 back=None, top_tile=None, against=False, seam=None, flank_tile=None,
+                 seam_x=((), ())):
         self.name, self.art, self.height, self.side = name, art, height, side
+        # A block of a longer run (a railing cut into blocks): `seam` is
+        # (rows, open_s, open_n). The art's rows from `rows` on are the run
+        # going on south, which this block's top covers; the columns in
+        # open_s carry on past them, so no front stands at the seam, and
+        # those in open_n come in from the block north: no back, and a run
+        # no longer than `height` there is the north block's.
+        self.seam = seam
+        # A railing whose run goes down a column is drawn as a line - its
+        # top - and never shows its bars: `flank_tile`, the bars of the same
+        # railing where it runs along a row, dresses its sides, their gaps
+        # kept.
+        self.flank_tile = flank_tile
+        # the rows (in cells) where the block goes on west and east of its
+        # art: a seam, where no flank stands
+        self.seam_x = seam_x
         # A piece of furniture stands on the floor along one line, its foot:
         # with `foot`, every column runs from its first drawn row down to it,
         # so a leaf's tip or a machine's rounded corner stands with the rest
@@ -887,6 +907,8 @@ class Relief:
 
     def runs(self):
         W, H = self.art.size
+        if self.flank_tile is not None:
+            H = self.flank_tile.rect[1]     # the bars' band below is no drawing
         px = self.art.load()
         cols = []
         for u in range(W):
@@ -919,6 +941,11 @@ class Relief:
                     cols[u] = list(left)
         if self.foot is not None:
             cols = [[(runs[0][0], max(self.foot, runs[-1][1]))] if runs else [] for runs in cols]
+        if self.seam is not None:
+            rows, _, open_n = self.seam
+            cols = [[(a, b) for (a, b) in runs if a < rows
+                     and not (u in open_n and a == 0 and b - a <= self.height)]
+                    for u, runs in enumerate(cols)]
         return cols
 
     def emit(self, mesh):
@@ -996,9 +1023,13 @@ class Relief:
                         quad = [(x0, top, z0), (x1, top, z0), (x1, top, z0 + 1), (x0, top, z0 + 1)]
                         mesh.poly([(x, y, z, x, va + (z - z0)) for (x, y, z) in quad],
                                   SHADE_ART, n + ".top~depth")
+                seam_s = (self.seam is not None and u in self.seam[1]
+                          and z1 >= self.seam[0] + H - 1e-6)
+                seam_n = self.seam is not None and u in self.seam[2] and va == 0
                 front = [(x0, -1.0, z1), (x1, -1.0, z1), (x1, top, z1), (x0, top, z1)]
-                mesh.poly([(x, y, z, x, z - y) for (x, y, z) in front], SHADE_ART, n + ".front")
-                if z1 > z0:
+                if not seam_s:
+                    mesh.poly([(x, y, z, x, z - y) for (x, y, z) in front], SHADE_ART, n + ".front")
+                if z1 > z0 and not seam_n:
                     back = [(x1, -1.0, z0), (x0, -1.0, z0), (x0, top, z0), (x1, top, z0)]
                     if self.hull or (self.foot is not None and not self.solid):
                         # a railing's back takes the drawing where it stands,
@@ -1021,6 +1052,20 @@ class Relief:
                 for (a, b, t) in pieces:
                     for (za, zb) in _subtract((a, b), [(c, d) for (c, d, s) in others if s >= t]):
                         x = float(u)
+                        edge = self.seam_x[0] if u == 0 else self.seam_x[1] if u == W else None
+                        if edge and all(r in edge for r in range(int(za) // 16,
+                                                                 int(math.ceil(zb)) // 16 + 1)
+                                        if r * 16 < zb):
+                            continue    # the run goes on into the next block
+                        if self.flank_tile is not None and zb - za >= 16:
+                            if facing > 0:
+                                quad = [(x, -1.0, zb), (x, -1.0, za), (x, t, za), (x, t, zb)]
+                            else:
+                                quad = [(x, -1.0, za), (x, -1.0, zb), (x, t, zb), (x, t, za)]
+                            self._tile(mesh, quad, (x, 0.0), (0.0, 1.0), t,
+                                       SHADE_EAST if facing > 0 else SHADE_WEST, n + ".flank",
+                                       self.flank_tile)
+                            continue
                         if self.hull or (self.foot is not None and not self.solid):
                             # the end of a railing: the drawn column there, projected
                             col = min(max(u - (1 if facing > 0 else 0), 0), W - 1) + 0.5
@@ -1036,9 +1081,9 @@ class Relief:
                             quad = [(x, -1.0, za), (x, -1.0, zb), (x, t, zb), (x, t, za)]
                             self._tile(mesh, quad, (x, za), (0.0, 1.0), t, SHADE_WEST, tag)
 
-    def _tile(self, mesh, quad, origin, sdir, top, shade, tag):
+    def _tile(self, mesh, quad, origin, sdir, top, shade, tag, tile=None):
         """1:1 side tile laid along the face from `origin`, top row at `top`."""
-        u0, v0, u1, v1 = self.side.rect
+        u0, v0, u1, v1 = (tile or self.side).rect
         tile = Tile(u0, v0, u1, v1)
         pts = []
         for (x, y, z) in quad:
@@ -1095,11 +1140,12 @@ class Card:
     above as a flame of leaf tips.)
 
     `art` is the piece's own image; `foot` the row it stands on; the columns
-    it spans are read off the art.
+    it spans are read off the art. `voff`: the rows below the model's drawing
+    where the card's own pixels are, so that it shows nothing else.
     """
 
-    def __init__(self, name, art, foot):
-        self.name, self.art, self.foot = name, art, float(foot)
+    def __init__(self, name, art, foot, voff=0):
+        self.name, self.art, self.foot, self.voff = name, art, float(foot), voff
 
     def emit(self, mesh):
         W, H = self.art.size
@@ -1112,7 +1158,8 @@ class Card:
         v0, f = float(min(rows)), self.foot
         h = f - v0
         front = [(u0, -1.0, f), (u1, -1.0, f), (u1, h, f), (u0, h, f)]
-        mesh.poly([(x, y, z, x, z - y) for (x, y, z) in front], SHADE_ART, self.name + ".card")
+        mesh.poly([(x, y, z, x, z - y + self.voff) for (x, y, z) in front], SHADE_ART,
+                  self.name + ".card")
 
 
 class Facet:

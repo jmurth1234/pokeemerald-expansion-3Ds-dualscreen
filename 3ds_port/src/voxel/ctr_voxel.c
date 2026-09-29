@@ -452,8 +452,10 @@ static struct
 } sStream;
 
 /* Pages that failed to read are not asked for again: retrying one every
- * frame would only log the same error for as long as its map is on screen. */
-static uint64_t sBadPages;
+ * frame would only log the same error for as long as its map is on screen.
+ * One flag a page, for as many pages as buildings.bin can name. */
+#define VOXEL_MAX_PAGES 256
+static bool sBadPages[VOXEL_MAX_PAGES];
 
 /*
  * The pages' block of VRAM, claimed whole at start-up like the meshes' (see
@@ -465,8 +467,8 @@ static uint64_t sBadPages;
 static void *sPageBlock;
 static VoxelArena sPageArena;
 static VoxelArenaPiece sPagePieces[VOXEL_BUILDING_PAGES];
-static uint32_t sPageRetry[64];
-static uint64_t sPageNoRoomLogged;
+static uint32_t sPageRetry[VOXEL_MAX_PAGES];
+static bool sPageNoRoomLogged[VOXEL_MAX_PAGES];
 
 /* A page texture over a piece of the arena. Never C3D_TexDelete'd: that
  * would hand the piece to the console's allocator, which never gave it. */
@@ -576,7 +578,7 @@ static void StreamStart(void)
     s32 priority = 0x30;
 
     memset(&sStream, 0, sizeof(sStream));
-    sBadPages = 0;
+    memset(sBadPages, 0, sizeof(sBadPages));
     sStream.buffer = linearAlloc(VOXEL_PAGE_SLICE * sizeof(uint16_t));
     if (sStream.buffer == NULL)
     {
@@ -626,7 +628,7 @@ static void WantPage(int page)
     BuildingPageSlot *victim = NULL;
     unsigned w, h;
 
-    if (page < 0 || (page < 64 && (((sBadPages >> page) & 1) || sFrame < sPageRetry[page])))
+    if (page < 0 || page >= VOXEL_MAX_PAGES || sBadPages[page] || sFrame < sPageRetry[page])
         return;
     if ((victim = FindPage(page)) != NULL)
     {
@@ -680,13 +682,22 @@ static void WantPage(int page)
         }
         if (drop == NULL)
         {
+            /* A page not needed this frame - the map left behind by a warp -
+             * is droppable in a frame or two: ask again then, not seconds
+             * later, or the new map stands without its buildings meanwhile. */
+            bool soon = false;
+
+            for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
+                if (&sPageSlots[i] != victim && sPageSlots[i].tex.data != NULL
+                 && sPageSlots[i].used != sFrame)
+                    soon = true;
             victim->page = -1;
-            if (page < 64)
+            sPageRetry[page] = sFrame + (soon ? 2u : VOXEL_PAGE_RETRY_FRAMES);
+            if (!soon)
             {
-                sPageRetry[page] = sFrame + VOXEL_PAGE_RETRY_FRAMES;
-                if (!((sPageNoRoomLogged >> page) & 1))
+                if (!sPageNoRoomLogged[page])
                 {
-                    sPageNoRoomLogged |= 1ull << page;
+                    sPageNoRoomLogged[page] = true;
                     ++sStats.errors;
                     CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no room for the %ux%u building page %d "
                                  "(largest gap %lu of %lu KiB); retrying later",
@@ -707,8 +718,8 @@ static void MarkBadPage(int page)
 {
     ++sStats.errors;
     CtrLog_Write(CTR_LOG_ERROR, "VOXEL: building page %d unreadable", page);
-    if (page >= 0 && page < 64)
-        sBadPages |= 1ull << page;
+    if (page >= 0 && page < VOXEL_MAX_PAGES)
+        sBadPages[page] = true;
 }
 
 /* The most recently needed page that is still coming in. */
@@ -965,7 +976,7 @@ bool CtrVoxel_Init(void)
     VoxelArena_Init(&sPageArena, sPageBlock, sPageBlock != NULL ? VOXEL_PAGE_VRAM_BUDGET : 0,
                     128, sPagePieces, VOXEL_BUILDING_PAGES);
     memset(sPageRetry, 0, sizeof(sPageRetry));
-    sPageNoRoomLogged = 0;
+    memset(sPageNoRoomLogged, 0, sizeof(sPageNoRoomLogged));
 
     step = "chunk build scratch";
     sScratch = malloc(VOXEL_CHUNK_SCRATCH * sizeof(VoxelVertex));
@@ -1582,6 +1593,9 @@ static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash
     VoxelBuilder_Init(&sBuilder, sScratch, VOXEL_CHUNK_SCRATCH);
     VoxelBuilder_SetAtlas(&sBuilder, &atlas->map);
     VoxelBuilder_SetOrigin(&sBuilder, site->baseX, site->baseY);
+    /* The whole map stands at its base (voxel_relief.h), the belt round the
+     * world at the base of the map it rings. */
+    sBuilder.base = VoxelRelief_Base(inst);
 #if CTR_VOXEL_LIGHTING
     sBuilder.lighting = !inst->indoor;
     /* The belt keeps the fixed cost of the old one: corner shading only. */
@@ -2397,6 +2411,7 @@ static bool HandleMapChange(int mapGroup, int mapNum, float playerX, float playe
                      -sPreviousOrigins[i].originY);
         return true;
     }
+    VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(playerX + 0.5f, playerZ + 0.5f), 1);
     VoxelCamera_Snap(&sCamera, playerX, playerZ);
     return false;
 }
@@ -2496,6 +2511,7 @@ bool CtrVoxel_Update(void)
     }
     else
     {
+        VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(smoothX + 0.5f, smoothZ + 0.5f), 0);
         VoxelCamera_Update(&sCamera, smoothX, smoothZ);
     }
     /* Recorded after the shift, for the next crossing. */
