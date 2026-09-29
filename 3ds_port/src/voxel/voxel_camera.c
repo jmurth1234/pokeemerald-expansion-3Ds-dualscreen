@@ -23,6 +23,12 @@ void VoxelCamera_Init(VoxelCamera *cam)
     cam->yaw = 0.0f;
     cam->distance = 9.0f;
     cam->fov = 35.0f;
+    cam->ground = 0.0f;
+}
+
+void VoxelCamera_SetGround(VoxelCamera *cam, float ground, int snap)
+{
+    cam->ground = snap ? ground : cam->ground + (ground - cam->ground) * VOXEL_FOLLOW;
 }
 
 /* Places the eye for the current target, pitch, yaw and distance. */
@@ -33,9 +39,9 @@ static void Place(VoxelCamera *cam)
 
     /* The eye sits south of the player (+Z) and above it, looking north. */
     cam->x = cam->targetX + sinf(yawRad) * cam->distance;
-    cam->y = tanf(pitchRad) * cam->distance;
+    cam->y = cam->ground + tanf(pitchRad) * cam->distance;
     cam->z = cam->targetZ + cosf(yawRad) * cam->distance;
-    cam->targetY = 0.0f;
+    cam->targetY = cam->ground;
 }
 
 /* Wider maps are framed from further away, up to a fixed ceiling. The pitch

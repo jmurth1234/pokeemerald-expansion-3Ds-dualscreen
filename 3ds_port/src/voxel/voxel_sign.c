@@ -358,7 +358,7 @@ typedef struct
 static bool ShadowOf(const VoxelMapInstance *inst, int x, int y, SignShadow *s)
 {
     const SignRecord *r;
-    const int8_t *relief;
+    const int16_t *relief;
     bool head;
 
     if (!VoxelSign_IsCell(inst, x, y))

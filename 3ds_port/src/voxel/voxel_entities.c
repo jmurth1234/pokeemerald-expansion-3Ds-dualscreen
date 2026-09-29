@@ -13,6 +13,7 @@
 #include "event_object_movement.h"
 #include "field_player_avatar.h"
 #include "gba/io_reg.h"
+#include "port_platform.h"
 
 #include "3ds_video.h"
 #include "voxel_entities.h"
@@ -50,6 +51,11 @@ typedef struct
     /* Extent last written into the atlas cell, so a shrinking sprite clears
      * exactly what it used to cover instead of the whole 64x64 slot. */
     int drawnWidth, drawnHeight;
+    /* Empty rows under the feet of the standing pose: the art's feet sit this
+     * far up the cell, and the card leaves them out to put them on the
+     * ground (VisibleRows). Measured once per picture table (StandingFootPad). */
+    int footPad;
+    const struct SpriteFrameImage *footPadImages;
 } VoxelSpriteSlot;
 
 static VoxelSpriteSlot sSlots[VOXEL_SPRITE_SLOTS];
@@ -234,6 +240,40 @@ static void DecodeSlot(VoxelSpriteSlot *slot, unsigned index, uint16_t *atlas)
 }
 
 /*
+ * Empty rows under the feet of an object's standing pose: frame 0 of its
+ * picture table, facing south. Not of the frame showing: the art moves the
+ * whole body between frames, a walk's steps a row lower than the standing
+ * pose and a run's standing pose a row higher than its strides, and that
+ * row is the bob of the walk. Standing on the ground, the pose seen most
+ * meets its shadow; every other frame keeps its offset from it, as on the
+ * GBA (VisibleRows).
+ */
+static int StandingFootPad(const struct ObjectEventGraphicsInfo *info)
+{
+    const struct SpriteFrameImage *frame = &info->images[0];
+    int tilesX = info->width / 8, tilesY = info->height / 8;
+    u32 size = Port_GetSpriteFrameSize(frame->data, frame->size);
+    const u8 *tiles = Port_ResolveSpriteFramePointer(frame->data, size, frame->offset);
+
+    if (tiles == NULL || tilesX <= 0 || tilesY <= 0
+     || size < (u32)(tilesX * tilesY) * TILE_SIZE_4BPP)
+        return 0;
+    /* Object event pictures are 4bpp, tiles in rows (1D mapping). Bottom up,
+     * the first row with an opaque pixel is the feet. */
+    for (int y = info->height - 1; y >= 0; --y)
+    {
+        for (int tx = 0; tx < tilesX; ++tx)
+        {
+            const u8 *row = tiles + (u32)((y / 8) * tilesX + tx) * TILE_SIZE_4BPP + (y % 8) * 4;
+
+            if (row[0] | row[1] | row[2] | row[3])
+                return info->height - 1 - y;
+        }
+    }
+    return 0;
+}
+
+/*
  * Brings a slot up to date with its sprite. Returns true if it was re-decoded,
  * which only happens when something the picture depends on actually changed.
  */
@@ -294,18 +334,34 @@ static bool RefreshSlot(unsigned index, const struct Sprite *sprite, uint16_t *a
 
 /* ── Billboards ─────────────────────────────────────────────────────────── */
 
+/*
+ * Rows of the sprite the card shows: all but the standing pose's empty rows
+ * under the feet, so the card ends at the feet and they are on the ground.
+ * Cut off rather than sunk under the ground: a step's feet, a row lower, would
+ * be hidden by the terrain there, and the player's x-ray pass (ctr_voxel.c)
+ * draws exactly what terrain hides.
+ */
+static int VisibleRows(const VoxelSpriteSlot *slot)
+{
+    int pad = slot->footPad < slot->height ? slot->footPad : slot->height - 1;
+
+    return slot->height - pad;
+}
+
 static void EmitBillboard(VoxelBuilder *builder, const VoxelSpriteSlot *slot, unsigned index,
-                          float worldX, float worldZ, float rightX, float rightZ, float shade)
+                          float worldX, float worldZ, float rightX, float rightZ, float stretch,
+                          float shade)
 {
     unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     float u0 = baseX / (float)VOXEL_SPRITE_ATLAS_DIM;
     float u1 = (baseX + slot->width) / (float)VOXEL_SPRITE_ATLAS_DIM;
+    int rows = VisibleRows(slot);
     /* Row 0 in memory is v=1, the convention the whole port uses. */
     float v0 = 1.0f - baseY / (float)VOXEL_SPRITE_ATLAS_DIM;
-    float v1 = 1.0f - (baseY + slot->height) / (float)VOXEL_SPRITE_ATLAS_DIM;
+    float v1 = 1.0f - (baseY + rows) / (float)VOXEL_SPRITE_ATLAS_DIM;
     float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
-    float height = slot->height / VOXEL_PIXELS_PER_TILE;
+    float height = rows / VOXEL_PIXELS_PER_TILE * stretch;
     /* Standing on the centre of its tile, feet on the ground. */
     float cx = worldX + 0.5f, cz = worldZ + 0.5f;
     /* On relief the sprite stands where its cell was lifted to, and rides
@@ -338,16 +394,20 @@ static void EmitBillboard(VoxelBuilder *builder, const VoxelSpriteSlot *slot, un
 #define VOXEL_CAST_SHADOW_LIT 0.70f     /* sample at or below: no sun */
 
 static void EmitCastShadow(VoxelBuilder *shadows, const VoxelSpriteSlot *slot, unsigned index,
-                           float worldX, float worldZ, float rightX, float rightZ, float light)
+                           float worldX, float worldZ, float rightX, float rightZ, float stretch,
+                           float light)
 {
     unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     float u0 = baseX / (float)VOXEL_SPRITE_ATLAS_DIM;
     float u1 = (baseX + slot->width) / (float)VOXEL_SPRITE_ATLAS_DIM;
+    /* The rows the card shows (VisibleRows), from the feet: they meet their
+     * own shadow. */
+    int rows = VisibleRows(slot);
     float v0 = 1.0f - baseY / (float)VOXEL_SPRITE_ATLAS_DIM;
-    float v1 = 1.0f - (baseY + slot->height) / (float)VOXEL_SPRITE_ATLAS_DIM;
+    float v1 = 1.0f - (baseY + rows) / (float)VOXEL_SPRITE_ATLAS_DIM;
     float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
-    float height = slot->height / VOXEL_PIXELS_PER_TILE;
+    float height = rows / VOXEL_PIXELS_PER_TILE * stretch;
     float cx = worldX + 0.5f, cz = worldZ + 0.5f;
     float ax = cx - rightX * halfW, az = cz - rightZ * halfW;
     float bx = cx + rightX * halfW, bz = cz + rightZ * halfW;
@@ -402,7 +462,7 @@ static bool IsReflectiveFootprint(float ax, float az, float bx, float bz, float 
  * as water or ice; the original ground effect merely says water is nearby. */
 static void EmitReflection(VoxelBuilder *reflections, const VoxelSpriteSlot *slot,
                            unsigned index, float worldX, float worldZ,
-                           float rightX, float rightZ)
+                           float rightX, float rightZ, float stretch)
 {
     unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
@@ -411,7 +471,8 @@ static void EmitReflection(VoxelBuilder *reflections, const VoxelSpriteSlot *slo
     float v0 = 1.0f - baseY / (float)VOXEL_SPRITE_ATLAS_DIM;
     float v1 = 1.0f - (baseY + slot->height) / (float)VOXEL_SPRITE_ATLAS_DIM;
     float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
-    float fullLength = slot->height / VOXEL_PIXELS_PER_TILE;
+    float cardLength = slot->height / VOXEL_PIXELS_PER_TILE * stretch;
+    float fullLength = cardLength;
     float length = 0.0f;
     float cx = worldX + 0.5f, nearZ = worldZ + 1.0f;
     float shift = VoxelRelief_ShiftAt(cx, nearZ + 0.5f);
@@ -428,7 +489,7 @@ static void EmitReflection(VoxelBuilder *reflections, const VoxelSpriteSlot *slo
     }
     if (length < 0.25f)
         return;
-    float vFar = v1 + (v0 - v1) * (length / (slot->height / VOXEL_PIXELS_PER_TILE));
+    float vFar = v1 + (v0 - v1) * (length / cardLength);
     VoxelBuilder_Quad(reflections,
         &(VoxelVertex){ax, y, az, u0, v1, 1.0f},
         &(VoxelVertex){bx, y, bz, u1, v1, 1.0f},
@@ -440,9 +501,20 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
                             VoxelBuilder *shadows, VoxelBuilder *reflections)
 {
     /* The billboards turn about the vertical axis to face the camera. With the
-     * default yaw of 0 this is (1,0,0), the same plane the reference uses. */
+     * default yaw of 0 this is (1,0,0), the same plane the reference uses.
+     * The card stands upright and the camera looks down on it, so on screen
+     * its height comes out cos(pitch) short. That is made up half on each
+     * side: the width comes down by sqrt(cos(pitch)) and the height goes up
+     * by as much, so on screen both are sqrt(cos(pitch)) of the sprite's
+     * (0.875 at 40 degrees). The proportions are the sprite's, and so is the
+     * area on screen of the plain card. All of it off the width left the
+     * characters small, all of it on the height big. Still upright, so it
+     * sorts against walls as before. Shadow and reflection are the card's
+     * own, so they take the same size. */
     float yawRad = camera->yaw * (3.14159265358979323846f / 180.0f);
-    float rightX = cosf(yawRad), rightZ = -sinf(yawRad);
+    float narrow = sqrtf(cosf(camera->pitch * (3.14159265358979323846f / 180.0f)));
+    float stretch = 1.0f / narrow;
+    float rightX = cosf(yawRad) * narrow, rightZ = -sinf(yawRad) * narrow;
     unsigned updates = 0;
     sPlayerVertexFirst = -1;
 
@@ -493,6 +565,15 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
             ++updates;
         if (!sSlots[i].valid)
             continue;
+        {
+            const struct ObjectEventGraphicsInfo *info = GetObjectEventGraphicsInfo(obj->graphicsId);
+
+            if (sSlots[i].footPadImages != info->images)
+            {
+                sSlots[i].footPadImages = info->images;
+                sSlots[i].footPad = info->images != NULL ? StandingFootPad(info) : 0;
+            }
+        }
 #if CTR_VOXEL_LIGHTING
         {
             const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt((int)floorf(worldX + 0.5f),
@@ -501,14 +582,15 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
             {
                 shade = VoxelLighting_Sample(worldX + 0.5f, 0.75f, worldZ + 0.5f);
                 if (shadows != NULL)
-                    EmitCastShadow(shadows, &sSlots[i], i, worldX, worldZ, rightX, rightZ, shade);
+                    EmitCastShadow(shadows, &sSlots[i], i, worldX, worldZ, rightX, rightZ,
+                                   stretch, shade);
             }
         }
 #endif
         if (reflections != NULL && obj->hasReflection)
-            EmitReflection(reflections, &sSlots[i], i, worldX, worldZ, rightX, rightZ);
+            EmitReflection(reflections, &sSlots[i], i, worldX, worldZ, rightX, rightZ, stretch);
         unsigned first = builder->count;
-        EmitBillboard(builder, &sSlots[i], i, worldX, worldZ, rightX, rightZ, shade);
+        EmitBillboard(builder, &sSlots[i], i, worldX, worldZ, rightX, rightZ, stretch, shade);
         if (i == gPlayerAvatar.objectEventId && builder->count == first + 6)
             sPlayerVertexFirst = (int)first;
     }

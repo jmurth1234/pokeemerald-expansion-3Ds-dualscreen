@@ -51,6 +51,9 @@ typedef struct
      * (VoxelRelief_Depth). Zero for everything on level ground.
      */
     float lift, shift;
+    /* The base of the map being built (VoxelRelief_Base): everything emitted
+     * is raised by it, straight up. */
+    float base;
     bool lighting; /* opt-in for outdoor chunks and border receivers */
     bool artShaded; /* relief: no face term, the drawing is lit already */
     bool lightingRefine; /* ground subdivision; disabled for the fixed-size belt */

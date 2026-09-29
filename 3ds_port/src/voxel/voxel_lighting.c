@@ -23,11 +23,13 @@
 typedef struct
 {
     int16_t x, z;
-    float top;
+    float top;        /* over the base */
+    float base;       /* the base of the map the cell is on (VoxelRelief_Base) */
     uint32_t generation;
     int8_t crownPart; /* VoxelTree_Part when the cell is a crown, else -1 */
     bool surface;     /* a drawn map's relief: tested as a height field */
     bool sign;        /* a sign or a lamp: tested against its drawing */
+    const uint16_t *mask; /* a model over part of the cell: its footprint */
 } LightCell;
 static LightCell sCells[CELL_CACHE_SIZE];
 
@@ -63,10 +65,11 @@ static int Tile(float n)
 static float CasterCeiling(void)
 {
     float ceiling = PROP_TOP > CROWN_TOP ? PROP_TOP : CROWN_TOP;
-    float buildings = VoxelBuildings_MaxTop();
+    float buildings = VoxelBuildings_MaxTop(), highest = 0.0f;
 
     if (buildings > ceiling)
         ceiling = buildings;
+    /* over the base of the highest map on screen */
     for (unsigned i = 0; i < VoxelWorld_InstanceCount(); ++i)
     {
         const VoxelMapInstance *inst = VoxelWorld_Instance(i);
@@ -75,8 +78,10 @@ static float CasterCeiling(void)
             continue;
         if (VoxelRelief_DrawnTop(inst) > ceiling)
             ceiling = VoxelRelief_DrawnTop(inst);
+        if (VoxelRelief_Base(inst) > highest)
+            highest = VoxelRelief_Base(inst);
     }
-    return ceiling;
+    return ceiling + highest;
 }
 
 void VoxelLighting_Reset(void)
@@ -107,7 +112,9 @@ static const LightCell *Cell(int x, int z)
     cell->crownPart = -1;
     cell->surface = false;
     cell->sign = false;
+    cell->mask = NULL;
     inst = VoxelWorld_GetInstanceAt(x, z);
+    cell->base = VoxelRelief_Base(inst);
     if (inst == NULL || inst->indoor)
         return cell;
     metatile = VoxelWorld_GetMetatileId(x, z);
@@ -125,9 +132,13 @@ static const LightCell *Cell(int x, int z)
         if (VoxelTree_GroundMetatile(metatile) != metatile)
             return cell; /* canopy fringe removed by the tree renderer */
     }
-    /* A modelled building casts from its own solid, cell by cell. */
+    /* A modelled building casts from its own solid, cell by cell - and a
+     * railing from its line, not from its whole cell. */
     if (VoxelBuildings_CellAt(inst, x, z, NULL, &cell->top))
+    {
+        cell->mask = VoxelBuildings_Footprint(inst, x, z);
         return cell;
+    }
     /* A sign or a lamp casts its own drawing, not a box. */
     cell->top = VoxelSign_CasterTop(inst, x, z);
     if (cell->top > 0.0f)
@@ -155,12 +166,22 @@ static const LightCell *Cell(int x, int z)
 
 static bool CellOccludes(const LightCell *cell, float x, float y, float z)
 {
+    /* Everything a cell casts from stands on its map's base. */
+    y -= cell->base;
     /* Level ground stops no sun, even for a point below it: a beach under
      * its cliff (Route 104) is lit where nothing stands over it. */
     if (cell->top <= y || (cell->top <= 0.0f && !cell->surface))
         return false;
     if (cell->surface)
         return y < VoxelRelief_SurfaceAt(x, z) - SURFACE_BIAS;
+    if (cell->mask != NULL)
+    {
+        int px = (int)((x - (float)cell->x) * 16.0f), pz = (int)((z - (float)cell->z) * 16.0f);
+
+        px = px < 0 ? 0 : px > 15 ? 15 : px;
+        pz = pz < 0 ? 0 : pz > 15 ? 15 : pz;
+        return (cell->mask[pz] >> px) & 1u;
+    }
     if (cell->sign)
         return VoxelSign_Occludes(VoxelWorld_GetInstanceAt(cell->x, cell->z), cell->x, cell->z,
                                   x, y, z);
@@ -253,7 +274,8 @@ float VoxelLighting_Sample(float x, float y, float z)
         if (gVoxelLightingStepEveryPoint)
             continue;
 #endif
-        if ((cell->crownPart >= 0 || cell->surface || cell->sign) && cell->top > ry)
+        if ((cell->crownPart >= 0 || cell->surface || cell->sign || cell->mask != NULL)
+         && cell->top + cell->base > ry)
             continue;  /* not a box: point by point while it is above the ray */
         /* Leave the cell. rx and rz only fall, so it is left when either
          * drops below the cell's corner. The estimate starts a step short
@@ -275,7 +297,7 @@ float VoxelLighting_Sample(float x, float y, float z)
     }
     /* Small contact AO at the bases of solid neighbours; leave roof/crown art
      * alone. Ambient light keeps the original pixel art legible in shadow. */
-    if (y <= 0.41f)
+    if (y - Cell(Tile(x), Tile(z))->base <= 0.41f)
     {
         unsigned covered = 0;
         covered += Occludes(x - 0.28f, y + 0.3f, z);

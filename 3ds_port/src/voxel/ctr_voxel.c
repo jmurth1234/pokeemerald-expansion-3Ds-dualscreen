@@ -54,7 +54,14 @@
 #define CTR_VOXEL_TRACE 0
 #endif
 
-#define VOXEL_NEAR 0.1f
+/*
+ * The depth buffer is 16-bit. At 0.1 the near plane spent its precision on the
+ * first tile before the eye, and at the player's distance (8-17 units) a cast
+ * shadow 0.03 over the ground no longer told apart from it: striped, and gone
+ * next to the feet. Nothing on screen comes within a unit of the eye (the
+ * lowest camera is ~4.5 up), and 1.0 gives ten times the resolution.
+ */
+#define VOXEL_NEAR 1.0f
 #define VOXEL_FAR 200.0f
 
 /* The logical surface is a 512x256 texture of which the game uses the top-left
@@ -445,8 +452,10 @@ static struct
 } sStream;
 
 /* Pages that failed to read are not asked for again: retrying one every
- * frame would only log the same error for as long as its map is on screen. */
-static uint64_t sBadPages;
+ * frame would only log the same error for as long as its map is on screen.
+ * One flag a page, for as many pages as buildings.bin can name. */
+#define VOXEL_MAX_PAGES 256
+static bool sBadPages[VOXEL_MAX_PAGES];
 
 /*
  * The pages' block of VRAM, claimed whole at start-up like the meshes' (see
@@ -458,8 +467,8 @@ static uint64_t sBadPages;
 static void *sPageBlock;
 static VoxelArena sPageArena;
 static VoxelArenaPiece sPagePieces[VOXEL_BUILDING_PAGES];
-static uint32_t sPageRetry[64];
-static uint64_t sPageNoRoomLogged;
+static uint32_t sPageRetry[VOXEL_MAX_PAGES];
+static bool sPageNoRoomLogged[VOXEL_MAX_PAGES];
 
 /* A page texture over a piece of the arena. Never C3D_TexDelete'd: that
  * would hand the piece to the console's allocator, which never gave it. */
@@ -569,7 +578,7 @@ static void StreamStart(void)
     s32 priority = 0x30;
 
     memset(&sStream, 0, sizeof(sStream));
-    sBadPages = 0;
+    memset(sBadPages, 0, sizeof(sBadPages));
     sStream.buffer = linearAlloc(VOXEL_PAGE_SLICE * sizeof(uint16_t));
     if (sStream.buffer == NULL)
     {
@@ -619,7 +628,7 @@ static void WantPage(int page)
     BuildingPageSlot *victim = NULL;
     unsigned w, h;
 
-    if (page < 0 || (page < 64 && (((sBadPages >> page) & 1) || sFrame < sPageRetry[page])))
+    if (page < 0 || page >= VOXEL_MAX_PAGES || sBadPages[page] || sFrame < sPageRetry[page])
         return;
     if ((victim = FindPage(page)) != NULL)
     {
@@ -673,13 +682,22 @@ static void WantPage(int page)
         }
         if (drop == NULL)
         {
+            /* A page not needed this frame - the map left behind by a warp -
+             * is droppable in a frame or two: ask again then, not seconds
+             * later, or the new map stands without its buildings meanwhile. */
+            bool soon = false;
+
+            for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
+                if (&sPageSlots[i] != victim && sPageSlots[i].tex.data != NULL
+                 && sPageSlots[i].used != sFrame)
+                    soon = true;
             victim->page = -1;
-            if (page < 64)
+            sPageRetry[page] = sFrame + (soon ? 2u : VOXEL_PAGE_RETRY_FRAMES);
+            if (!soon)
             {
-                sPageRetry[page] = sFrame + VOXEL_PAGE_RETRY_FRAMES;
-                if (!((sPageNoRoomLogged >> page) & 1))
+                if (!sPageNoRoomLogged[page])
                 {
-                    sPageNoRoomLogged |= 1ull << page;
+                    sPageNoRoomLogged[page] = true;
                     ++sStats.errors;
                     CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no room for the %ux%u building page %d "
                                  "(largest gap %lu of %lu KiB); retrying later",
@@ -700,8 +718,8 @@ static void MarkBadPage(int page)
 {
     ++sStats.errors;
     CtrLog_Write(CTR_LOG_ERROR, "VOXEL: building page %d unreadable", page);
-    if (page >= 0 && page < 64)
-        sBadPages |= 1ull << page;
+    if (page >= 0 && page < VOXEL_MAX_PAGES)
+        sBadPages[page] = true;
 }
 
 /* The most recently needed page that is still coming in. */
@@ -958,7 +976,7 @@ bool CtrVoxel_Init(void)
     VoxelArena_Init(&sPageArena, sPageBlock, sPageBlock != NULL ? VOXEL_PAGE_VRAM_BUDGET : 0,
                     128, sPagePieces, VOXEL_BUILDING_PAGES);
     memset(sPageRetry, 0, sizeof(sPageRetry));
-    sPageNoRoomLogged = 0;
+    memset(sPageNoRoomLogged, 0, sizeof(sPageNoRoomLogged));
 
     step = "chunk build scratch";
     sScratch = malloc(VOXEL_CHUNK_SCRATCH * sizeof(VoxelVertex));
@@ -1575,6 +1593,9 @@ static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash
     VoxelBuilder_Init(&sBuilder, sScratch, VOXEL_CHUNK_SCRATCH);
     VoxelBuilder_SetAtlas(&sBuilder, &atlas->map);
     VoxelBuilder_SetOrigin(&sBuilder, site->baseX, site->baseY);
+    /* The whole map stands at its base (voxel_relief.h), the belt round the
+     * world at the base of the map it rings. */
+    sBuilder.base = VoxelRelief_Base(inst);
 #if CTR_VOXEL_LIGHTING
     sBuilder.lighting = !inst->indoor;
     /* The belt keeps the fixed cost of the old one: corner shading only. */
@@ -2390,6 +2411,7 @@ static bool HandleMapChange(int mapGroup, int mapNum, float playerX, float playe
                      -sPreviousOrigins[i].originY);
         return true;
     }
+    VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(playerX + 0.5f, playerZ + 0.5f), 1);
     VoxelCamera_Snap(&sCamera, playerX, playerZ);
     return false;
 }
@@ -2489,6 +2511,7 @@ bool CtrVoxel_Update(void)
     }
     else
     {
+        VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(smoothX + 0.5f, smoothZ + 0.5f), 0);
         VoxelCamera_Update(&sCamera, smoothX, smoothZ);
     }
     /* Recorded after the shift, for the next crossing. */
@@ -2797,7 +2820,7 @@ static void TerrainTexEnv(void)
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
 }
 
-static void HazeTexEnv(void)
+static void HazeTexEnv(uint32_t colour)
 {
     C3D_TexEnv *env = C3D_GetTexEnv(1);
 
@@ -2808,7 +2831,103 @@ static void HazeTexEnv(void)
     C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-    C3D_TexEnvColor(env, VOXEL_HAZE_COLOUR);
+    C3D_TexEnvColor(env, colour);
+}
+
+/*
+ * Screen fades. On the GBA a fade rewrites the shown palette, and the world's
+ * textures are baked from the tilesets' own palettes, so the world has to be
+ * faded here: environment 2 blends everything drawn from those textures (and
+ * the constant colours drawn over them, the cast shadows and the player's
+ * silhouette) towards the fade colour. Sprites are decoded from the shown
+ * palette and are faded already; they only take the brightness effect, and a
+ * haze colour faded with the world so a distant sprite fades with it.
+ */
+typedef struct
+{
+    float amount, rgb[3];
+} VoxelFade;
+static VoxelFade sWorldFade, sSpriteFade;
+static float sBrightBg, sBrightObj;
+static bool sBrightWhite;
+
+void CtrVoxel_SetBrightness(float backgrounds, float sprites, bool white)
+{
+    sBrightBg = backgrounds;
+    sBrightObj = sprites;
+    sBrightWhite = white;
+}
+
+/* Blends of a then b, as one: (1-a)(1-b)x + (a(1-b)A + bB). */
+static VoxelFade FadeThen(VoxelFade first, float amount, float target)
+{
+    VoxelFade out = first;
+    float total = 1.0f - (1.0f - first.amount) * (1.0f - amount);
+
+    if (amount <= 0.0f)
+        return out;
+    out.amount = total;
+    for (int c = 0; c < 3; ++c)
+        out.rgb[c] = (first.amount * (1.0f - amount) * first.rgb[c] + amount * target) / total;
+    return out;
+}
+
+static uint32_t FadeColour(float amount, const float rgb[3])
+{
+    unsigned a = (unsigned)(amount * 255.0f + 0.5f);
+    unsigned r = (unsigned)(rgb[0] * 255.0f + 0.5f);
+    unsigned g = (unsigned)(rgb[1] * 255.0f + 0.5f);
+    unsigned b = (unsigned)(rgb[2] * 255.0f + 0.5f);
+
+    return a << 24 | b << 16 | g << 8 | r;
+}
+
+static void PrepareFades(void)
+{
+    VoxelFade none = {0.0f, {0.0f, 0.0f, 0.0f}};
+    float target = sBrightWhite ? 1.0f : 0.0f;
+
+    sWorldFade = none;
+    VoxelWorld_ScreenFade(&sWorldFade.amount, sWorldFade.rgb);
+    sWorldFade = FadeThen(sWorldFade, sBrightBg, target);
+    sSpriteFade = FadeThen(none, sBrightObj, target);
+}
+
+/* The haze colour a sprite pass uses: the world's, faded as the world is. */
+static uint32_t SpriteHaze(void)
+{
+    const float haze[3] = {(VOXEL_HAZE_COLOUR & 255) / 255.0f,
+                           ((VOXEL_HAZE_COLOUR >> 8) & 255) / 255.0f,
+                           ((VOXEL_HAZE_COLOUR >> 16) & 255) / 255.0f};
+    float rgb[3];
+
+    for (int c = 0; c < 3; ++c)
+        rgb[c] = haze[c] + (sWorldFade.rgb[c] - haze[c]) * sWorldFade.amount;
+    return FadeColour(1.0f, rgb);
+}
+
+static void FadeTexEnv(const VoxelFade *fade)
+{
+    C3D_TexEnv *env = C3D_GetTexEnv(2);
+
+    C3D_TexEnvInit(env);
+    if (fade->amount <= 0.0f)
+        return;
+    /* constant x a + previous x (1 - a) */
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_CONSTANT);
+    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+    C3D_TexEnvColor(env, FadeColour(fade->amount, fade->rgb));
+}
+
+/* Environments 1 and 2 for what is drawn next: the world's or a sprite's. */
+static void FadeFor(bool sprites)
+{
+    HazeTexEnv(sprites ? SpriteHaze() : VOXEL_HAZE_COLOUR);
+    FadeTexEnv(sprites ? &sSpriteFade : &sWorldFade);
 }
 
 void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
@@ -2843,10 +2962,11 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
 
-    /* texture0 x graded colour, then the distance haze. */
+    /* texture0 x graded colour, then the distance haze, then the fade. */
+    PrepareFades();
     TerrainTexEnv();
-    HazeTexEnv();
-    for (int i = 2; i < 6; ++i)
+    FadeFor(false);
+    for (int i = 3; i < 6; ++i)
         C3D_TexEnvInit(C3D_GetTexEnv(i));
 
     C3D_CullFace(GPU_CULL_NONE);
@@ -2916,9 +3036,11 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
         C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
         C3D_TexEnvColor(env, 0x60FFFFFFu);
+        FadeFor(true);
         C3D_DrawArrays(GPU_TRIANGLES, VOXEL_REFLECTION_FIRST, sReflectionVertices);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
         TerrainTexEnv();
+        FadeFor(false);
         SetGrade(indoor);
     }
 
@@ -2991,9 +3113,11 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
              * so Citro3D uploads the restored sprite colours on the next draw. */
             TerrainTexEnv();
         }
+        FadeFor(true);
         C3D_DrawArrays(GPU_TRIANGLES, 0, sSpriteVertices);
     }
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     /* The 2D compositor sets up stage 0 only. */
     C3D_TexEnvInit(C3D_GetTexEnv(1));
+    C3D_TexEnvInit(C3D_GetTexEnv(2));
 }

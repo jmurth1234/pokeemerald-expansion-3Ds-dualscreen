@@ -1,0 +1,104 @@
+name: Bug report
+description: For confirmed, actionable project bugs triaged in Discord.
+title: "[Version] [Hardware] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please first search existing issues and discuss new reports in the Discord bug-reports forum.
+        Do not upload ROMs, emerald3ds.pak, dspfirm.cdc, console firmware, copyrighted game assets, passwords, tokens or private keys.
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: Describe the problem and link the Discord report when appropriate.
+      placeholder: What went wrong?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Project version
+      placeholder: e.g. 0.1.1
+    validations:
+      required: true
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      options:
+        - Old 3DS
+        - Old 2DS
+        - New 3DS
+        - New 2DS
+        - Azahar
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: rendering
+    attributes:
+      label: Rendering mode
+      options:
+        - 2D
+        - Voxel
+        - Both / unrelated
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. 
+        2. 
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Reproduction frequency
+      options:
+        - Always
+        - Sometimes
+        - Once
+    validations:
+      required: true
+  - type: dropdown
+    id: real-hardware
+    attributes:
+      label: Real hardware reproduction
+      options:
+        - "Yes"
+        - "No"
+        - Not tested
+    validations:
+      required: true
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Logs / screenshots / video
+      description: Attach /3ds/emerald3ds/port.log or safe captures where useful. Do not attach game data or secrets.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safe-attachments
+    attributes:
+      label: Attachment safety
+      options:
+        - label: I confirm that I have not attached ROMs, game data, firmware, copyrighted assets or secrets.
+          required: true

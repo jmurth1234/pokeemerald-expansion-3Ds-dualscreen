@@ -8018,7 +8018,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..a5886fd6a99d2b326f17528a81e9608f
  static void TilemapFiveMovesDisplay(u16 *dst, u16 palette, bool8 remove)
  {
 diff --git a/src/pokenav.c b/src/pokenav.c
-index 03f48ee3669c3411f124ebeaf5fa936809cccf6c..220bf26d71cbe43fb92fbb459b251b3fba1dfdc9 100644
+index 03f48ee3669c3411f124ebeaf5fa936809cccf6c..c93bc0d002a8f736cf1a4b718c7a11285fa7ebde 100644
 --- a/src/pokenav.c
 +++ b/src/pokenav.c
 @@ -588,3 +588,24 @@ bool32 CanViewRibbonsMenu(void)
@@ -8030,7 +8030,7 @@ index 03f48ee3669c3411f124ebeaf5fa936809cccf6c..220bf26d71cbe43fb92fbb459b251b3f
 +// The 3DS bottom screen shows the PokéNav while it runs.
 +bool8 CtrPokenav_IsOpen(void)
 +{
-+    return gMain.callback2 == CB2_Pokenav;
++    return gMain.callback2 == CB2_Pokenav && gPokenavResources != NULL;
 +}
 +
 +// The screen on show (POKENAV_MAIN_MENU...), and whether it waits for input:
@@ -8065,10 +8065,10 @@ index 1ebf6edbe9a286b0e05944ca7b51567e14d830d9..cde8c2132997e5e5256833ac0b4152db
 +}
 +#endif
 diff --git a/src/pokenav_list.c b/src/pokenav_list.c
-index 9d1c561d1fd644602dbe0f73bfb2aff23ce700ef..4d1f567a49945c411b72c53f535799175bcb7317 100644
+index 9d1c561d1fd644602dbe0f73bfb2aff23ce700ef..595bd33bd6ab9d65d69904a06917e219f32229da 100644
 --- a/src/pokenav_list.c
 +++ b/src/pokenav_list.c
-@@ -1009,3 +1009,53 @@ static bool32 CopyPokenavListMenuTemplate(struct PokenavListSub *dest, const str
+@@ -1009,3 +1009,54 @@ static bool32 CopyPokenavListMenuTemplate(struct PokenavListSub *dest, const str
      dest->downArrow = NULL;
      return 1;
  }
@@ -8100,9 +8100,10 @@ index 9d1c561d1fd644602dbe0f73bfb2aff23ce700ef..4d1f567a49945c411b72c53f53579917
 +// past the picture as it does the frame.
 +int CtrPokenavList_Bg(void)
 +{
-+    struct PokenavList *list = GetSubstructPtr(POKENAV_SUBSTRUCT_LIST);
++    struct PokenavList *list;
 +
-+    if (!CtrPokenav_IsOpen() || list == NULL)
++    // Without the PokéNav there are no substructs to look in at all.
++    if (!CtrPokenav_IsOpen() || (list = GetSubstructPtr(POKENAV_SUBSTRUCT_LIST)) == NULL)
 +        return -1;
 +    return list->sub.listWindow.bg;
 +}
@@ -10228,7 +10229,7 @@ index 171678cddbf9ef41a725fc8b4c7f4cdc3be1fa18..9d8c85d5cd8c3b47465ee3e6498be9cd
      ClearPokemonCrySongs();
  }
 diff --git a/src/sprite.c b/src/sprite.c
-index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec9716aca721d 100644
+index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..293142b094a555ff12c65b961af5a9e02fe4e9ec 100644
 --- a/src/sprite.c
 +++ b/src/sprite.c
 @@ -2,6 +2,16 @@
@@ -10271,7 +10272,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
  void ResetSpriteData(void)
  {
      ResetOamRange(0, 128);
-@@ -479,16 +505,84 @@ void CopyMatricesToOamBuffer(void)
+@@ -479,16 +505,89 @@ void CopyMatricesToOamBuffer(void)
      }
  }
  
@@ -10330,6 +10331,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
  
 +#if defined(PLATFORM_3DS)
 +    CtrVideo_ClearOamAnchors();
++    CtrVideo_ClearScreenOam();
 +#endif
 +#if defined(PLATFORM_3DS) && CTR_VOXEL_ENABLED
 +    CtrVideo_ClearVoxelWeatherOam();
@@ -10346,6 +10348,10 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
 +#if defined(PLATFORM_3DS)
 +            CtrVideo_SetOamAnchor(first, oamIndex, sprite->y + sprite->y2 + sprite->centerToCornerVecY
 +                                  + (sprite->coordOffsetEnabled ? gSpriteCoordOffsetY : 0));
++            // Placed on the screen, not on the map: a battle transition's
++            // sprites, which the compositor draws with the transition.
++            if (!sprite->coordOffsetEnabled)
++                CtrVideo_MarkScreenOam(first, oamIndex);
 +#endif
 +#if defined(PLATFORM_3DS) && CTR_VOXEL_ENABLED
 +            if (IsVoxelWeatherSprite(sprite))
@@ -10358,7 +10364,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
          i++;
      }
  
-@@ -562,8 +656,19 @@ u8 CreateSpriteAt(u8 index, const struct SpriteTemplate *template, s16 x, s16 y,
+@@ -562,8 +661,19 @@ u8 CreateSpriteAt(u8 index, const struct SpriteTemplate *template, s16 x, s16 y,
      if (template->tileTag == TAG_NONE)
      {
          s16 tileNum;
@@ -10379,7 +10385,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
          if (tileNum == -1)
          {
              ResetSprite(sprite);
-@@ -622,7 +727,13 @@ void DestroySprite(struct Sprite *sprite)
+@@ -622,7 +732,13 @@ void DestroySprite(struct Sprite *sprite)
          if (!sprite->usingSheet)
          {
              u16 i;
@@ -10394,7 +10400,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
              for (i = sprite->oam.tileNum; i < tileEnd; i++)
                  FREE_SPRITE_TILE(i);
          }
-@@ -791,6 +902,10 @@ void ProcessSpriteCopyRequests(void)
+@@ -791,6 +907,10 @@ void ProcessSpriteCopyRequests(void)
          while (sSpriteCopyRequestCount > 0)
          {
              CpuCopy16(sSpriteCopyRequests[i].src, sSpriteCopyRequests[i].dest, sSpriteCopyRequests[i].size);
@@ -10405,7 +10411,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
              sSpriteCopyRequestCount--;
              i++;
          }
-@@ -803,9 +918,17 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
+@@ -803,9 +923,17 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
  {
      if (sSpriteCopyRequestCount < MAX_SPRITE_COPY_REQUESTS)
      {
@@ -10425,7 +10431,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
          sSpriteCopyRequestCount++;
      }
  }
-@@ -814,6 +937,9 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
+@@ -814,6 +942,9 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
  {
      if (sSpriteCopyRequestCount < MAX_SPRITE_COPY_REQUESTS)
      {
@@ -10435,7 +10441,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
          sSpriteCopyRequests[sSpriteCopyRequestCount].src = src;
          sSpriteCopyRequests[sSpriteCopyRequestCount].dest = dest;
          sSpriteCopyRequests[sSpriteCopyRequestCount].size = size;
-@@ -1485,7 +1611,11 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
+@@ -1485,7 +1616,11 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
  
  u16 LoadSpriteSheet(const struct SpriteSheet *sheet)
  {
@@ -10448,7 +10454,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
  
      if (tileStart < 0)
      {
-@@ -1493,8 +1623,12 @@ u16 LoadSpriteSheet(const struct SpriteSheet *sheet)
+@@ -1493,8 +1628,12 @@ u16 LoadSpriteSheet(const struct SpriteSheet *sheet)
      }
      else
      {
@@ -10463,7 +10469,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..748b81603c1b91653b0702e09f8ec971
          return (u16)tileStart;
      }
  }
-@@ -1617,6 +1751,9 @@ void LoadSpritePalettes(const struct SpritePalette *palettes)
+@@ -1617,6 +1756,9 @@ void LoadSpritePalettes(const struct SpritePalette *palettes)
  
  void DoLoadSpritePalette(const u16 *src, u16 paletteOffset)
  {
@@ -11503,7 +11509,7 @@ index 595ba08a6f51bc8749b0010f92dbb5f429d92228..27e043c3b1cff1225439e8c1bfeb9a63
  }
  
 diff --git a/src/title_screen.c b/src/title_screen.c
-index 1d605d1fc056e63002b3f7a6c1fd9cb48c770531..c034733a9d5e17eacde10d78536b1316f3122213 100644
+index 1d605d1fc056e63002b3f7a6c1fd9cb48c770531..ae9a812d54a855ac3bd045eef6fc9598fd64b7fb 100644
 --- a/src/title_screen.c
 +++ b/src/title_screen.c
 @@ -29,12 +29,26 @@ enum {
@@ -11728,6 +11734,18 @@ index 1d605d1fc056e63002b3f7a6c1fd9cb48c770531..c034733a9d5e17eacde10d78536b1316
      }
  }
  
+@@ -867,3 +936,11 @@ static void UpdateLegendaryMarkingColor(u8 frameNum)
+         LoadPalette(&color, BG_PLTT_ID(14) + 15, sizeof(color));
+    }
+ }
++
++#ifdef PLATFORM_3DS
++// The background Rayquaza is drawn on while the title screen is up, else -1.
++int CtrTitleScreen_RayquazaBg(void)
++{
++    return gMain.callback2 == MainCB2 ? 0 : -1;
++}
++#endif
 diff --git a/src/trade.c b/src/trade.c
 index e9c2984087302e2858d7617fce6d0408d3427513..4e573976a45a0b277803f5ca9e881376994f5872 100644
 --- a/src/trade.c

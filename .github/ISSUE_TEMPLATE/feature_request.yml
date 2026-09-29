@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest a focused improvement to the project.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing requests first. The Discord suggestions forum is a good place to discuss ideas before opening an issue.
+        Do not upload ROMs, game data, firmware or copyrighted game assets.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem or limitation motivates this request?
+    validations:
+      required: true
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Proposed behaviour
+      description: Describe what you would like the project to do.
+    validations:
+      required: true
+  - type: textarea
+    id: benefit
+    attributes:
+      label: Why it benefits the project
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include any simpler approach you considered.
+    validations:
+      required: true
+  - type: textarea
+    id: mockups
+    attributes:
+      label: Relevant screenshots / mockups
+      description: Optional. Do not include copyrighted game assets or private data.
+    validations:
+      required: false

@@ -18,6 +18,10 @@ void CtrVoxel_NotifyTilesetAnimWrite(unsigned firstTile, unsigned tileCount);
 
 /* Draws into the given target. Never opens or closes a frame. */
 void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset);
+/* The GBA brightness effect (BLDY) of the frame about to be drawn, as the
+ * compositor reads it: on the backgrounds and on the sprites, towards white
+ * or black. The palette fade is read by the voxel module itself. */
+void CtrVoxel_SetBrightness(float backgrounds, float sprites, bool white);
 
 typedef struct
 {

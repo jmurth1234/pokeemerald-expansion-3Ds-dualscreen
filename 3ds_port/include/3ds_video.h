@@ -118,6 +118,25 @@ void CtrVideo_SetBattle(bool battle);
  * values holds one unit per line. NULL values turns it off.
  */
 void CtrVideo_SetLineScroll(unsigned reg, bool wide, const void *values, unsigned lines);
+/*
+ * Whether the frames that follow show a battle transition: GBA geometry
+ * (compat/ctr_gba_transition.h), composed over the field - 2D or voxel - at
+ * the battle scene's scale. See 3ds_video.c, RenderTransition.
+ */
+void CtrVideo_SetTransition(bool transition);
+/*
+ * The registers from BG0HOFS to BLDY (CTR_LINE_REG_FIRST, CTR_LINE_REGS of
+ * them) as each of the GBA's 160 lines of a transition's frame shows them:
+ * lines x CTR_LINE_REGS values, NULL when there is no transition.
+ */
+#define CTR_GBA_LINES 160
+#define CTR_LINE_REG_FIRST 0x10
+#define CTR_LINE_REGS 35
+void CtrVideo_SetLineRegisters(const uint16_t *regs, unsigned lines);
+/* Sprites the game places on the screen rather than on the map: a battle
+ * transition's, drawn with it (src/sprite.c). */
+void CtrVideo_ClearScreenOam(void);
+void CtrVideo_MarkScreenOam(unsigned first, unsigned end);
 const CtrVideoStats *CtrVideo_GetStats(void);
 void CtrScene_Init(void);
 void CtrScene_Update(void);

@@ -4,16 +4,17 @@
 The cartridge answers most of it itself: the behaviour byte says water,
 ledges and doors; the blockdata says what is blocked and at which elevation;
 the maps' own events say where the doors (warps) and the signs are, and the
-map type says whether it is outdoors. The drawing is only asked one thing the
-data does not state: whether a blocked cell is drawn as foliage.
+map type says whether it is outdoors. The drawing is only asked what the
+data does not state: whether a blocked cell is drawn as foliage, and whether a
+walkable one is drawn as steps.
 
 Roles, in the order they are decided:
 
     water     a water behaviour
     ledge     a jump behaviour
-    stair     walkable, between walkable cells of two different elevations
+    stair     walkable and drawn as steps (Layout.treads)
     floor     any other walkable cell
-    signpost  an outdoor sign event on a blocked cell open on three sides
+    signpost  an outdoor post: blocked, open on three sides (a sign, a lamp)
     wall      part of a building: the blocked mass above a house door
     tree      blocked and drawn mostly in foliage
     fence     blocked, one cell thin, walkable on both sides
@@ -42,6 +43,13 @@ NEIGHBOURS = [(0, -1), (0, 1), (-1, 0), (1, 0)]
 HOUSE_HALF_WIDTH = 5
 HOUSE_HEIGHT = 7
 FOLIAGE = 0.5
+# Steps: mean luminance change between neighbouring pixels along a row (at
+# most) and down a column (at least). The General tileset's flight measures
+# 2 and 28; ground, planks and roofs change along their rows too.
+TREAD_ACROSS = 4.0
+TREAD_DOWN = 15.0
+# Rows a covering drawing may leave short: its own outline, top and bottom.
+COVER_SLACK = 2
 
 
 def behaviours():
@@ -64,9 +72,17 @@ def behaviours():
 
 
 MB = behaviours()
-WATER = {v for k, v in MB.items() if any(s in k for s in (
-    "WATER", "POND", "OCEAN", "DEEP", "WATERFALL", "SOOTOPOLIS_DEEP", "SEAWEED", "CURRENT",
-    "PUDDLE", "SHALLOW"))} - {MB.get(k) for k in ("MB_WATER_DOOR",) if k in MB}
+# The cells the console draws as water (voxel_world.c BehaviorShape): the
+# game's surfable behaviours, puddles, shallow water, hot springs and the water
+# drawn under a bridge. Not the bridges themselves, deep sand or the warps that
+# merely have WATER or DEEP in their names: read as water, a pier sank into
+# the sea and every shore became a step.
+WATER = {MB[k] for k in (
+    "MB_POND_WATER", "MB_INTERIOR_DEEP_WATER", "MB_DEEP_WATER", "MB_WATERFALL",
+    "MB_SOOTOPOLIS_DEEP_WATER", "MB_OCEAN_WATER", "MB_PUDDLE", "MB_SHALLOW_WATER",
+    "MB_NO_SURFACING", "MB_SEAWEED", "MB_SEAWEED_NO_SURFACING", "MB_HOT_SPRINGS",
+    "MB_REFLECTION_UNDER_BRIDGE", "MB_EASTWARD_CURRENT", "MB_WESTWARD_CURRENT",
+    "MB_NORTHWARD_CURRENT", "MB_SOUTHWARD_CURRENT") if k in MB}
 JUMPS = {v for k, v in MB.items() if k.startswith("MB_JUMP_")}
 HOUSE_DOORS = {v for k, v in MB.items() if k in ("MB_ANIMATED_DOOR", "MB_PETALBURG_GYM_DOOR",
                                                    "MB_CLOSED_SOOTOPOLIS_DOOR")}
@@ -109,6 +125,17 @@ class MapEvents:
             for b in m.get("bg_events") or []:
                 if b.get("type") == "sign":
                     self.signs.setdefault(layout, set()).add((b["x"], b["y"]))
+        # A layout a script swaps in (Route 111 once the tower has fallen,
+        # Route 131 with the Sky Pillar, Sootopolis in the legends' battle)
+        # belongs to no map: it has its map's events, the map it is named
+        # after and drawn the size of.
+        for alt, base in alternate_layouts().items():
+            if base in self.outdoor:
+                self.outdoor.add(alt)
+            if base in self.warps:
+                self.warps[alt] = set(self.warps[base])
+            if base in self.signs:
+                self.signs[alt] = set(self.signs[base])
 
 
 _PAIRS = {}
@@ -138,9 +165,13 @@ class Layout:
         self.outdoor = self.layout_id in events.outdoor
         self.warps = sorted(events.warps.get(self.layout_id, ()))
         self.signs = events.signs.get(self.layout_id, set())
+        self.events = events
         self._memo = {}
         self._houses = None
+        self._lamps = None
         self._foliage = {}
+        self._treads = {}
+        self._covers = {}
 
     # ── what the cartridge states ─────────────────────────────────────────
 
@@ -183,6 +214,37 @@ class Layout:
             self._foliage[metatile] = green / len(drawn) if drawn else 0.0
         return self._foliage[metatile]
 
+    def covers(self, metatile):
+        """Drawn over the player right down the cell: the upper layer paints
+        at least half of all but COVER_SLACK of its rows. A boulder, a bush
+        or a rock outcrop is; a lamp or a post, whose top at most is drawn
+        over the player, is not."""
+        if metatile not in self._covers:
+            rows = [0] * 16
+            for (_, y) in pair_for(self.primary, self.secondary).layer_pixels(metatile, 1):
+                rows[y] += 1
+            self._covers[metatile] = sum(1 for n in rows if n >= 8) >= 16 - COVER_SLACK
+        return self._covers[metatile]
+
+    def treads(self, metatile):
+        """Drawn as a flight of steps: the cell filled with bands, each row
+        one colour right across and the rows changing colour down it. Only
+        a staircase is drawn so; the elevation bits cannot tell it, since a
+        flight is as often at elevation 0 (any level) as at its landing's."""
+        if metatile not in self._treads:
+            pair = pair_for(self.primary, self.secondary)
+            drawn = dict(pair.layer_pixels(metatile, 0))
+            drawn.update(pair.layer_pixels(metatile, 1))
+            ok = len(drawn) >= 240
+            if ok:
+                lum = [[0.3 * r + 0.59 * g + 0.11 * b for (r, g, b) in
+                        (drawn.get((x, y), (0, 0, 0)) for x in range(16))] for y in range(16)]
+                across = sum(abs(row[x] - row[x + 1]) for row in lum for x in range(15)) / 240.0
+                down = sum(abs(lum[y][x] - lum[y + 1][x]) for y in range(15) for x in range(16)) / 240.0
+                ok = across <= TREAD_ACROSS and down >= TREAD_DOWN
+            self._treads[metatile] = ok
+        return self._treads[metatile]
+
     # ── buildings: the mass above each house door ──────────────────────────
 
     def houses(self):
@@ -211,10 +273,63 @@ class Layout:
 
     # ── the roles ─────────────────────────────────────────────────────────
 
+    def open_post(self, x, y):
+        """Blocked outdoors and walkable to the west, east and south."""
+        return (self.outdoor and self.blocked(x, y)
+                and not any(self.blocked(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1))))
+
     def is_signpost(self, x, y):
-        if not self.outdoor or (x, y) not in self.signs or not self.blocked(x, y):
+        """A post standing on its own outdoors: blocked, walkable to the west,
+        east and south. A sign event is one; so is a post without an event
+        (Rustboro's street lamps) when it does not cover the player (a rock or
+        a bush drawn over whoever stands behind it is not a post), is not
+        foliage or part of a house, and has open ground or a
+        different drawing to its north (a fence's run repeats itself).
+        A sign drawn with a post's metatile (post_metatiles) is one wherever
+        it stands, walkable to its south: Littleroot's house signs stand
+        against the house's wall."""
+        if not self.outdoor or not self.blocked(x, y):
             return False
-        return all(not self.blocked(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1)))
+        if (not self.blocked(x, y + 1) and not self.off_map(x, y + 1)
+                and post_key(self, self.metatile(x, y)) in post_metatiles(self.events)):
+            return True
+        if self.free_post(x, y):
+            return True
+        # A lamp drawn like the map's free-standing ones is one against a
+        # house's wall too, walkable to its south and on its other side:
+        # Rustboro's lamps beside the Center and the Mart.
+        if (self.blocked(x, y + 1) or self.off_map(x, y + 1)
+                or (self.metatile(x, y), self.metatile(x, y - 1)) not in self.lamps()):
+            return False
+        sides = [(x + dx, y) for dx in (-1, 1) if self.blocked(x + dx, y)]
+        return len(sides) == 1 and sides[0] in self.houses()
+
+    def free_post(self, x, y):
+        """A post open on three sides: a sign event, or a drawing that is
+        neither a cover, foliage nor a house, under open ground or another
+        drawing."""
+        if not self.open_post(x, y):
+            return False
+        if (x, y) in self.signs:
+            return True
+        m = self.metatile(x, y)
+        if self.covers(m):
+            return False
+        if self.foliage(m) >= FOLIAGE or (x, y) in self.houses():
+            return False
+        return not self.blocked(x, y - 1) or self.metatile(x, y - 1) != m
+
+    def lamps(self):
+        """(post, head) metatiles of the posts that stand free with no sign
+        event and a head drawn in the open cell north of them: lamps."""
+        if self._lamps is None:
+            self._lamps = {(self.metatile(x, y), self.metatile(x, y - 1))
+                           for y in range(1, self.h) for x in range(self.w)
+                           if (x, y) not in self.signs and not self.blocked(x, y - 1)
+                           and pair_for(self.primary, self.secondary).layer_pixels(
+                               self.metatile(x, y - 1), 1)
+                           and self.free_post(x, y)}
+        return self._lamps
 
     def is_ledge_junction(self, x, y):
         """A blocked cell where a ledge turns a corner: ledges on two sides
@@ -235,12 +350,7 @@ class Layout:
         elif behaviour in JUMPS:
             role = "ledge"
         elif not self.blocked(x, y):
-            here = self.elevation(x, y)
-            role = "floor"
-            for dy in (-1, 1):
-                if (not self.off_map(x, y + dy) and not self.blocked(x, y + dy)
-                        and self.elevation(x, y + dy) not in (here, 0, 15) and here not in (0, 15)):
-                    role = "stair"
+            role = "stair" if self.treads(self.metatile(x, y)) else "floor"
         elif self.is_signpost(x, y):
             role = "signpost"
         elif (x, y) in self.houses():
@@ -258,6 +368,52 @@ class Layout:
             role = "shelf"
         self._memo[(x, y)] = role
         return role
+
+
+def post_key(layout, metatile):
+    """A metatile as the tileset it is drawn from names it."""
+    return (layout.primary if metatile < NUM_PRIMARY else layout.secondary, metatile)
+
+
+def post_metatiles(events):
+    """The metatiles signs are drawn with: every sign event's that stands
+    open on three sides somewhere (a town's sign in the middle of a square).
+    The same metatile against a wall is the same sign. Kept on `events`."""
+    if getattr(events, "posts", None) is None:
+        events.posts = set()        # the layouts read below ask it too
+        found = set()
+        with open(os.path.join(ROOT, "data", "layouts", "layouts.json"), encoding="utf-8") as f:
+            entries = json.load(f)["layouts"]
+        for entry in entries:
+            if not entry.get("id") or entry["id"] not in events.signs:
+                continue
+            layout = Layout(entry, events)
+            for (x, y) in layout.signs:
+                if not layout.off_map(x, y) and layout.open_post(x, y):
+                    found.add(post_key(layout, layout.metatile(x, y)))
+        events.posts = found
+    return events.posts
+
+
+def alternate_layouts():
+    """{layout no map uses: the layout of the map it stands in for} - one
+    named after a map's layout and drawn the same size."""
+    maps_dir = os.path.join(ROOT, "data", "maps")
+    used = set()
+    for name in os.listdir(maps_dir):
+        path = os.path.join(maps_dir, name, "map.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                used.add(json.load(f).get("layout"))
+    size = {e["id"]: (e["width"], e["height"]) for e in load_layouts() if e.get("id")}
+    out = {}
+    for lid in size:
+        if lid in used:
+            continue
+        bases = [b for b in used if b in size and lid.startswith(b + "_") and size[b] == size[lid]]
+        if bases:
+            out[lid] = max(bases, key=len)
+    return out
 
 
 def load_layouts():

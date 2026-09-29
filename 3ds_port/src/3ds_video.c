@@ -162,6 +162,35 @@ void CtrVideo_MarkVoxelWeatherOam(unsigned first, unsigned end)
 }
 #endif
 
+/* OAM entries of sprites placed on the screen rather than on the map. */
+static uint32_t sScreenOam[4];
+
+void CtrVideo_ClearScreenOam(void)
+{
+    memset(sScreenOam, 0, sizeof(sScreenOam));
+}
+
+void CtrVideo_MarkScreenOam(unsigned first, unsigned end)
+{
+    if (end > 128) end = 128;
+    for (unsigned i = first; i < end; ++i)
+        sScreenOam[i >> 5] |= 1u << (i & 31);
+}
+
+/* A battle transition's sprite: on the screen, and not the weather's. */
+static bool TransitionOam(unsigned i)
+{
+    bool screen = (sScreenOam[i >> 5] & (1u << (i & 31))) != 0;
+#if CTR_VOXEL_ENABLED
+    if (sVoxelWeatherOam[i >> 5] & (1u << (i & 31))) return false;
+#endif
+    return screen;
+}
+
+/* Which sprites a pass draws: all, only a transition's, or all but those. */
+enum { OBJ_ALL, OBJ_TRANSITION, OBJ_FIELD };
+static unsigned sObjFilter = OBJ_ALL;
+
 static CtrVideoMemory sMemory;
 
 const uint8_t *CtrVideo_GetBgVram(void) { return sMemory.vram; }
@@ -262,10 +291,10 @@ static bool sFieldLayers;
  * which is where the time goes, runs once per frame however many eyes there
  * are.
  *
- * A layer that blends with what is underneath it needs that underneath in the
- * same surface, so the planes are cut only where nothing blends across, and
- * the last one holds every remaining priority. A frame where everything blends
- * ends up as a single plane: no depth, but no extra cost either.
+ * A layer that blends with what is underneath it needs that underneath in its
+ * own surface: its plane is given the picture behind it, colour only, before
+ * its layers are drawn (RenderBands). The last plane holds every remaining
+ * priority.
  */
 /*
  * Three planes rather than one per priority: each one costs a surface to clear
@@ -277,7 +306,9 @@ static bool sFieldLayers;
 #define CTR_BANDS 3
 static C3D_Tex sBandTex[CTR_BANDS];
 static C3D_RenderTarget *sBand[CTR_BANDS];
-static bool sBandsReady, sBandsFailed;
+/* How many of them exist: two when the third gave its VRAM to a layer. */
+static unsigned sBandCount;
+static bool sBandsFailed;
 /* A failed allocation is tried again this many frames later, not never: the
  * VRAM it needs may have been in use by the overworld only for a while. */
 #define CTR_BANDS_RETRY_FRAMES 300u
@@ -286,8 +317,15 @@ static uint32_t sBandsRetryFrame;
 static bool sBandUsed[CTR_BANDS];
 /* Depth planes the last frame used, 0 when it was composed per eye. */
 static unsigned sPlanes;
-/* Priorities the current composition pass may draw. */
-static unsigned sPriorityMask = 15;
+/*
+ * What the current composition pass may draw, by depth slot: bit 2p is the
+ * sprites of priority p, bit 2p+1 its backgrounds - front to back in that
+ * order, as the GBA stacks them.
+ */
+#define SLOTS_ALL 255u
+#define SLOT_OBJ(p) (1u << ((p) * 2))
+#define SLOT_BG(p) (2u << ((p) * 2))
+static unsigned sPriorityMask = SLOTS_ALL;
 
 /*
  * Last blend configuration submitted. Reset whenever something else may have
@@ -296,7 +334,23 @@ static unsigned sPriorityMask = 15;
 static unsigned sBlendKey = ~0u;
 static void BlendForget(void) { sBlendKey = ~0u; }
 
-static unsigned Reg(unsigned offset) { return sMemory.regs[offset / 2]; }
+/*
+ * A battle transition's frame, line by line (CtrVideo_SetLineRegisters): the
+ * registers each of its 160 lines shows, and while a band of those lines is
+ * composed, that band's values in place of the registers (Reg).
+ */
+static bool sTransitionRequested, sTransition;
+/* Composing the transition's own picture: GBA geometry (RenderTransition). */
+static bool sTransitionCompose;
+static const uint16_t (*sLineRegs)[CTR_LINE_REGS];
+static const uint16_t *sRegLine;
+
+static unsigned Reg(unsigned offset)
+{
+    if (sRegLine && offset - CTR_LINE_REG_FIRST < CTR_LINE_REGS * 2)
+        return sRegLine[(offset - CTR_LINE_REG_FIRST) / 2];
+    return sMemory.regs[offset / 2];
+}
 static unsigned Min(unsigned a, unsigned b) { return a < b ? a : b; }
 
 static void Error(unsigned bit, const char *reason)
@@ -319,11 +373,102 @@ static unsigned Read16(unsigned offset)
     return sMemory.vram[offset] | (sMemory.vram[offset + 1] << 8);
 }
 
+/*
+ * A palette fade as a tint. The game fades by rewriting every colour each
+ * frame (BlendPalette, src/util.c), and every colour of a layer texture
+ * changing is every cell of it redrawn: the intro's four 256x512 layers,
+ * 8192 tiles decoded and drawn a frame, 30 ms on an Old 3DS for as long as a
+ * fade lasts. When the backgrounds' palette is exactly the unfaded one faded
+ * towards one colour - black, white, the grey a battle transition flashes
+ * (BlendPalettes towards RGB(11, 11, 11)) - the tiles keep the unfaded
+ * colours and the fade is
+ * drawn as a tint on the layers (Blend, LayerBrightness), which costs
+ * nothing. Only an exact match counts, so any other palette effect is drawn
+ * as before. Sprites keep the faded colours: they are a few tiles.
+ */
+extern uint16_t gPlttBufferUnfaded[];
+static float sPaletteFade;
+/* The colour it fades towards, GBA BGR555. */
+static uint16_t sPaletteFadeColor;
+/* Set while a layer texture is drawn: it holds the unfaded colours. */
+static bool sInLayerTexture;
+
+static uint16_t FadeColor(unsigned color, unsigned to, unsigned y)
+{
+    int r = color & 31, g = (color >> 5) & 31, b = (color >> 10) & 31;
+    int tr = to & 31, tg = (to >> 5) & 31, tb = (to >> 10) & 31;
+
+    r += ((tr - r) * (int)y) >> 4;
+    g += ((tg - g) * (int)y) >> 4;
+    b += ((tb - b) * (int)y) >> 4;
+    return (uint16_t)(r | g << 5 | b << 10);
+}
+
+/*
+ * The value (0-31) one channel of every background colour is faded towards
+ * by y, or -1. Tried value by value: a wrong one fails on the first colours,
+ * so this is cheap unless it matches.
+ */
+static int FadeChannelTarget(const uint16_t *now, const uint16_t *unfaded, unsigned shift, unsigned y)
+{
+    for (int to = 0; to < 32; ++to)
+    {
+        unsigned i = 0;
+
+        for (; i < 256; ++i)
+        {
+            int u = (unfaded[i] >> shift) & 31, f = (now[i] >> shift) & 31;
+            if (u + (((to - u) * (int)y) >> 4) != f) break;
+        }
+        if (i == 256) return to;
+    }
+    return -1;
+}
+
+/* The coefficient (1-16) the background colours are faded by, or 0. */
+static unsigned DetectPaletteFade(uint16_t *color)
+{
+    const uint16_t *now = sMemory.palette, *unfaded = gPlttBufferUnfaded;
+
+    if (!memcmp(now, unfaded, 512)) return 0;
+    for (unsigned w = 0; w < 2; ++w)
+        for (unsigned y = 1; y <= 16; ++y)
+        {
+            unsigned i = 0;
+
+            while (i < 256 && FadeColor(unfaded[i], w ? 0x7fff : 0, y) == (now[i] & 0x7fff)) ++i;
+            if (i == 256)
+            {
+                *color = w ? 0x7fff : 0;
+                return y;
+            }
+        }
+    /* Any other colour, channel by channel: the transitions' grey flash. */
+    for (unsigned y = 1; y <= 16; ++y)
+    {
+        int r = FadeChannelTarget(now, unfaded, 0, y), g, b;
+
+        if (r < 0 || (g = FadeChannelTarget(now, unfaded, 5, y)) < 0
+            || (b = FadeChannelTarget(now, unfaded, 10, y)) < 0)
+            continue;
+        *color = (uint16_t)(r | g << 5 | b << 10);
+        return y;
+    }
+    return 0;
+}
+
 static void UpdatePalette(void)
 {
     bool bgChanged = false, objChanged = false;
+    unsigned fade = DetectPaletteFade(&sPaletteFadeColor);
+    const uint16_t *bgSource = fade ? gPlttBufferUnfaded : sMemory.palette;
+
+    sPaletteFade = fade / 16.0f;
     for (unsigned bank = 0; bank < 32; ++bank)
-        if (memcmp(sPalette + bank * 16, sMemory.palette + bank * 16, 32))
+    {
+        const uint16_t *source = bank < 16 ? bgSource : sMemory.palette;
+
+        if (memcmp(sPalette + bank * 16, source + bank * 16, 32))
         {
             unsigned group = bank < 16 ? 32 : 33;
             if (bank < 16 ? !bgChanged : !objChanged)
@@ -332,8 +477,8 @@ static void UpdatePalette(void)
             for (unsigned index = 0; index < 16; ++index)
             {
                 unsigned p = bank * 16 + index;
-                if (sPalette[p] == sMemory.palette[p]) continue;
-                sPalette[p] = sMemory.palette[p];
+                if (sPalette[p] == source[p]) continue;
+                sPalette[p] = source[p];
                 sTexturePalette[p] = CtrVideo_RGBA5551(sPalette[p]);
                 sPaletteChanges[bank][0] |= 1u << index;
                 unsigned entry = p & 255;
@@ -342,6 +487,7 @@ static void UpdatePalette(void)
             ++sPaletteVersion[bank];
             if (bank < 16) bgChanged = true; else objChanged = true;
         }
+    }
     if (bgChanged) ++sPaletteVersion[32];
     if (objChanged) ++sPaletteVersion[33];
 }
@@ -463,7 +609,13 @@ static void Blend(unsigned layer, bool effects, bool semiTransparent)
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA,
                   GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
     unsigned control = Reg(0x50), effect = (control >> 6) & 3;
-    C2D_PlainImageTint(&sTint, C2D_Color32(255, 255, 255, 255), 0);
+    /* The palette fade (UpdatePalette) is on a background whatever the
+     * windows say; the brightness effect of BLDY replaces it below. */
+    bool paletteTint = sPaletteFade > 0 && !sInLayerTexture && (layer < 4 || layer == 5);
+    uint32_t fadeTo = CtrVideo_RGBA8(sPaletteFadeColor, true);
+
+    C2D_PlainImageTint(&sTint, C2D_Color32(fadeTo >> 24, fadeTo >> 16, fadeTo >> 8, 255),
+                       paletteTint ? sPaletteFade : 0);
     if (!effects) return;
     if ((effect == 1 && (control & (1u << layer))) || semiTransparent)
     {
@@ -855,11 +1007,14 @@ static void MeasureStill(unsigned bg)
  */
 #define FADE_ACROSS 56.0f
 #define FADE_DOWN 28.0f
+static bool StageUnfaded(void);
 
 static float EdgeFade(int x, int y, int top, int bottom)
 {
     float across = x < 0 ? -x / FADE_ACROSS : x > 240 ? (x - 240) / FADE_ACROSS : 0.0f;
     float down = y < top ? (top - y) / FADE_DOWN : y > bottom ? (y - bottom) / FADE_DOWN : 0.0f;
+
+    if (StageUnfaded()) return 0.0f;
     float fade = across > down ? across : down;
 
     return fade > 1.0f ? 1.0f : fade;
@@ -873,6 +1028,27 @@ static float EdgeFade(int x, int y, int top, int bottom)
  */
 static bool sUnderlaid;
 
+/*
+ * Rayquaza on the title screen stands on the bottom edge of the screen, as it
+ * does on the GBA's, rather than 40 lines above it: its layer is drawn that
+ * much lower, so nothing has to be made up under its coils, and the room it
+ * leaves above is its sky, carried up from its top row. Nothing on this
+ * screen fades: its margins are its edge tiles repeated at full light, and
+ * no black is laid under them.
+ */
+#define TITLE_RAYQUAZA_DROP (CTR_GAME_HEIGHT - 160 - CTR_STAGE_Y)
+int CtrTitleScreen_RayquazaBg(void);
+
+static int StageLayerDrop(unsigned bg)
+{
+    return sStage && CtrTitleScreen_RayquazaBg() == (int)bg ? TITLE_RAYQUAZA_DROP : 0;
+}
+
+static bool StageUnfaded(void)
+{
+    return sStage && CtrTitleScreen_RayquazaBg() >= 0;
+}
+
 static void StageUnderlay(void)
 {
     unsigned display = Reg(0), mode = display & 7;
@@ -882,7 +1058,7 @@ static void StageUnderlay(void)
     sUnderlaid = false;
     /* Under windows the margins may be the backdrop on purpose (the
      * letterbox, which flashes with it), so nothing is assumed there. */
-    if (!sStage || (display & 128) || (display & 0x6000)) return;
+    if (!sStage || StageUnfaded() || (display & 128) || (display & 0x6000)) return;
     for (unsigned bg = 0; bg < 4; ++bg)
         if ((display & (0x100u << bg)) && !sScrolls[bg] && mode != 2 && !(mode == 1 && bg == 2))
             still = true;
@@ -897,14 +1073,20 @@ static void StageUnderlay(void)
 
 /*
  * The GBA brightness effect a layer is under (BLDCNT effect 2 or 3), as the
- * colour it moves towards and how far; 0 when there is none.
+ * colour it moves towards and how far; else a background's palette fade drawn
+ * as a tint (UpdatePalette); 0 when there is neither.
  */
 static float LayerBrightness(unsigned layer, bool *white)
 {
     unsigned control = Reg(0x50), effect = (control >> 6) & 3;
 
     *white = effect == 2;
-    if (!(control & (1u << layer)) || effect < 2) return 0.0f;
+    if (!(control & (1u << layer)) || effect < 2)
+    {
+        /* The stages' own edge fades know black and white only. */
+        *white = sPaletteFadeColor == 0x7fff;
+        return sInLayerTexture || layer > 5 || layer == 4 ? 0.0f : sPaletteFade;
+    }
     return Min(Reg(0x54) & 31, 16) / 16.0f;
 }
 
@@ -930,8 +1112,10 @@ static void FadeCorner(C2D_ImageTint *tint, C2D_Corner corner, float f, float k,
  * something drawn over part of it: the title screen's bottom row is its
  * backdrop with the tail and coils of Rayquaza across the middle, and those
  * repeated downwards are streaks. Such a row carries on as its plain tile,
- * and the objects stay in the picture. The entry that fills at least 60% of
- * the row, or ~0u when none does.
+ * and the objects stay in the picture. The entry that fills at least 40% of
+ * the row, or ~0u when none does: Rayquaza's coils take half of that row, its
+ * backdrop tile only the other half, and anything spread over less than 40%
+ * of a row is the picture itself, not a band behind it.
  */
 static unsigned EdgeRowPlain(unsigned bg, int y)
 {
@@ -954,7 +1138,7 @@ static unsigned EdgeRowPlain(unsigned bg, int y)
         for (unsigned k = 0; k < 30; ++k) count += entries[k] == entries[c];
         if (count > bestCount) { bestCount = count; best = entries[c]; }
     }
-    return bestCount * 10 >= 30 * 6 ? best : ~0u;
+    return bestCount * 10 >= 30 * 4 ? best : ~0u;
 }
 
 static void DrawEdgeRegion(unsigned bg, int x0, int x1, int y0, int y1, int top, int bottom)
@@ -1335,12 +1519,13 @@ int CtrPokenavList_Bg(void);
 static unsigned CentredLayers(const CentredFill *fill)
 {
     unsigned display = Reg(0), best = 4, priority = 0;
-    /* A PokéNav list scrolls behind the screen's frame: the frame is what
-     * goes on past the picture, not the list's next entries. */
-    int list = CtrPokenavList_Bg();
+    int list;
 
     if (!fill->backmost) return fill->layers;
     if ((display & 7) > 2) return 0;
+    /* A PokéNav list scrolls behind the screen's frame: the frame is what
+     * goes on past the picture, not the list's next entries. */
+    list = CtrPokenavList_Bg();
     for (unsigned bg = 0; bg < 4; ++bg)
         if ((display & (0x100u << bg)) && (Reg(8 + bg * 2) & 3) >= priority && (int)bg != list
          && !((display & 7) == 1 && bg == 3) && !((display & 7) == 2 && bg < 2))
@@ -1522,8 +1707,8 @@ static void DrawTextBg(unsigned bg)
 /*
  * Layer textures. A text background is composed once, unscrolled, into a
  * texture of its own that repeats exactly like its tilemap wraps, and kept
- * there for as long as its tilemap, its tiles and its palettes stay the same
- * (LayerHash). Drawing it is then a handful of quads cut from that texture
+ * there, only the cells whose tile, entry or palette changed drawn again
+ * (LayerRenderCells). Drawing it is then a handful of quads cut from that texture
  * instead of one quad per 8x8 tile:
  *
  * - a background that scrolls per line (the waves of the intro and the title)
@@ -1544,13 +1729,24 @@ typedef struct
 {
     C3D_Tex tex;
     C3D_RenderTarget *target;
-    uint32_t hash, usedFrame;
+    uint32_t usedFrame;
     bool valid;
 } LayerTexture;
 static LayerTexture sLayers[4];
 /* Whether each background is drawn from its texture this frame. */
 static bool sLayerReady[4];
 static uint32_t sLayerFailFrame;
+/*
+ * A stage whose layer textures found no VRAM because the depth planes hold it.
+ * Its layers drawn tile by tile cost 30 ms a frame on an Old 3DS, so the
+ * planes give way to them: first the nearest (sPlaneShrinkAsked), which is
+ * what the intro needs, and only with two left all of them, the stage then
+ * composed per eye - twice the work, 30 fps - until it is over.
+ */
+static bool sStageWithoutPlanes;
+static bool sPlaneShrinkAsked;
+static bool sBandsReady;
+void CtrVideo_RequestPlaneRelease(void);
 
 static unsigned LineValue(unsigned reg, int y, unsigned base)
 {
@@ -1638,10 +1834,23 @@ static void LayersPrepare(void)
             if (!C3D_TexInitVRAM(&layer->tex, width, height, GPU_RGBA5551)
                 || !(layer->target = C3D_RenderTargetCreateFromTex(&layer->tex, GPU_TEXFACE_2D, 0, -1)))
             {
+                LayerRelease(bg);
+                if (sStage && sBandsReady)
+                {
+                    /* Tile by tile for this one frame; a plane goes, or with
+                     * only two left, all of them (sPlaneShrinkAsked). */
+                    if (sBandCount > 2)
+                        sPlaneShrinkAsked = true;
+                    else
+                    {
+                        sStageWithoutPlanes = true;
+                        CtrVideo_RequestPlaneRelease();
+                    }
+                    continue;
+                }
                 if (!sLayerFailFrame)
                     CtrLog_Write(CTR_LOG_ERROR, "VIDEO: no VRAM for a %ux%u layer texture (free=%lu); "
                                  "tile walk", width, height, (unsigned long)vramSpaceFree());
-                LayerRelease(bg);
                 sLayerFailFrame = sStats.frames | 1;
                 continue;
             }
@@ -1654,44 +1863,8 @@ static void LayersPrepare(void)
 }
 
 /*
- * Everything a layer texture is made of: its control register, its tilemap,
- * the tiles the tilemap uses and the version of every palette it can use.
- * Any change among them recomposes the texture; nothing else does.
- */
-static uint32_t LayerHash(unsigned bg)
-{
-    unsigned control = Reg(8 + bg * 2), size = control >> 14;
-    unsigned map = ((control >> 8) & 31) * 0x800;
-    unsigned chars = ((control >> 2) & 3) * 0x4000;
-    bool color256 = (control & 128) != 0;
-    unsigned words = (size == 0 ? 1024 : size == 3 ? 4096 : 2048) / 2;
-    const uint32_t *entries = (const uint32_t *)(sMemory.vram + map);
-    uint32_t hash = 2166136261u ^ control;
-    unsigned last = 0, bytes;
-
-    if (map + words * 4 > 0x10000) words = (0x10000 - map) / 4;
-    for (unsigned i = 0; i < words; ++i)
-    {
-        uint32_t pair = entries[i];
-
-        hash = (hash ^ pair) * 16777619u;
-        if ((pair & 1023) > last) last = pair & 1023;
-        if (((pair >> 16) & 1023) > last) last = (pair >> 16) & 1023;
-    }
-    bytes = (last + 1) * (color256 ? 64 : 32);
-    if (chars + bytes > 0x10000) bytes = 0x10000 - chars;
-    {
-        const uint32_t *tiles = (const uint32_t *)(sMemory.vram + chars);
-
-        for (unsigned i = 0; i < bytes / 4; ++i) hash = (hash ^ tiles[i]) * 16777619u;
-    }
-    if (color256) hash = (hash ^ sPaletteVersion[32]) * 16777619u;
-    else for (unsigned bank = 0; bank < 16; ++bank) hash = (hash ^ sPaletteVersion[bank]) * 16777619u;
-    return hash;
-}
-
-/*
- * The field's backgrounds, kept in their textures cell by cell.
+ * Every layer texture - the field's, the stages', the line windows' - is kept
+ * cell by cell.
  *
  * Walked tile by tile, the 2D field is three 400x240 layers, about 4700 quads
  * a frame: 20 ms of CPU on an Old 3DS, so it never made 60 fps. Composed into
@@ -1703,6 +1876,11 @@ static uint32_t LayerHash(unsigned bg)
  * drawn again: a row or a column as the camera moves, the animated tiles when
  * they animate. A frame where most cells changed (a new map, a palette fade)
  * is recomposed whole.
+ *
+ * The stages had a hash of the whole layer instead, and the title screen
+ * cycles the colour of Rayquaza's markings every fourth frame: the whole
+ * 1024-tile layer was drawn again each time, a dropped frame on an Old 3DS
+ * for a dozen tiles that changed.
  */
 #define LAYER_CELLS 4096
 static uint32_t sCellSig[4][LAYER_CELLS];
@@ -1766,6 +1944,7 @@ static bool LayerRenderCells(unsigned bg)
     sCellControl[bg] = control;
 
     BlendForget();
+    sInLayerTexture = true;
     if (full || count > cells / 2)
     {
         C2D_TargetClear(layer->target, 0);
@@ -1799,6 +1978,8 @@ static bool LayerRenderCells(unsigned bg)
                      cellEntry[cell] & 1024, cellEntry[cell] & 2048);
     }
     C2D_Flush();
+    sInLayerTexture = false;
+    BlendForget();
     return true;
 }
 
@@ -1837,53 +2018,7 @@ static void LayersRender(void)
     bool any = false;
 
     for (unsigned bg = 0; bg < 4; ++bg)
-    {
-        LayerTexture *layer = &sLayers[bg];
-        unsigned control = Reg(8 + bg * 2), size = control >> 14;
-        unsigned map = ((control >> 8) & 31) * 0x800;
-        unsigned chars = ((control >> 2) & 3) * 0x4000;
-        bool color256 = (control & 128) != 0;
-        unsigned columns = (size & 1) ? 64 : 32, rows = (size & 2) ? 64 : 32;
-        uint32_t hash;
-
-        if (!sLayerReady[bg]) continue;
-        if (sFieldLayers)
-        {
-            if (LayerRenderCells(bg)) any = true;
-            continue;
-        }
-        hash = LayerHash(bg);
-        if (layer->valid && layer->hash == hash) continue;
-        layer->hash = hash;
-        layer->valid = true;
-        /* What the field's cells remember is gone from the texture: the field
-         * composes it whole when it comes back (the PokéNav's bars stayed
-         * over the town, black, in the cells whose tile had not changed). */
-        sCellControl[bg] = ~0u;
-        any = true;
-        BlendForget();
-        C2D_TargetClear(layer->target, 0);
-        C2D_SceneBegin(layer->target);
-        C2D_ViewReset();
-        Blend(bg, false, false);
-        for (unsigned row = 0; row < rows; ++row)
-        {
-            unsigned rowBase = map + CtrVideo_TextMapOffset(0, row, size);
-
-            for (unsigned column = 0; column < columns; ++column)
-            {
-                unsigned entry = Read16(rowBase + (column & 31) * 2 + (column >> 5) * 2048);
-                unsigned address = chars + (entry & 1023) * (color256 ? 64 : 32);
-                int slot;
-
-                if (address >= 0x10000) continue;
-                slot = GetTileSlot(address, entry >> 12, color256);
-                if (slot >= 0)
-                    DrawSlot(slot, column * 8, row * 8, entry & 1024, entry & 2048);
-            }
-        }
-        C2D_Flush();
-    }
+        if (sLayerReady[bg] && LayerRenderCells(bg)) any = true;
     /* Rendering to a texture and then sampling it needs a command split. */
     if (any) C3D_FrameSplit(0);
 }
@@ -2495,6 +2630,8 @@ static void DrawObjects(unsigned priority, bool effects)
         if (sVoxelWeatherOnly && !(sVoxelWeatherOam[i >> 5] & (1u << (i & 31))))
             continue;
 #endif
+        if (sObjFilter != OBJ_ALL && TransitionOam((unsigned)i) != (sObjFilter == OBJ_TRANSITION))
+            continue;
         const uint16_t *obj = sMemory.oam + i * 4;
         unsigned attr0 = obj[0], attr1 = obj[1], attr2 = obj[2];
         bool affine = (attr0 & 0x100) != 0, color256 = (attr0 & 0x2000) != 0;
@@ -2507,7 +2644,7 @@ static void DrawObjects(unsigned priority, bool effects)
         unsigned boxW = affine && (attr0 & 0x200) ? width * 2 : width;
         unsigned boxH = affine && (attr0 & 0x200) ? height * 2 : height;
         int x = attr1 & 511, y = attr0 & 255;
-        if (sStage || sCentred || sBattle)
+        if (sStage || sCentred || sBattle || sTransitionCompose)
         {
             /*
              * The GBA's own reading: a sprite only comes back from the other
@@ -2624,16 +2761,20 @@ static void Layers(unsigned mask)
     for (int priority = 3; priority >= 0; --priority)
     {
         /* One depth plane at a time while composing them separately. */
-        if (!(sPriorityMask & (1u << priority))) continue;
+        if (!(sPriorityMask & (SLOT_OBJ(priority) | SLOT_BG(priority)))) continue;
         /* Priority is the depth scale: 3 stays at the screen plane. */
         sLayerShift = (sLayerOrigin + sParallax * (3 - priority)) / sShiftZoom;
-        for (int bg = 3; bg >= 0; --bg)
+        for (int bg = 3; bg >= 0 && (sPriorityMask & SLOT_BG(priority)); --bg)
         {
             if (!(mask & (1u << bg)) || !(display & (0x100u << bg)) || (Reg(8 + bg * 2) & 3) != (unsigned)priority) continue;
             if ((mode == 1 && bg == 3) || (mode == 2 && bg < 2)) continue;
             if (Reg(8 + bg * 2) & 0x40) Error(11, "BG mosaic not supported");
-            int clipY0 = sClipY0, clipY1 = sClipY1, viewY = sViewY;
+            int clipY0 = sClipY0, clipY1 = sClipY1, viewY = sViewY, drop = StageLayerDrop(bg);
             bool lines = sNavBand && !(CentredLayers(&sCentredFills[sCentredScreen]) & (1u << bg));
+
+            sViewY += drop;
+            sClipY0 -= drop;
+            sClipY1 -= drop;
             if (lines)
             {
                 int lower = NavLayerShift(bg);
@@ -2664,16 +2805,13 @@ static void Layers(unsigned mask)
             else if (!DrawLineBg(bg) && !DrawFieldBgTex(bg) && !DrawStageBgTex(bg) && !DrawBandBgTex(bg))
                 DrawTextBg(bg);
             sLayerShift = shift;
-            if (lines)
-            {
-                sViewY = viewY;
-                sClipY0 = clipY0;
-                sClipY1 = clipY1;
-                NavScissor(sNavBand->screenTop, sNavBand->screenBottom);
-            }
+            sViewY = viewY;
+            sClipY0 = clipY0;
+            sClipY1 = clipY1;
+            if (lines) NavScissor(sNavBand->screenTop, sNavBand->screenBottom);
             sBgTicks += svcGetSystemTick() - start;
         }
-        if ((mask & 16) && (display & 0x1000))
+        if ((mask & 16) && (display & 0x1000) && (sPriorityMask & SLOT_OBJ(priority)))
         {
             uint64_t start = svcGetSystemTick();
             DrawObjects(priority, mask & 32);
@@ -2727,7 +2865,7 @@ static bool BattleCurtain(void)
 
 static void WindowSpan(unsigned limits, bool vertical, int *first, int *last)
 {
-    bool gba = sStage || sBattle;
+    bool gba = sStage || sBattle || sTransitionCompose;
     unsigned extent = gba ? (vertical ? 160u : 240u)
                           : (vertical ? (unsigned)CTR_GAME_HEIGHT : (unsigned)CTR_GAME_WIDTH);
 
@@ -2735,7 +2873,8 @@ static void WindowSpan(unsigned limits, bool vertical, int *first, int *last)
     *last = WindowEdge(limits, true, extent);
     if (!gba) return;
     if ((limits & 255) > extent || (limits >> 8) > (limits & 255)) *last = (int)extent;
-    if (*first >= *last) return;
+    /* A transition is composed as the GBA picture, margins added after. */
+    if (*first >= *last || sTransitionCompose) return;
     if (vertical && sBattle && !BattleCurtain())
     {
         if (*first == 0) *first = VIEW_TOP;
@@ -2840,14 +2979,19 @@ static bool Inside(int px, int py, unsigned w)
     return x0 < x1 && y0 < y1 && px >= x0 && px < x1 && py >= y0 && py < y1;
 }
 
-static void ComposeBand(int top, int bottom)
+/*
+ * The rectangles lines [top, bottom) split into by the windows, each with the
+ * layer mask it shows: WIN0 > WIN1 > outside. At most 5 x 5 of them.
+ */
+#define WINDOW_RECTS 25
+static unsigned WindowPartition(int top, int bottom, int rects[WINDOW_RECTS][4],
+                                unsigned masks[WINDOW_RECTS])
 {
-    unsigned display = Reg(0);
-    /* Partition by window edges; each nonoverlapping rectangle has a uniform
-     * WIN0 > WIN1 > outside mask. GPU scissor clips transformed primitives. */
+    unsigned display = Reg(0), count = 0;
     /* Window rectangles are GBA coordinates; the partition covers the whole
      * viewport so the margins keep the "outside" mask. */
-    int xs[6] = {sNavBand ? 0 : VIEW_LEFT, sNavBand ? 240 : VIEW_RIGHT};
+    bool gba = sNavBand || sTransitionCompose;
+    int xs[6] = {gba ? 0 : VIEW_LEFT, gba ? 240 : VIEW_RIGHT};
     int ys[6] = {top, bottom};
     unsigned nx = 2, ny = 2;
     for (unsigned w = 0; w < 2; ++w)
@@ -2858,6 +3002,11 @@ static void ComposeBand(int top, int bottom)
             WindowRect(w, &x0, &x1, &y0, &y1);
             if (y0 < top) y0 = top;
             if (y1 > bottom) y1 = bottom;
+            if (sTransitionCompose)
+            {
+                if (x0 < xs[0]) x0 = xs[0];
+                if (x1 > xs[1]) x1 = xs[1];
+            }
 
             /*
              * A window left enabled with both edges past the screen is how the
@@ -2880,15 +3029,39 @@ static void ComposeBand(int top, int bottom)
     for (unsigned y = 0; y + 1 < ny; ++y) for (unsigned x = 0; x + 1 < nx; ++x)
     {
         if (xs[x] == xs[x+1] || ys[y] == ys[y+1]) continue;
-        unsigned mask = Reg(0x4a) & 63;
+        unsigned mask = (display & 0x6000) ? Reg(0x4a) & 63 : 63;
         for (int w = 1; w >= 0; --w)
             if ((display & (0x2000u << w)) && Inside(xs[x], ys[y], (unsigned)w))
                 mask = (Reg(0x48) >> (8*w)) & 63;
+        rects[count][0] = xs[x];
+        rects[count][1] = ys[y];
+        rects[count][2] = xs[x+1];
+        rects[count][3] = ys[y+1];
+        masks[count++] = mask;
+    }
+    return count;
+}
+
+/* Layers a transition's band composes through its windows (TransitionCompose). */
+static unsigned sTransitionLayers;
+
+static void ComposeBand(int top, int bottom)
+{
+    int rects[WINDOW_RECTS][4];
+    unsigned masks[WINDOW_RECTS];
+    unsigned count = WindowPartition(top, bottom, rects, masks);
+
+    /* Each rectangle has a uniform mask. GPU scissor clips transformed primitives. */
+    for (unsigned i = 0; i < count; ++i)
+    {
+        unsigned mask = sTransitionCompose ? masks[i] & sTransitionLayers : masks[i];
+
+        if (sTransitionCompose && !(mask & 17u)) continue;
         C2D_Flush();
-        Scissor(xs[x], ys[y], xs[x+1], ys[y+1]);
+        Scissor(rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
         sScissored = true;
-        sClipX0 = xs[x]; sClipX1 = xs[x+1];
-        sClipY0 = ys[y]; sClipY1 = ys[y+1];
+        sClipX0 = rects[i][0]; sClipX1 = rects[i][2];
+        sClipY0 = rects[i][1]; sClipY1 = rects[i][3];
         Layers(mask);
     }
 }
@@ -3012,7 +3185,7 @@ static void SceneRelease(void)
 
 static void ScenePrepare(void)
 {
-    if (!sBattle)
+    if (!sBattle && !sTransition)
     {
         if (sScene && sStats.frames - sSceneUsedFrame > LAYER_IDLE_FRAMES) SceneRelease();
         return;
@@ -3335,7 +3508,7 @@ static void VoxelBackgroundBlur(void)
 
 static void ComposeVoxelOverlay(void)
 {
-    sPriorityMask = 15;
+    sPriorityMask = SLOTS_ALL;
     sParallax = 0;
     sLayerOrigin = 0.0f;
     sLayerShift = 0.0f;
@@ -3361,6 +3534,12 @@ static void RenderVoxel(uint32_t clear)
     const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
 
+    /* The brightness effect (BLDY) on the field's backgrounds and sprites. */
+    unsigned control = Reg(0x50), effect = (control >> 6) & 3;
+    float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
+
+    CtrVoxel_SetBrightness((control & 0x0e) ? bright : 0.0f, (control & 0x10) ? bright : 0.0f,
+                           effect == 2);
     /* C2D_TargetClear clears colour and depth, which the 3D pass needs. */
     C2D_TargetClear(sLogical, clear);
     CtrVoxel_Draw(sLogical, 0.0f);
@@ -3387,6 +3566,425 @@ static void RenderVoxel(uint32_t clear)
 #endif
 
 /*
+ * A battle transition over the field (CtrVideo_SetTransition).
+ *
+ * The transitions are compiled for the GBA screen (ctr_gba_transition.h) and
+ * shown at the battle scene's scale, 1.5, centred across, 20 pixels of margin
+ * each side carrying their edge columns: the battle that follows them is
+ * framed the same way. What they do falls in two parts:
+ *
+ * - The field - the 2D layers or the voxel world, whole, in the logical
+ *   surface - moved line by line as their scroll registers say (the swirl,
+ *   the slice, the ripple...) and dimmed or brightened as BLDY says, so it is
+ *   drawn to the screen in bands of lines that share those.
+ * - Their own picture: BG0, their sprites and the backdrop wherever their
+ *   windows hide the field. Composed like any GBA screen, band by band of
+ *   lines whose registers match (sLineRegs), at 2x into the battle scene's
+ *   surface and drawn from it at 0.75 with filtering, as the battle scene
+ *   is. 160 lines at 2x do not fit its 256, so the two halves of the picture
+ *   lie side by side, a line of overlap each so the filter reads real lines
+ *   across the seam.
+ */
+#define TRANSITION_ZOOM 1.5f
+#define TRANSITION_X ((CTR_GAME_WIDTH - 240 * TRANSITION_ZOOM) / 2)
+#define TRANSITION_HALF 80
+/* Where each half starts in the scene surface: across, and rows down. */
+#define TRANSITION_HALF_X 512
+#define TRANSITION_HALF_TOP 2
+
+/* The first screen line of GBA line g: ceil(g * 1.5). */
+static int TransitionLine(int g)
+{
+    return (g * 3 + 1) / 2;
+}
+
+/* The field's displacement and brightness on GBA line g of the transition. */
+typedef struct
+{
+    int dx, dy;
+    float bright;
+    bool white;
+} TransitionBand;
+
+static TransitionBand TransitionBandAt(int g, unsigned targets)
+{
+    const uint16_t *line = sLineRegs[g], *base = sLineRegs[0];
+    /* BG1: the transitions move the field's three layers together. */
+    unsigned control = line[(0x50 - CTR_LINE_REG_FIRST) / 2], effect = (control >> 6) & 3;
+    TransitionBand band = {
+        (int16_t)(line[(0x14 - CTR_LINE_REG_FIRST) / 2] - base[(0x14 - CTR_LINE_REG_FIRST) / 2]),
+        (int16_t)(line[(0x16 - CTR_LINE_REG_FIRST) / 2] - base[(0x16 - CTR_LINE_REG_FIRST) / 2]),
+        0.0f, effect == 2};
+
+    if (effect >= 2 && (control & targets))
+        band.bright = Min(line[(0x54 - CTR_LINE_REG_FIRST) / 2] & 31, 16) / 16.0f;
+    return band;
+}
+
+static bool SameBand(const TransitionBand *a, const TransitionBand *b)
+{
+    return a->dx == b->dx && a->dy == b->dy && a->bright == b->bright && a->white == b->white;
+}
+
+/* The field from the logical surface, band by band, onto the target. */
+static void TransitionField(void)
+{
+    for (int g = 0, next; g < CTR_GBA_LINES; g = next)
+    {
+        TransitionBand band = TransitionBandAt(g, 0x1e);
+        C2D_ImageTint tint;
+        int sx = (int)roundf(band.dx * TRANSITION_ZOOM), sy = (int)roundf(band.dy * TRANSITION_ZOOM);
+        int y0 = TransitionLine(g), y1, x0, x1;
+
+        for (next = g + 1; next < CTR_GBA_LINES; ++next)
+        {
+            TransitionBand other = TransitionBandAt(next, 0x1e);
+            if (!SameBand(&band, &other)) break;
+        }
+        y1 = TransitionLine(next);
+        /* Only what the surface holds: past its edges is the backdrop. */
+        x0 = sx < 0 ? -sx : 0;
+        x1 = sx > 0 ? CTR_GAME_WIDTH - sx : CTR_GAME_WIDTH;
+        if (y0 + sy < 0) y0 = -sy;
+        if (y1 + sy > CTR_GAME_HEIGHT) y1 = CTR_GAME_HEIGHT - sy;
+        if (x0 >= x1 || y0 >= y1) continue;
+        {
+            const Tex3DS_SubTexture run = {(u16)(x1 - x0), (u16)(y1 - y0),
+                (x0 + sx) / 512.0f, 1.0f - (y0 + sy) / 256.0f,
+                (x1 + sx) / 512.0f, 1.0f - (y1 + sy) / 256.0f};
+            unsigned c = band.white ? 255 : 0;
+
+            C2D_PlainImageTint(&tint, C2D_Color32(c, c, c, 255), band.bright);
+            C2D_DrawImageAt((C2D_Image){&sSurface, &run}, x0, y0, 0,
+                            band.bright > 0.0f ? &tint : NULL, 1, 1);
+        }
+    }
+}
+
+/*
+ * Groups of registers a band of the transition's lines must share, as
+ * [first, end) offsets: BG0's scroll, the windows, the blending.
+ */
+static const uint8_t sBg0Regs[2] = {0x10, 0x14};
+static const uint8_t sWindowRegs[2] = {0x40, 0x4c};
+/* BLDY is left out: brightness is applied as the picture is drawn. */
+static const uint8_t sBlendRegs[2] = {0x50, 0x54};
+
+static bool SameRegs(int a, int b, const uint8_t group[2])
+{
+    unsigned first = (group[0] - CTR_LINE_REG_FIRST) / 2, count = (group[1] - group[0]) / 2;
+
+    return !memcmp(&sLineRegs[a][first], &sLineRegs[b][first], count * sizeof(uint16_t));
+}
+
+/* The end of the band of lines from y, before end, that shares these groups. */
+static int BandEnd(int y, int end, const uint8_t (*const groups[])[2], unsigned count)
+{
+    int next = y + 1;
+
+    for (; next < end; ++next)
+        for (unsigned g = 0; g < count; ++g)
+            if (!SameRegs(y, next, *groups[g])) return next;
+    return next;
+}
+
+/* Line y's registers for composing the picture: the brightness effect is
+ * drawn later, per line, over the picture and the field alike. */
+static const uint16_t *PictureRegs(int y)
+{
+    static uint16_t regs[CTR_LINE_REGS];
+    unsigned index = (0x50 - CTR_LINE_REG_FIRST) / 2;
+
+    memcpy(regs, sLineRegs[y], sizeof(regs));
+    if (((regs[index] >> 6) & 3) >= 2) regs[index] &= ~0xc0u;
+    return regs;
+}
+
+/*
+ * Which of the transition's own layers hold anything this frame: BG0 (a tile
+ * that is not blank anywhere in its map) and its sprites. A wipe or a slice
+ * is only windows over the field: their BG0 is blank and they have no
+ * sprites, and composing those through 160 bands of windows is what cost a
+ * frame and a half on an Old 3DS.
+ */
+static unsigned TransitionLayersPresent(void)
+{
+    unsigned display = Reg(0), present = 0;
+
+    if (display & 0x100)
+    {
+        unsigned control = Reg(8), size = control >> 14;
+        unsigned map = ((control >> 8) & 31) * 0x800, chars = ((control >> 2) & 3) * 0x4000;
+        unsigned entries = 1024u * (size == 0 ? 1 : size == 3 ? 4 : 2);
+        bool color256 = (control & 128) != 0;
+        unsigned last = 0x10000;
+
+        for (unsigned i = 0; i < entries && !(present & 1); ++i)
+        {
+            unsigned entry = Read16(map + i * 2);
+            unsigned address = chars + (entry & 1023) * (color256 ? 64 : 32);
+
+            if (entry == last || address >= 0x10000) continue;
+            last = entry;
+            if (GetTileSlot(address, entry >> 12, color256) >= 0) present |= 1;
+        }
+    }
+    if (display & 0x1000)
+        for (unsigned i = 0; i < 128 && !(present & 16); ++i)
+        {
+            unsigned attr0 = sMemory.oam[i * 4];
+
+            /* An entry the game parks hidden is not a sprite on screen. */
+            if (TransitionOam(i) && ((attr0 & 0x100) || !(attr0 & 0x200))) present |= 16;
+        }
+    return present;
+}
+
+/* One half of the picture: its lines and where they go in the surface. */
+static void TransitionHalf(int h, int *first, int *end)
+{
+    *first = h * TRANSITION_HALF - 1;
+    *end = (h + 1) * TRANSITION_HALF + 1;
+    if (*first < 0) *first = 0;
+    if (*end > CTR_GBA_LINES) *end = CTR_GBA_LINES;
+    sOffX = (float)(h * TRANSITION_HALF_X);
+    sOffY = TRANSITION_HALF_TOP - h * TRANSITION_HALF * SCENE_ZOOM;
+}
+
+/*
+ * The transition's own picture into the scene surface (see above).
+ *
+ * Composed band by band as windows dictate, every band walks BG0 and every
+ * sprite again behind a scissor of its own; a wipe moves its window edges on
+ * every line, and 160 bands of that was a frame and more on an Old 3DS. So
+ * the work is split by what actually changes line by line:
+ *
+ * 1. The backdrop where the windows hide the field: solid rectangles, band
+ *    by band of the window registers, no scissor needed.
+ * 2. BG0 and the sprites where the windows show them everywhere they are
+ *    seen: drawn once, or once per band of BG0's scroll and the blending
+ *    (the mugshots' two halves) - a handful of passes, not 160.
+ * 3. Only a layer the windows show in some places and hide in others is
+ *    composed band by band through them.
+ */
+static void TransitionCompose(void)
+{
+    static const uint8_t (*const windowGroups[])[2] = {&sWindowRegs};
+    static const uint8_t (*const layerGroups[])[2] = {&sBg0Regs, &sBlendRegs};
+    static const uint8_t (*const allGroups[])[2] = {&sBg0Regs, &sWindowRegs, &sBlendRegs};
+    float zoom = sZoom, offX = sOffX, offY = sOffY;
+    int viewX = sViewX, viewY = sViewY, surfaceH = sSurfaceH;
+    bool fieldLayers = sFieldLayers, fieldUi = sFieldUi;
+    /* Per layer (BG0, sprites): 1 seen shown, 2 seen hidden. */
+    unsigned bg0 = 0, obj = 0, uniform, mixed, present;
+    uint32_t rgb = CtrVideo_RGBA8(sMemory.palette[0] & 0x7fff, true);
+    uint32_t backdrop = C2D_Color32(rgb >> 24, rgb >> 16, rgb >> 8, 255);
+
+    sTransitionCompose = true;
+    sFieldLayers = sFieldUi = false;
+    sViewX = sViewY = 0;
+    sZoom = SCENE_ZOOM;
+    sSurfaceH = SCENE_H;
+    sObjFilter = OBJ_TRANSITION;
+    BlendForget();
+    C2D_TargetClear(sScene, 0);
+    C2D_SceneBegin(sScene);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    sScissored = false;
+    Blend(5, false, false);
+
+    for (int h = 0, first, end; h < 2; ++h)
+    {
+        TransitionHalf(h, &first, &end);
+        ViewBase();
+        for (int y = first, next; y < end; y = next)
+        {
+            int rects[WINDOW_RECTS][4];
+            unsigned masks[WINDOW_RECTS], count;
+
+            next = BandEnd(y, end, windowGroups, 1);
+            sRegLine = sLineRegs[y];
+            if (Reg(0) & 128) continue;
+            count = WindowPartition(y, next, rects, masks);
+            for (unsigned i = 0; i < count; ++i)
+            {
+                bg0 |= (masks[i] & 1) ? 1 : 2;
+                obj |= (masks[i] & 16) ? 1 : 2;
+                if (!(masks[i] & 0x0e))
+                    C2D_DrawRectSolid(rects[i][0], rects[i][1], 0, rects[i][2] - rects[i][0],
+                                      rects[i][3] - rects[i][1], backdrop);
+            }
+        }
+    }
+
+    present = TransitionLayersPresent();
+    uniform = ((bg0 == 1 ? 1u : 0u) | (obj == 1 ? 16u : 0u)) & present;
+    mixed = ((bg0 == 3 ? 1u : 0u) | (obj == 3 ? 16u : 0u)) & present;
+    for (int h = 0, first, end; uniform && h < 2; ++h)
+    {
+        TransitionHalf(h, &first, &end);
+        for (int y = first, next; y < end; y = next)
+        {
+            next = BandEnd(y, end, layerGroups, 2);
+            sRegLine = PictureRegs(y);
+            if (Reg(0) & 128) continue;
+            /* Blend() keeps its state between calls; BLDY may differ here. */
+            BlendForget();
+            C2D_Flush();
+            Scissor(0, y, 240, next);
+            sScissored = true;
+            sClipX0 = 0; sClipX1 = 240;
+            sClipY0 = y; sClipY1 = next;
+            Layers(uniform | 32u);
+        }
+    }
+    sTransitionLayers = mixed | 32u;
+    for (int h = 0, first, end; mixed && h < 2; ++h)
+    {
+        TransitionHalf(h, &first, &end);
+        for (int y = first, next; y < end; y = next)
+        {
+            next = BandEnd(y, end, allGroups, 3);
+            sRegLine = PictureRegs(y);
+            if (Reg(0) & 128) continue;
+            BlendForget();
+            ComposeBand(y, next);
+        }
+    }
+    sRegLine = NULL;
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    sScissored = false;
+    C3D_FrameSplit(0);
+
+    sObjFilter = OBJ_ALL;
+    sTransitionCompose = false;
+    sFieldLayers = fieldLayers;
+    sFieldUi = fieldUi;
+    sViewX = viewX;
+    sViewY = viewY;
+    sZoom = zoom;
+    sOffX = offX;
+    sOffY = offY;
+    sSurfaceH = surfaceH;
+    ClipToView();
+    BlendForget();
+}
+
+/* The transition's picture from the scene surface onto the target. */
+static void TransitionPicture(void)
+{
+    const uint16_t *line = sLineRegs[0];
+    unsigned control = line[(0x50 - CTR_LINE_REG_FIRST) / 2];
+    const float scale = TRANSITION_ZOOM / SCENE_ZOOM;
+
+    /* BG0 blended over the field (the big Poké Ball): the picture holds BG0
+     * already weighted by EVA; the field underneath keeps its EVB. */
+    if (((control >> 6) & 3) == 1 && (control & 1) && (control & 0x0e00))
+    {
+        unsigned evb = Min((line[(0x52 - CTR_LINE_REG_FIRST) / 2] >> 8) & 31, 16) * 255 / 16;
+
+        C2D_Flush();
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_CONSTANT_ALPHA, GPU_ONE, GPU_ZERO);
+        C3D_BlendingColor(evb << 24);
+    }
+    for (int g = 0, next; g < CTR_GBA_LINES; g = next)
+    {
+        /* The picture's brightness: BG0 and the sprites, line by line. */
+        TransitionBand band = TransitionBandAt(g, 0x11);
+        int h = g / TRANSITION_HALF, halfEnd = (h + 1) * TRANSITION_HALF;
+        C2D_ImageTint tint;
+        unsigned c = band.white ? 255 : 0;
+
+        for (next = g + 1; next < halfEnd; ++next)
+        {
+            TransitionBand other = TransitionBandAt(next, 0x11);
+            if (other.bright != band.bright || other.white != band.white) break;
+        }
+        C2D_PlainImageTint(&tint, C2D_Color32(c, c, c, 255), band.bright);
+        {
+            /* Rows of this band in the half, and on the screen. */
+            float top = TRANSITION_HALF_TOP + (g - h * TRANSITION_HALF) * SCENE_ZOOM;
+            float bottom = TRANSITION_HALF_TOP + (next - h * TRANSITION_HALF) * SCENE_ZOOM;
+            float v0 = 1.0f - top / SCENE_H, v1 = 1.0f - bottom / SCENE_H;
+            float left = (float)(h * TRANSITION_HALF_X) / SCENE_W;
+            float right = (float)(h * TRANSITION_HALF_X + 240 * SCENE_ZOOM) / SCENE_W;
+            float y = g * TRANSITION_ZOOM;
+            const Tex3DS_SubTexture part = {(u16)(240 * SCENE_ZOOM), (u16)(bottom - top),
+                left, v0, right, v1};
+            /* The margins: the picture's first and last columns, stretched. */
+            float edge0 = left + 0.5f / SCENE_W, edge1 = right - 0.5f / SCENE_W;
+            const Tex3DS_SubTexture leftEdge = {1, (u16)(bottom - top), edge0, v0, edge0, v1};
+            const Tex3DS_SubTexture rightEdge = {1, (u16)(bottom - top), edge1, v0, edge1, v1};
+            const C2D_ImageTint *t = band.bright > 0.0f ? &tint : NULL;
+
+            C2D_DrawImageAt((C2D_Image){&sSceneTex, &part}, TRANSITION_X, y, 0, t, scale, scale);
+            C2D_DrawImageAt((C2D_Image){&sSceneTex, &leftEdge}, 0, y, 0, t, TRANSITION_X, scale);
+            C2D_DrawImageAt((C2D_Image){&sSceneTex, &rightEdge}, CTR_GAME_WIDTH - TRANSITION_X, y, 0,
+                            t, TRANSITION_X, scale);
+        }
+    }
+    C2D_Flush();
+    BlendForget();
+}
+
+static void RenderTransition(bool voxel, uint32_t clear)
+{
+    /* The field, whole: its layers as they stand before the first line. */
+    static uint16_t fieldRegs[CTR_LINE_REGS];
+
+    memcpy(fieldRegs, sLineRegs[0], sizeof(fieldRegs));
+    /* Its brightness is the bands' (TransitionField). */
+    fieldRegs[(0x50 - CTR_LINE_REG_FIRST) / 2] = 0;
+    sParallax = 0;
+    sLayerShift = 0;
+    BlendForget();
+#if CTR_VOXEL_ENABLED
+    if (voxel)
+    {
+        CtrVoxel_SetBrightness(0.0f, 0.0f, false);
+        C2D_TargetClear(sLogical, clear);
+        CtrVoxel_Draw(sLogical, 0.0f);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        C3D_FrameSplit(0);
+        C2D_Prepare();
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+        BlendForget();
+    }
+    else
+#else
+    (void)voxel;
+#endif
+    {
+        C2D_TargetClear(sLogical, clear);
+        C2D_SceneBegin(sLogical);
+        Blend(5, false, false);
+        sRegLine = fieldRegs;
+        sLayerExclude = 1;
+        sObjFilter = OBJ_FIELD;
+        ClipToView();
+        if (!(Reg(0) & 128)) Layers(63);
+        sObjFilter = OBJ_ALL;
+        sLayerExclude = 0;
+        sRegLine = NULL;
+        C2D_Flush();
+        C3D_FrameSplit(0);
+        BlendForget();
+    }
+
+    if (sScene) TransitionCompose();
+
+    C2D_TargetClear(sTop, clear);
+    C2D_SceneBegin(sTop);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    TransitionField();
+    if (sScene) TransitionPicture();
+    C2D_Flush();
+    C3D_FrameSplit(0);
+}
+
+/*
  * How many depth planes this frame can be split into.
  *
  * A layer that blends with whatever lies beneath it has to keep that beneath
@@ -3399,22 +3997,79 @@ static void RenderVoxel(uint32_t clear)
  * The result is planes 0..count-2 holding one priority each and the last
  * holding the rest, so the planes never change what a frame looks like.
  */
+/* The depth slots this frame actually draws something in. */
+static unsigned UsedSlots(void)
+{
+    unsigned display = Reg(0), mode = display & 7, used = 0;
+
+    for (unsigned bg = 0; bg < 4; ++bg)
+    {
+        if (!(display & (0x100u << bg))) continue;
+        if ((mode == 1 && bg == 3) || (mode == 2 && bg < 2)) continue;
+        used |= SLOT_BG(Reg(8 + bg * 2) & 3);
+    }
+    if (display & 0x1000)
+        for (unsigned i = 0; i < 128; ++i)
+        {
+            unsigned attr0 = sMemory.oam[i * 4];
+
+            if (!(attr0 & 0x100) && (attr0 & 0x200)) continue;
+            if (((attr0 >> 10) & 3) >= 2) continue;
+            used |= SLOT_OBJ((sMemory.oam[i * 4 + 2] >> 10) & 3);
+        }
+    return used;
+}
+
+/*
+ * The slots of each plane, front to back: every slot in use its own plane,
+ * from the nearest, while planes last; the last plane takes all the rest, and
+ * everything from priority `merge` back (layers scrolled together) is one.
+ * So the depths go where the picture has something - the intro's bike scene
+ * is its sprites, its near layer and its far ones, not three priorities of
+ * which the first is empty.
+ */
+static unsigned sBandSlots[CTR_BANDS];
+
+static unsigned BandsFromSlots(unsigned used, unsigned merge)
+{
+    unsigned count = 0, cut = merge < 4 ? SLOT_OBJ(merge) : 256u, done = 0;
+    /*
+     * What is in front of layers scrolled together keeps a plane of its own
+     * even when planes are short: the field's text window shares priority 0
+     * with sprites, and with two planes the sprites took the near one and
+     * left the window flat on the map.
+     */
+    unsigned front = sBandCount - (cut < 256 && (used & ~(cut - 1)) ? 1 : 0);
+
+    if (!sBandCount) return 0;
+    for (unsigned bit = 1; bit < cut; bit <<= 1)
+    {
+        if (!(used & bit)) continue;
+        if (count + 1 < front) sBandSlots[count++] = bit;
+        else
+            /* The last plane before the cut: this slot and all up to it. */
+            sBandSlots[count++] = (cut - 1) & ~(bit - 1);
+        done = (bit << 1) - 1;
+        if (count == front) { done = cut - 1; break; }
+    }
+    /* The last plane: everything behind what has a plane already. */
+    if (count < sBandCount && (used & ~done)) sBandSlots[count++] = SLOTS_ALL & ~done;
+    else if (count) sBandSlots[count - 1] |= SLOTS_ALL & ~done;
+    if (count == 0) sBandSlots[count++] = SLOTS_ALL;
+    /* The first plane also takes the empty slots in front of it. */
+    sBandSlots[0] |= (sBandSlots[0] & -sBandSlots[0]) - 1;
+    return count;
+}
+
 static unsigned DepthPlanes(void)
 {
-    unsigned display = Reg(0), control = Reg(0x50);
-    unsigned target1 = control & 63, target2 = (control >> 8) & 63;
+    unsigned display = Reg(0);
     unsigned merge = 4;
 
-    if (((control >> 6) & 3) == 1 && target1 && target2 && ((Reg(0x52) >> 8) & 31))
-    {
-        if (target1 & 16) merge = 0;
-        for (unsigned bg = 0; bg < 4 && merge; ++bg)
-            if ((target1 & (1u << bg)) && (display & (0x100u << bg)))
-            {
-                unsigned priority = Reg(8 + bg * 2) & 3;
-                if (priority < merge) merge = priority;
-            }
-    }
+    /*
+     * Blending no longer merges planes: a plane with something that blends
+     * gets what lies behind it underneath, colour only (RenderBands).
+     */
     /*
      * Backgrounds scrolled together are one image cut into layers, like the
      * three metatile layers of the field, and giving them different depths
@@ -3436,18 +4091,49 @@ static unsigned DepthPlanes(void)
             if (otherPriority < priority) priority = otherPriority;
             if (priority < merge) merge = priority;
         }
+    /*
+     * The slots stay in use for the rest of the scene: a sprite that comes
+     * and goes - the logo's letters, a sparkle - would otherwise move every
+     * layer behind it from one plane to the next and back, the depth of the
+     * whole picture flickering with it. A scene is its display control and
+     * background priorities; when they change, so may the depths.
+     */
+    {
+        static unsigned sticky, stickyKey;
+        unsigned key = (display & 0x1f07) | (Reg(8) & 3) << 16 | (Reg(10) & 3) << 18
+                     | (Reg(12) & 3) << 20 | (Reg(14) & 3) << 22 | (unsigned)sStage << 24;
+
+        if (key != stickyKey) sticky = 0;
+        stickyKey = key;
+        sticky |= UsedSlots();
+        return BandsFromSlots(sticky, merge);
+    }
+}
+
+/*
+ * The depth slots holding something that blends with what lies beneath it:
+ * a first target of BLDCNT's alpha blend, or a semi-transparent sprite.
+ */
+static unsigned BlendingPriorities(void)
+{
+    unsigned display = Reg(0), control = Reg(0x50), found = 0;
+    unsigned target1 = control & 63, target2 = (control >> 8) & 63;
+    bool alpha = ((control >> 6) & 3) == 1 && target1 && target2 && ((Reg(0x52) >> 8) & 31);
+
+    if (alpha)
+        for (unsigned bg = 0; bg < 4; ++bg)
+            if ((target1 & (1u << bg)) && (display & (0x100u << bg)))
+                found |= SLOT_BG(Reg(8 + bg * 2) & 3);
     if (display & 0x1000)
-        for (unsigned i = 0; i < 128 && merge; ++i)
+        for (unsigned i = 0; i < 128; ++i)
         {
-            unsigned attr0 = sMemory.oam[i * 4];
-            unsigned priority;
+            unsigned attr0 = sMemory.oam[i * 4], mode = (attr0 >> 10) & 3;
 
             if (!(attr0 & 0x100) && (attr0 & 0x200)) continue;
-            if (((attr0 >> 10) & 3) != 1) continue;
-            priority = (sMemory.oam[i * 4 + 2] >> 10) & 3;
-            if (priority < merge) merge = priority;
+            if (mode == 1 || (mode == 0 && alpha && (target1 & 16)))
+                found |= SLOT_OBJ((sMemory.oam[i * 4 + 2] >> 10) & 3);
         }
-    return merge + 1 > CTR_BANDS ? CTR_BANDS : merge + 1;
+    return found;
 }
 
 /*
@@ -3468,6 +4154,15 @@ void CtrVideo_RequestPlaneRelease(void)
 }
 
 /*
+ * Asked by a stage whose layer textures did not fit beside three planes: the
+ * intro's four 256x512 layers (1 MiB) and three planes (768 KiB) are more than
+ * an Old 3DS has free. Giving up the nearest plane is enough for them, and the
+ * stage keeps two depths; giving up all of them had it composed per eye, and
+ * at 30 fps.
+ */
+static bool sPlaneShrinkAsked;
+
+/*
  * Set inside a frame that wanted the planes and found none. They are made
  * before the next frame opens: a failed attempt frees the planes it did get,
  * and C3D_RenderTargetDelete inside an open frame is svcBreak(USERBREAK_PANIC)
@@ -3485,7 +4180,20 @@ static void BandsRelease(void)
         sBand[i] = NULL;
         memset(&sBandTex[i], 0, sizeof(sBandTex[i]));
     }
+    sBandCount = 0;
     sBandsReady = false;
+}
+
+/* The last plane goes; outside the frame, like BandsRelease. */
+static void BandsShrink(void)
+{
+    unsigned last = sBandCount - 1;
+
+    C3D_RenderTargetDelete(sBand[last]);
+    C3D_TexDelete(&sBandTex[last]);
+    sBand[last] = NULL;
+    memset(&sBandTex[last], 0, sizeof(sBandTex[last]));
+    --sBandCount;
 }
 
 /* Allocated on first use: a console that never opens the 3D slider never pays
@@ -3506,7 +4214,7 @@ static bool BandsReady(void)
     sBandsUsedFrame = sStats.frames;
     if (sBandsReady) return true;
     if (sBandsFailed && sStats.frames < sBandsRetryFrame) return false;
-    for (unsigned attempt = 0; attempt < 2 && !sBandsReady; ++attempt)
+    for (unsigned attempt = 0; attempt < 3 && !sBandsReady; ++attempt)
     {
         if (BandsCreate())
             sBandsReady = true;
@@ -3515,13 +4223,22 @@ static bool BandsReady(void)
          * 2D screen - a menu, a battle - is where that VRAM is wanted back:
          * the atlases of maps not on screen go, the current map's stay.
          */
+        else if (attempt == 0)
+        {
 #if CTR_VOXEL_ENABLED
-        else if (attempt == 0 && CtrVoxel_ReleaseIdleVram() == 0)
-            break;
-#else
+            CtrVoxel_ReleaseIdleVram();
+#endif
+        }
+        /*
+         * Back from a battle, its scene surface is kept a few seconds in case
+         * another one follows, and the field has taken its layer textures
+         * back meanwhile: the planes did not fit beside both and stayed away,
+         * flat. On the field the planes come first.
+         */
+        else if (attempt == 1 && sScene && !sBattle && !sTransition)
+            SceneRelease();
         else
             break;
-#endif
     }
     if (!sBandsReady)
     {
@@ -3553,9 +4270,21 @@ static bool BandsCreate(void)
          * per plane per frame is memory traffic this path exists to avoid. */
         sBand[i] = C3D_RenderTargetCreateFromTex(&sBandTex[i], GPU_TEXFACE_2D, 0, -1);
         if (!sBand[i]) goto fail;
+        sBandCount = i + 1;
     }
     return true;
 fail:
+    /* Two planes still give the interface its depth (see BandsShrink). */
+    if (sBandCount >= 2)
+    {
+        unsigned i = sBandCount;
+
+        if (sBand[i]) C3D_RenderTargetDelete(sBand[i]);
+        if (sBandTex[i].data) C3D_TexDelete(&sBandTex[i]);
+        sBand[i] = NULL;
+        memset(&sBandTex[i], 0, sizeof(sBandTex[i]));
+        return true;
+    }
     BandsRelease();
     return false;
 }
@@ -3569,8 +4298,8 @@ fail:
  */
 static unsigned BandMask(unsigned band, unsigned count)
 {
-    if (band + 1 < count) return 1u << band;
-    return 15u & ~((1u << band) - 1);
+    (void)count;
+    return sBandSlots[band];
 }
 
 static float BandDepth(unsigned band, unsigned count)
@@ -3578,20 +4307,129 @@ static float BandDepth(unsigned band, unsigned count)
     return band + 1 < count ? (float)(CTR_PRIORITIES - 1 - band) : 0.0f;
 }
 
+/*
+ * C2D_TargetClear for a plane. The GPU fills a 16-bit surface with the low
+ * half of the value it is given, and C2D_TargetClear gives it the RGBA8 word,
+ * whose low half is blue and alpha: opaque black came out blue, and any
+ * backdrop some other colour. The colour is packed as RGBA5551 instead.
+ */
+static void PlaneClear(C3D_RenderTarget *target, uint32_t color)
+{
+    unsigned r = color & 255, g = (color >> 8) & 255, b = (color >> 16) & 255, a = color >> 24;
+
+    C2D_Flush();
+    C3D_FrameSplit(0);
+    C3D_RenderTargetClear(target, C3D_CLEAR_ALL,
+                          (r >> 3) << 11 | (g >> 3) << 6 | (b >> 3) << 1 | (a >= 128), 0);
+}
+
 /* Composes every depth plane into its own surface, with no displacement. */
+/*
+ * Where in a plane of these slots something blends, in GBA coordinates: the
+ * box round its blending sprites, or false when a background blends, or the
+ * screen is one whose sprites this cannot place - then the whole view.
+ */
+static bool BlendBox(unsigned slots, int *x0, int *y0, int *x1, int *y1)
+{
+    static const uint8_t dimensions[3][4][2] = {
+        {{8,8},{16,16},{32,32},{64,64}},
+        {{16,8},{32,8},{32,16},{64,32}},
+        {{8,16},{8,32},{16,32},{32,64}}
+    };
+    unsigned display = Reg(0), control = Reg(0x50);
+    unsigned target1 = control & 63;
+    bool alpha = ((control >> 6) & 3) == 1;
+
+    if (!(sStage || sCentred) || (display & 0x6000)) return false;
+    for (unsigned bg = 0; bg < 4 && alpha; ++bg)
+        if ((target1 & (1u << bg)) && (display & (0x100u << bg)) && (slots & SLOT_BG(Reg(8 + bg * 2) & 3)))
+            return false;
+    *x0 = *y0 = 1 << 20;
+    *x1 = *y1 = -(1 << 20);
+    for (unsigned i = 0; i < 128; ++i)
+    {
+        unsigned attr0 = sMemory.oam[i * 4], attr1 = sMemory.oam[i * 4 + 1];
+        unsigned mode = (attr0 >> 10) & 3, shape = attr0 >> 14;
+        bool affine = (attr0 & 0x100) != 0, twice = affine && (attr0 & 0x200);
+        int x, y, w, h;
+
+        if ((!affine && (attr0 & 0x200)) || shape == 3) continue;
+        if (!(slots & SLOT_OBJ((sMemory.oam[i * 4 + 2] >> 10) & 3))) continue;
+        if (!(mode == 1 || (mode == 0 && alpha && (target1 & 16)))) continue;
+        w = dimensions[shape][attr1 >> 14][0] << twice;
+        h = dimensions[shape][attr1 >> 14][1] << twice;
+        x = (int)(attr1 & 511);
+        y = (int)(attr0 & 255);
+        if (x + w > 512) x -= 512;
+        if (y + h > 256) y -= 256;
+        if (x < *x0) *x0 = x;
+        if (y < *y0) *y0 = y;
+        if (x + w > *x1) *x1 = x + w;
+        if (y + h > *y1) *y1 = y + h;
+    }
+    return *x0 < *x1;
+}
+
+/*
+ * A plane whose layers blend needs what lies behind them to blend with, and
+ * the planes behind it are other surfaces. So that plane is first given the
+ * whole picture behind it - the backdrop and every further priority -
+ * written to its colour but not its alpha, which stays clear: where its own
+ * layers draw, they blend with the right colours and make the pixel opaque;
+ * everywhere else it stays transparent and the plane behind shows at its own
+ * depth. The logo over the intro's leaves, a sprite's shadow on the field,
+ * keep their depth instead of flattening the frame to one plane.
+ */
 static void RenderBands(unsigned count, uint32_t backdrop)
 {
+    unsigned blending = BlendingPriorities();
+
     sParallax = 0;
     for (int band = (int)count - 1; band >= 0; --band)
     {
-        uint32_t before = sStats.tiles;
+        unsigned mask = BandMask(band, count);
+        bool last = band + 1 == (int)count, behind = !last && (blending & mask);
+        uint32_t before;
 
-        sPriorityMask = BandMask(band, count);
         sLayerShift = 0;
         BlendForget();
-        C2D_TargetClear(sBand[band], band + 1 == (int)count ? backdrop : 0);
+        PlaneClear(sBand[band], last ? backdrop : behind ? backdrop & 0x00ffffff : 0);
         C2D_SceneBegin(sBand[band]);
-        if (band + 1 == (int)count)
+        if (behind)
+        {
+            C2D_Flush();
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_RED | GPU_WRITE_GREEN | GPU_WRITE_BLUE);
+            unsigned top = mask;
+
+            while (top & (top - 1)) top &= top - 1;
+            int x0, y0, x1, y1;
+
+            /* Every slot behind this plane's. */
+            sPriorityMask = SLOTS_ALL & ~((top << 1) - 1);
+            Blend(5, false, false);
+            StageUnderlay();
+            /* Only under what blends: the logo, not the whole scene again. */
+            if (BlendBox(mask, &x0, &y0, &x1, &y1))
+            {
+                if (x0 > sClipX0) sClipX0 = x0;
+                if (y0 > sClipY0) sClipY0 = y0;
+                if (x1 < sClipX1) sClipX1 = x1;
+                if (y1 < sClipY1) sClipY1 = y1;
+                C2D_Flush();
+                Scissor(sClipX0, sClipY0, sClipX1, sClipY1);
+                sScissored = true;
+            }
+            if (!(Reg(0) & 128) && sClipX0 < sClipX1 && sClipY0 < sClipY1) Compose();
+            ClipToView();
+            sScissored = false;
+            C2D_Flush();
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+            BlendForget();
+        }
+        before = sStats.tiles;
+        sPriorityMask = mask;
+        if (last)
         {
             Blend(5, false, false);
             StageUnderlay();
@@ -3602,7 +4440,7 @@ static void RenderBands(unsigned count, uint32_t backdrop)
         /* The furthest plane carries the backdrop, so it is never empty. */
         sBandUsed[band] = sStats.tiles != before || band + 1 == (int)count;
     }
-    sPriorityMask = 15;
+    sPriorityMask = SLOTS_ALL;
     /* Rendering to a texture and then sampling it needs a command split. */
     C3D_FrameSplit(0);
 }
@@ -3715,15 +4553,24 @@ void CtrVideo_Present(void)
     /* Wait for previous GPU work before editing the atlas. C3D owns VBlank
      * pacing and swap: no gfxSwapBuffers/gspWaitForVBlank in this path. */
     /* Outside the frame, where deleting a render target may wait for the GPU. */
-    if (sBandsReady && (sPlaneReleaseAsked || sStats.frames - sBandsUsedFrame > CTR_BANDS_IDLE_FRAMES))
+    /* A battle transition is flat and needs the battle scene's surface, which
+     * the planes' VRAM is what keeps out on the 2D field: they go first. */
+    if (sBandsReady && (sPlaneReleaseAsked || sTransitionRequested
+                        || sStats.frames - sBandsUsedFrame > CTR_BANDS_IDLE_FRAMES))
     {
         BandsRelease();
         CtrLog_Write(CTR_LOG_VIDEO, "3D depth planes released (VRAM free=%lu)",
                      (unsigned long)vramSpaceFree());
     }
-    sPlaneReleaseAsked = false;
+    else if (sBandsReady && sPlaneShrinkAsked && sBandCount > 2)
+    {
+        BandsShrink();
+        CtrLog_Write(CTR_LOG_VIDEO, "3D depth planes: %u, the rest to a stage layer (VRAM free=%lu)",
+                     sBandCount, (unsigned long)vramSpaceFree());
+    }
+    sPlaneReleaseAsked = sPlaneShrinkAsked = false;
     if (sLeavesTex[0].data && sStats.frames - sLeavesUsed > 120) LeavesRelease();
-    if (sBandsWanted)
+    if (sBandsWanted && !sTransitionRequested)
     {
         sBandsWanted = false;
         BandsReady();
@@ -3736,6 +4583,7 @@ void CtrVideo_Present(void)
     sCentred = sCentredRequested != CTR_CENTRED_NONE && !sStage;
     sCentredScreen = sCentred ? sCentredRequested : CTR_CENTRED_NONE;
     sBattle = sBattleRequested && !sStage && !sCentred;
+    sTransition = sTransitionRequested && sLineRegs && !sStage && !sCentred && !sBattle;
     sZoom = sBattle ? CTR_BATTLE_ZOOM : 1.0f;
     /* GBA (120, 112) - the middle of the scene's bottom edge - on screen (200, 192). */
     sOffX = sBattle ? CTR_GAME_WIDTH / 2 - 120 * sZoom : 0.0f;
@@ -3815,7 +4663,8 @@ void CtrVideo_Present(void)
     if (sUsed > CACHE_COUNT - 4096) { memset(sHash, 0, sizeof(sHash)); sUsed = 0; }
     UpdatePalette();
     if (sStage || sBattle) RecordScroll();
-    uint16_t backdrop = (Reg(0) & 128) ? 0x7fff : sPalette[0];
+    /* The shown backdrop, faded: sPalette may hold the unfaded one. */
+    uint16_t backdrop = (Reg(0) & 128) ? 0x7fff : sMemory.palette[0] & 0x7fff;
     uint32_t rgb = CtrVideo_RGBA8(backdrop, true);
     uint32_t clear = C2D_Color32(rgb >> 24, rgb >> 16, rgb >> 8, 255);
     /*
@@ -3848,14 +4697,17 @@ void CtrVideo_Present(void)
     float slider = osGet3DSliderState();
     /* Real stereoscopy for the voxel world is V8; the layer parallax of the
      * 2D path means nothing for a 3D scene, so it stays off there. */
-    bool stereo = !voxel && !blank && sTopRight && slider > 0.0f
+    bool stereo = !voxel && !blank && !sTransition && sTopRight && slider > 0.0f
                   && roundf(slider * CTR_STEREO_PIXELS) > 0.0f;
     /* A 2D screen composed per eye walks every layer twice, which on an Old
      * 3DS is 30 fps in a menu. Without its planes it stays flat until they
      * can be made (before the next frame, see sBandsWanted). */
     /* The battle scene is two passes of its own (RenderBattleScene), and cheap
-     * enough to be composed per eye. */
-    bool planes = stereo && !overworld && !sStage && !sBattle && BandsUsable();
+     * enough to be composed per eye. A stage is not: the intro and the title
+     * draw their waves line by line, and twice that is more than an Old 3DS
+     * has in a frame, so they take the planes like any other 2D screen. */
+    if (!sStage) sStageWithoutPlanes = false;
+    bool planes = stereo && !overworld && !sBattle && !sStageWithoutPlanes && BandsUsable();
     if (stereo && !overworld && !sStage && !sBattle && !planes) stereo = false;
     if (bottom) stereo = planes = false;
     if (stereo != sStereo) { gfxSet3D(stereo); sStereo = stereo; }
@@ -3867,6 +4719,11 @@ void CtrVideo_Present(void)
         /* The top screen is not drawn: it keeps the frame it showed last. */
         sPlanes = 0;
         RenderEye(sBottom, clear, 0.0f);
+    }
+    else if (sTransition && !blank)
+    {
+        sPlanes = 0;
+        RenderTransition(voxel, clear);
     }
     else if (voxel)
     {
@@ -3894,8 +4751,7 @@ void CtrVideo_Present(void)
     }
     else
     {
-        /* A stage, drawn from its layer textures, costs little enough to be
-         * composed per eye; otherwise only without memory for the planes. */
+        /* The battle, or a stage without memory for its planes. */
         sPlanes = 0;
         RenderEye(sTop, clear, sStats.stereo);
         RenderEye(sTopRight, clear, -(float)sStats.stereo);
@@ -3952,6 +4808,13 @@ const CtrVideoStats *CtrVideo_GetStats(void) { return &sStats; }
 void CtrVideo_SetStage(bool stage) { sStageRequested = stage; }
 void CtrVideo_SetCentred(unsigned screen) { sCentredRequested = screen < CTR_CENTRED_SCREENS ? screen : CTR_CENTRED_NONE; }
 void CtrVideo_SetBattle(bool battle) { sBattleRequested = battle; }
+void CtrVideo_SetTransition(bool transition) { sTransitionRequested = transition; }
+
+void CtrVideo_SetLineRegisters(const uint16_t *regs, unsigned lines)
+{
+    /* The bridge's table, filled for this frame just before it is presented. */
+    sLineRegs = regs && lines >= CTR_GBA_LINES ? (const uint16_t (*)[CTR_LINE_REGS])regs : NULL;
+}
 
 void CtrVideo_SetLineScroll(unsigned reg, bool wide, const void *values, unsigned lines)
 {

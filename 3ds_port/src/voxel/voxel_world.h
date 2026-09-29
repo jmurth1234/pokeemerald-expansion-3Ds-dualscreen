@@ -95,6 +95,9 @@ typedef enum {
     VOXEL_WEATHER_SHADE
 } VoxelWeatherClass;
 VoxelWeatherClass VoxelWorld_Weather(void);
+/* The palette fade on the backgrounds as a blend towards rgb (0-1) by amount,
+ * false when there is none (voxel_world.c). */
+bool VoxelWorld_ScreenFade(float *amount, float rgb[3]);
 
 /*
  * Content signature of one rectangle of world tiles: what decides whether the

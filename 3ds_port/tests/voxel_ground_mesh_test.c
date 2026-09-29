@@ -75,8 +75,9 @@ int main(void)
     VoxelBuilder whole,part;
     for (unsigned i=0;i<64;++i) sAtlas.slotOf[i]=(uint16_t)(i+1);
     Init(&whole,sWhole); Emit(&whole,0,0,8,8);
-    /* One quad a cell, and nothing standing up: only the pond is off 0. */
-    assert(whole.count==64*6 && !whole.dropped && !whole.uncovered);
+    /* One quad a cell, and nothing standing up: only the pond is off 0,
+     * with its four rims closing the gap down to it from the ground. */
+    assert(whole.count==(64+4)*6 && !whole.dropped && !whole.uncovered);
     for(unsigned i=0;i<whole.count;++i)
     {
         VoxelVertex *v=&sWhole[i];

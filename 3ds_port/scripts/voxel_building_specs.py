@@ -604,11 +604,8 @@ POKEMON_CENTER_2F = [
     piece("plant_2", [(96, 128, 112, 160)], 24, card=True),
     piece("plant_3", [(144, 128, 160, 160)], 24, card=True),
     piece("plant_4", [(160, 128, 176, 160)], 24, card=True),
-    piece("stool_1", [(48, 143, 64, 160)], 6, leave=CENTER_FLOOR),
-    piece("stool_2", [(112, 143, 128, 160)], 6, leave=CENTER_FLOOR),
-    piece("stool_3", [(128, 143, 144, 160)], 6, leave=CENTER_FLOOR),
-    piece("stool_4", [(176, 143, 192, 160)], 6, leave=CENTER_FLOOR),
-    piece("stool_5", [(192, 143, 208, 160)], 6, leave=CENTER_FLOOR),
+    # the five stools along the front are the ground floor's, tile for tile,
+    # and stand here as they are (gen_voxel_buildings.reuse_pieces)
     piece("escalator", [(0, 86, 34, 122)], 8, leave=CENTER_FLOOR),
 ] + center_walls(160)
 
@@ -656,13 +653,14 @@ def _replace(pieces, names, new):
 
 
 # Lavaridge's Center: a door to the hot spring in the back wall, a plant
-# either side of it, and its two stools down the west wall
-LAVARIDGE_CENTER_1F = _replace(POKEMON_CENTER_1F, ("bookcase", "plant", "stool_1", "stool_2"), [
+# either side of it. Its counter, Poke Balls, machines, stools, table and
+# escalator are the other Centers', tile for tile, and stand here as they are
+# (gen_voxel_buildings.reuse_pieces), and so is the back wall east of the
+# door; the plants and the rest of the walls are its own.
+LAVARIDGE_CENTER_1F = [
     piece("plant_w", [(14, 10, 34, 40)], 26, leave=WALL_COLOURS),
     piece("plant_e", [(46, 10, 66, 40)], 26, leave=WALL_COLOURS),
-    piece("stool_1", [(16, 47, 32, 64)], 6, leave=CENTER_FLOOR),
-    piece("stool_2", [(16, 63, 32, 80)], 6),
-])
+] + [pc for pc in center_walls(144) if pc["name"] != "wall_e"]
 
 
 # The front corners the GBA leaves black: the outside of a room whose front
@@ -747,18 +745,17 @@ def brendan_1f():
 
 def may_1f():
     rug = PINK_RUG
-    return (house_chair("chair_nw", (81, 96, 85, 112), (85, 100, 95, 112), rug)
-            + house_chair("chair_sw", (81, 112, 85, 128), (85, 116, 95, 128), rug)
-            + house_chair("chair_ne", (139, 96, 143, 112), (129, 100, 139, 112), rug)
-            + house_chair("chair_se", (139, 112, 143, 128), (129, 116, 139, 128), rug) + [
+    # the chairs' seats are Brendan's, pixel for pixel on another rug, and
+    # stand here as they are; their backs are drawn over the rug
+    return [pc for pc in (house_chair("chair_nw", (81, 96, 85, 112), (85, 100, 95, 112), rug)
+                          + house_chair("chair_sw", (81, 112, 85, 128), (85, 116, 95, 128), rug)
+                          + house_chair("chair_ne", (139, 96, 143, 112), (129, 100, 139, 112), rug)
+                          + house_chair("chair_se", (139, 112, 143, 128), (129, 116, 139, 128), rug))
+            if pc["name"].endswith("_back")] + [
         piece("table", [(98, 96, 126, 128)], 8, leave=rug, solid=True),
-        piece("tv", [(96, 61, 112, 88)], 20, back=72, top=(100, 62, 110, 63),
-              side=(96, 68, 98, 88)),
-        piece("cabinet", [(112, 65, 143, 88)], 9, back=72),
-        piece("fridge", [(160, 18, 176, 48)], 24, leave=HOUSE_FLOOR, back=32),
-        piece("tap", [(134, 24, 141, 29)], 5, base=8, leave=HOUSE_WALL[:2]),
-        piece("sink", [(128, 29, 160, 41), (129, 41, 159, 48)], 8, back=32,
-              top=(130, 38, 158, 39)),
+        # the television and its cabinet, the fridge, the tap and the sink
+        # are Brendan's, pixel for pixel, and stand here as they are
+        # (gen_voxel_buildings.reuse_pieces)
         piece("dresser", [(105, 19, 128, 48)], 23, back=32),
         stairwell("stairwell", 32, 48, 48, 29, 19, (32, 29, 48, 34), 16),
         piece("wall_w", [(63, 32, 64, 48), (0, 16, 63, 29), (0, 29, 32, 48),
@@ -768,7 +765,7 @@ def may_1f():
               side=(96, 0, 104, 32)),
         piece("side_w", [], 32, side=(4, 16, 20, 48), walls=[((0, 144), (0, 48))]),
         piece("side_e", [], 32, side=(96, 0, 104, 32), walls=[((176, 32), (176, 144))]),
-    ])
+    ]
 
 
 def brendan_2f():
@@ -802,8 +799,7 @@ def may_2f():
         piece("stereo", [(114, 24, 126, 31)], 6, base=9, solid=True),
         piece("desk", [(112, 20, 144, 40)], 9, leave=HOUSE_FLOOR, against=32),
         piece("console", [(83, 24, 98, 40)], 9, leave=HOUSE_WALL + HOUSE_FLOOR, back=32),
-        piece("tv", [(64, 13, 80, 40)], 20, back=32, top=(68, 14, 78, 15),
-              side=(64, 20, 66, 40)),
+        # the television is Brendan's, tile for tile
         piece("bed_head", [(108, 62, 132, 70)], 7, base=7, leave=HOUSE_FLOOR),
         piece("bed", [(108, 70, 132, 93)], 7, leave=HOUSE_FLOOR, solid=True,
               claim=[(108, 70, 132, 72)]),
@@ -813,6 +809,76 @@ def may_2f():
         piece("side_w", [], 32, side=(40, 0, 48, 32), walls=[((0, 128), (0, 32))]),
         piece("side_e", [], 32, side=(40, 0, 48, 32), walls=[((144, 32), (144, 128))]),
     ]
+
+
+# ── The two houses most of Hoenn lives in ─────────────────────────────────
+#
+# LAYOUT_HOUSE1 and LAYOUT_HOUSE2 (Oldale's two houses, and nineteen more
+# maps'): a glass case and a chest of drawers or a kitchen along the back
+# wall, a table and its chairs in the room, potted plants. Built like
+# Littleroot's: furniture against the back wall stands on the wall's row of
+# collision; what the second house repeats of the first tile for tile (the
+# glass case, the plant in the corner) is the first's model
+# (gen_voxel_buildings.reuse_pieces).
+
+GENERIC_WALL = ("d5d5b4", "b4b4a4", "ffffff", "629c8b")   # plaster, trim, baseboard
+GENERIC_FLOOR = ("ded552", "bdb431", "8b8b8b", "9c9410")  # the planks, their shade
+GENERIC_RUG = ("ffcd8b", "f6f6a4")
+GENERIC_TABLE = ("fff683", "bdac52")
+
+
+def potted_plant(x, y):
+    """The potted plant's outline, its crown's top-left at (x, y): the
+    lines between the planks are drawn in the pot's own outline colour, so
+    the shape follows the crown, the stem and the pot instead of a box."""
+    return [(x, y, x + 16, y + 13), (x + 3, y + 13, x + 13, y + 14),
+            (x + 5, y + 14, x + 11, y + 16), (x + 6, y + 16, x + 10, y + 19),
+            (x + 3, y + 19, x + 13, y + 23), (x + 2, y + 23, x + 14, y + 30),
+            (x + 4, y + 30, x + 5, y + 31), (x + 11, y + 30, x + 12, y + 31)]
+
+
+def house1():
+    rug = GENERIC_RUG
+    return (house_chair("chair_n", (74, 64, 78, 80), (65, 68, 74, 80), rug)
+            + house_chair("chair_s", (74, 80, 78, 96), (65, 84, 74, 96), rug) + [
+        # the teapot on the table
+        piece("teapot", [(49, 72, 59, 80)], 5, base=11, leave=GENERIC_TABLE),
+        # what the teapot hides of the table top is the table's own pixels
+        piece("table", [(34, 64, 62, 97)], 11, leave=rug, solid=True, fill=1, foot=97),
+        piece("plant_se", potted_plant(144, 113), 31, leave=GENERIC_FLOOR, card=True),
+        piece("plant_1", potted_plant(128, 17), 31, leave=GENERIC_WALL + GENERIC_FLOOR, card=True),
+        piece("plant_2", potted_plant(144, 17), 31, leave=GENERIC_WALL + GENERIC_FLOOR, card=True),
+        # the glass case and the chest of drawers against the back wall
+        piece("case", [(0, 12, 32, 40)], 20, leave=GENERIC_WALL + GENERIC_FLOOR, back=32),
+        piece("drawers", [(33, 11, 57, 41)], 21, leave=GENERIC_WALL + GENERIC_FLOOR, back=32),
+        piece("wall", [(0, 0, 160, 32)], 32, fill=16, foot=32, side=(64, 0, 80, 32)),
+        piece("side_w", [], 32, side=(64, 0, 80, 32), walls=[((0, 144), (0, 32))]),
+        piece("side_e", [], 32, side=(64, 0, 80, 32), walls=[((160, 32), (160, 144))]),
+    ])
+
+
+def house2():
+    fl = GENERIC_FLOOR
+    # the east chairs' seats and the plant are the first house's, pixel for
+    # pixel on another floor, and stand here as they are
+    return (house_chair("chair_nw", (66, 64, 70, 80), (70, 68, 79, 80), fl)
+            + house_chair("chair_sw", (66, 80, 70, 96), (70, 84, 79, 96), fl)
+            + [piece("chair_ne_back", [(122, 64, 126, 80)], 9, leave=fl, solid=True),
+               piece("chair_se_back", [(122, 80, 126, 96)], 9, leave=fl, solid=True)] + [
+        piece("table", [(82, 64, 110, 96)], 10, leave=fl, solid=True),
+        # the television on its glass-doored stand: Littleroot's set, whose
+        # tile this is, on a stand a row shorter
+        piece("tv", [(32, 13, 48, 39)], 19, leave=GENERIC_WALL + fl, back=32,
+              top=(36, 14, 46, 15), side=(32, 20, 34, 39)),
+        # the kitchen: a cupboard, the sink and hob, the fridge
+        piece("tap", [(133, 16, 142, 25)], 8, base=8, leave=GENERIC_WALL[:2]),
+        piece("cupboard", [(112, 17, 128, 40)], 16, leave=GENERIC_WALL + fl, back=32),
+        piece("sink", [(128, 21, 160, 40)], 8, leave=GENERIC_WALL + fl, against=32),
+        piece("fridge", [(160, 10, 176, 40)], 24, leave=GENERIC_WALL + fl, back=32),
+        piece("wall", [(0, 0, 176, 32)], 32, fill=16, foot=32, side=(48, 0, 64, 32)),
+        piece("side_w", [], 32, side=(48, 0, 64, 32), walls=[((0, 128), (0, 32))]),
+        piece("side_e", [], 32, side=(48, 0, 64, 32), walls=[((176, 32), (176, 128))]),
+    ])
 
 
 # ── Professor Birch's lab ─────────────────────────────────────────────────
@@ -876,6 +942,65 @@ def lab():
         piece("wall", [(0, 0, 208, 32)], 32, fill=16, foot=32, side=(80, 0, 96, 32)),
         piece("side_w", [], 32, side=(80, 0, 96, 32), walls=[((0, 208), (0, 32))]),
         piece("side_e", [], 32, side=(80, 0, 96, 32), walls=[((208, 32), (208, 208))]),
+    ]
+
+
+# ── Rustboro's gym ────────────────────────────────────────────────────────
+#
+# A maze of low stone walls on a tiled floor: each block stands on the cells
+# it blocks, its top drawn from 8 rows into the cell north of them and its
+# front the last 10 rows of its own. The floor's shadows are floor. At the
+# back, the gym's crenellated wall, one cell deeper at either end.
+
+GYM_WALL_SIDE = (32, 7, 48, 32)
+GYM_FLOOR = ("bdbdac",)             # the floor's shade round a statue's foot     # a stretch of the back wall without the emblem
+
+
+def gym_block(name, rects):
+    """A maze block: `rects` in cells (x0, y0, x1, y1), each drawn from 8 rows
+    north of its cells to its foot."""
+    return piece(name, [(x0 * 16, y0 * 16 - 8, x1 * 16, y1 * 16) for (x0, y0, x1, y1) in rects],
+                 10, side=(56, 118, 72, 128))
+
+
+def gym_statue(x):
+    """A gym statue's outline, its cell's left edge at x: its pedestal's
+    bottom corners are rounded off, the floor showing there."""
+    return [(x, 272, x + 16, 302), (x + 1, 302, x + 15, 303), (x + 2, 303, x + 14, 304)]
+
+
+def rustboro_gym():
+    return [
+        # the statues by the door: a ball on a pedestal. Every gym has them,
+        # on its own floor: they stand in each as they are (reuse_pieces),
+        # so they must not take the floor showing at their feet
+        piece("statue_w_ball", [("ellipse", 40, 279, 7, 7)], 8, base=16),
+        piece("statue_w", gym_statue(32), 16, back=288),
+        piece("statue_e_ball", [("ellipse", 136, 279, 7, 7)], 8, base=16),
+        piece("statue_e", gym_statue(128), 16, back=288),
+        # the maze, front first
+        gym_block("block_sw", [(2, 13, 4, 15), (2, 15, 5, 16)]),
+        gym_block("block_s", [(6, 15, 8, 16)]),
+        gym_block("block_w", [(4, 9, 5, 11), (2, 11, 5, 12)]),
+        gym_block("block_c", [(6, 9, 8, 11)]),
+        # the comb along the north and east, in three: a piece's art is its
+        # whole rectangle, and one of 11 x 10 cells for this outline would
+        # take a texture page of half a megabyte. Cut between columns, so no
+        # column's run is split
+        gym_block("block_e_arm", [(6, 12, 9, 13), (7, 13, 9, 14)]),
+        gym_block("block_e", [(9, 6, 11, 16)]),
+        gym_block("block_n", [(3, 6, 9, 8)]),
+        gym_block("block_west", [(0, 6, 1, 16)]),
+        # the back wall and its two deeper ends
+        piece("wall_w", [(0, 0, 16, 48)], 25, fill=16, foot=48, side=GYM_WALL_SIDE),
+        piece("wall_e", [(160, 0, 176, 48)], 25, fill=16, foot=48, side=GYM_WALL_SIDE),
+        piece("wall", [(16, 0, 160, 32)], 25, fill=16, foot=32, side=GYM_WALL_SIDE),
+        # the side walls in two each: one the room's length would need a
+        # texture page too tall to share VRAM with the city's
+        piece("side_w", [], 25, side=GYM_WALL_SIDE, walls=[((0, 176), (0, 48))]),
+        piece("side_w2", [], 25, side=GYM_WALL_SIDE, walls=[((0, 320), (0, 176))]),
+        piece("side_e", [], 25, side=GYM_WALL_SIDE, walls=[((176, 48), (176, 176))]),
+        piece("side_e2", [], 25, side=GYM_WALL_SIDE, walls=[((176, 176), (176, 320))]),
     ]
 
 
@@ -1007,8 +1132,17 @@ SPECS = [
         "components": {
             "secondary": "gTileset_Rustboro",
             "tiles": {0x2A7, 0x2FC, 0x318, 0x319, 0x31A, 0x315, 0x31D, 0x320, 0x321,
-                      0x32C, 0x32D, 0x2BE, 0x2BF, 0x2CD, 0x352, 0x2E9},
+                      0x32C, 0x32D, 0x2BE, 0x2BF, 0x2CD, 0x352, 0x2E9,
+                      # the same railings over grass or a building's shade
+                      0x2B7, 0x2C6, 0x2C7, 0x2D5, 0x2D7, 0x2DC, 0x2DE, 0x2DF,
+                      0x2E6, 0x2E7, 0x2EC, 0x31B},
             "height": 12, "hull": 12, "bridge": 3, "block": 4,
+            # drawn whole on the upper layer; the bottom one is the ground
+            # with its grass edges, which the map paints under it
+            "upper": True,
+            # a railing down a column shows its bars on its sides: those of
+            # the railing along a row
+            "flank": 0x2A7,
         },
         "ground": [0x2BB, 0x2C3, GRASS],
     },
@@ -1072,17 +1206,36 @@ SPECS = [
                      "pieces": lab()},
     },
     {
-        # after the starter: the boxes by the machine give way to a table
+        # after the starter: the boxes by the machine give way to a table.
+        # The rest of the furniture is the lab's, tile for tile, and stands
+        # here as it is, its back wall too; the side walls are its own.
         "name": "lab_table",
         "interior": {"layout": "LAYOUT_LITTLEROOT_TOWN_PROFESSOR_BIRCHS_LAB_WITH_TABLE",
                      "ground": [0x202],
-                     "pieces": _replace(lab(), ("boxes_ne1", "boxes_ne2"), [
-                         piece("table", [(128, 64, 176, 89)], 8, leave=LAB_SHADOW,
-                               solid=True)])},
+                     "pieces": [piece("table", [(128, 64, 176, 89)], 8, leave=LAB_SHADOW,
+                                      solid=True)]
+                     + [pc for pc in lab() if pc["name"] in ("side_w", "side_e")]},
     },
     {
         "name": "lavaridge_pc1f",
         "interior": {"layout": "LAYOUT_LAVARIDGE_TOWN_POKEMON_CENTER_1F", "ground": [0x202],
                      "pieces": LAVARIDGE_CENTER_1F, "open": CENTER_1F_OPEN},
+    },
+    {
+        # Oldale's first house, and eight more maps'
+        "name": "house1",
+        "interior": {"layout": "LAYOUT_HOUSE1", "ground": [0x223], "pieces": house1()},
+    },
+    {
+        # Oldale's second house, and eleven more maps'
+        "name": "house2",
+        "interior": {"layout": "LAYOUT_HOUSE2", "ground": [0x223], "pieces": house2()},
+    },
+    {
+        # Rustboro's gym: Roxanne's maze
+        "name": "rustboro_gym",
+        "interior": {"layout": "LAYOUT_RUSTBORO_CITY_GYM", "ground": [0x201],
+                     "shade": [0x202, 0x203, 0x204, 0x216, 0x22f, 0x237],
+                     "pieces": rustboro_gym()},
     },
 ]

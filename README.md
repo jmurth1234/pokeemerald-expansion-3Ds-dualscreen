@@ -80,6 +80,9 @@ in the releases.
 
 ## Playing
 
+For full installation, sound and update instructions, see
+[Install and update](docs/INSTALLATION.md).
+
 You need a 3DS/2DS family console with custom firmware (Luma3DS) and the
 Homebrew Launcher, and a clean dump of your own Pokémon Emerald (USA, Europe)
 cartridge (SHA-1 `f3ae088181bf583e55daf962a92bb46f4f1d07b7`).

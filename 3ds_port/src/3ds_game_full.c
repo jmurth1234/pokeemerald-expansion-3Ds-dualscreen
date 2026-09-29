@@ -128,6 +128,8 @@ typedef struct
  * (ctr_gba_centred.h) and the battle scene (ctr_gba_battle.h). */
 static StageSet sStage = {.name = "GBA stage"}, sCentred = {.name = "GBA centred"};
 static StageSet sBattle = {.name = "GBA battle"};
+/* The battle transitions (ctr_gba_transition.h), over the field. */
+static StageSet sTransition = {.name = "GBA transition"};
 
 static void RememberCallback(StageSet *set, IntrCallback callback, unsigned screen)
 {
@@ -184,6 +186,12 @@ void CtrBattle_SetVBlankCallback(IntrCallback callback)
     SetVBlankCallback(callback);
 }
 
+void CtrTransition_SetVBlankCallback(IntrCallback callback)
+{
+    RememberCallback(&sTransition, callback, 0);
+    SetVBlankCallback(callback);
+}
+
 static void UpdateSet(StageSet *set, IntrCallback callback)
 {
     bool on = false;
@@ -209,10 +217,79 @@ static void UpdateStage(void)
         UpdateSet(&sStage, callback);
         UpdateSet(&sCentred, callback);
         UpdateSet(&sBattle, callback);
+        UpdateSet(&sTransition, callback);
     }
     CtrVideo_SetStage(sStage.on);
     CtrVideo_SetCentred(sCentred.on ? sCentred.screen : CTR_CENTRED_NONE);
     CtrVideo_SetBattle(sBattle.on);
+    CtrVideo_SetTransition(sTransition.on);
+}
+
+/*
+ * The registers of every line of a battle transition's frame. On a GBA the
+ * transitions change them between lines, from an HBlank interrupt (the swirl,
+ * the slice, the ripple...) or an HBlank DMA (the wipes' window edges, the
+ * white bars' brightness); here the frame is composed at once, after the
+ * VBlank handler. So the lines are played through here: for each one the
+ * registers are recorded, then the HBlank DMAs and the HBlank interrupt run
+ * as they would at the end of that line. Afterwards the registers are put
+ * back as the VBlank handler left them, which is what line 0 shows, and the
+ * DMA channels are untouched: nothing else runs them, and the transitions
+ * arm them again at every VBlank.
+ */
+#define INTR_INDEX_HBLANK 3
+static uint16_t sLineRegs[CTR_GBA_LINES][CTR_LINE_REGS];
+
+static void HBlankDmas(unsigned line)
+{
+    for (unsigned n = 0; n < 4; ++n)
+    {
+        const uint8_t *src = (const uint8_t *)(uintptr_t)(&REG_DMA0SAD)[n * 3];
+        uintptr_t dest = (uintptr_t)(&REG_DMA0DAD)[n * 3];
+        u32 control = (&REG_DMA0CNT)[n * 3];
+        unsigned flags = control >> 16, count = control & 0xFFFF;
+        unsigned unit = (flags & DMA_32BIT) ? 4 : 2;
+        uintptr_t reg = dest - (uintptr_t)REG_BASE;
+
+        if (!(flags & DMA_ENABLE) || (flags & DMA_START_MASK) != DMA_START_HBLANK)
+            continue;
+        if (src == NULL || reg < CTR_LINE_REG_FIRST
+         || reg + count * unit > CTR_LINE_REG_FIRST + CTR_LINE_REGS * 2)
+            continue;
+        /* A repeating HBlank DMA reloads its count and keeps its source
+         * moving: the end of line y copies entry y of the table. */
+        if ((flags & DMA_SRC_MASK) == DMA_SRC_INC)
+            src += (size_t)line * count * unit;
+        memcpy((uint8_t *)REG_BASE + reg, src, count * unit);
+    }
+}
+
+static void CaptureLineRegisters(void)
+{
+    static uint16_t saved[CTR_LINE_REGS];
+    uint16_t *regs = (uint16_t *)((uint8_t *)REG_BASE + CTR_LINE_REG_FIRST);
+    bool hblank = REG_IME && (REG_IE & INTR_FLAG_HBLANK) && (REG_DISPSTAT & DISPSTAT_HBLANK_INTR)
+               && gIntrTable[INTR_INDEX_HBLANK];
+
+    if (!sTransition.on)
+    {
+        CtrVideo_SetLineRegisters(NULL, 0);
+        return;
+    }
+    memcpy(saved, regs, sizeof(saved));
+    for (unsigned y = 0; y < CTR_GBA_LINES; ++y)
+    {
+        memcpy(sLineRegs[y], regs, sizeof(saved));
+        if (y + 1 == CTR_GBA_LINES)
+            break;
+        REG_VCOUNT = y;
+        HBlankDmas(y);
+        if (hblank)
+            gIntrTable[INTR_INDEX_HBLANK]();
+    }
+    memcpy(regs, saved, sizeof(saved));
+    REG_VCOUNT = 0;
+    CtrVideo_SetLineRegisters(&sLineRegs[0][0], CTR_GBA_LINES);
 }
 
 /*
@@ -258,6 +335,7 @@ void CtrGame_VBlank(void)
     CtrEmu_EndVBlank();
     UpdateStage();
     CaptureLineScroll();
+    CaptureLineRegisters();
     CheckAudioRate();
     SampleAudioStats();
     ++sFrames;
