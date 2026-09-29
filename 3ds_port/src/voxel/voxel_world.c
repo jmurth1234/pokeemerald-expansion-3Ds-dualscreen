@@ -27,6 +27,8 @@
 #include "voxel_atlas.h"
 #ifdef PLATFORM_3DS
 #include "field_weather.h"
+#include "palette.h"
+#include "constants/field_weather.h"
 #include "constants/weather.h"
 #endif
 
@@ -562,6 +564,86 @@ VoxelWeatherClass VoxelWorld_Weather(void)
     }
 #endif
     return VOXEL_WEATHER_CLEAR;
+}
+
+/*
+ * The fade the game has put on the background palettes, as one blend towards
+ * a colour. The world's textures are baked from the tilesets' own palettes,
+ * so a fade - which rewrites the shown palette every frame - never reaches
+ * them; the renderer applies this instead. Sprites need nothing: they are
+ * decoded from the shown palette, fade and all.
+ *
+ * The shown tileset colours are fitted against the unfaded ones as
+ * shown = (1 - amount) * unfaded + amount * colour, least squares over the
+ * three channels: exact for a fade towards black, white or the grey of the
+ * battle intro, and close for anything else a script does. Only while a fade
+ * is under way or has left the screen faded: at rest, a weather colour map
+ * (rain darkening the palette) stays the lighting grade's job, as before.
+ */
+static float FadeChannel(unsigned color, unsigned shift)
+{
+    return (float)((color >> shift) & 31);
+}
+
+static void FadeFit(const u16 *shown, const u16 *unfaded, unsigned count,
+                    float *amount, float rgb[3])
+{
+    float n = (float)count, cov = 0.0f, var = 0.0f;
+    float su[3] = {0}, sf[3] = {0}, suu[3] = {0}, suf[3] = {0};
+
+    for (unsigned i = 0; i < count; ++i)
+        for (unsigned c = 0; c < 3; ++c)
+        {
+            float u = FadeChannel(unfaded[i], c * 5), f = FadeChannel(shown[i], c * 5);
+
+            su[c] += u;
+            sf[c] += f;
+            suu[c] += u * u;
+            suf[c] += u * f;
+        }
+    for (unsigned c = 0; c < 3; ++c)
+    {
+        cov += n * suf[c] - su[c] * sf[c];
+        var += n * suu[c] - su[c] * su[c];
+    }
+    /* Colours all alike tell nothing of the slope: take them as the target. */
+    float keep = var > 1.0f ? cov / var : 0.0f;
+
+    if (keep < 0.0f) keep = 0.0f;
+    if (keep > 1.0f) keep = 1.0f;
+    *amount = 1.0f - keep;
+    for (unsigned c = 0; c < 3; ++c)
+    {
+        float offset = (sf[c] - keep * su[c]) / n;
+        float value = *amount > 0.01f ? offset / *amount : 0.0f;
+
+        if (value < 0.0f) value = 0.0f;
+        if (value > 31.0f) value = 31.0f;
+        rgb[c] = value / 31.0f;
+    }
+}
+
+bool VoxelWorld_ScreenFade(float *amount, float rgb[3])
+{
+    *amount = 0.0f;
+    rgb[0] = rgb[1] = rgb[2] = 0.0f;
+#ifdef PLATFORM_3DS
+    {
+        bool fading = gPaletteFade.active || gPaletteFade.y != 0
+                   || (gWeatherPtr != NULL && gWeatherPtr->palProcessingState == WEATHER_PAL_STATE_SCREEN_FADING_IN)
+                   || (gWeatherPtr != NULL && gWeatherPtr->palProcessingState == WEATHER_PAL_STATE_SCREEN_FADING_OUT);
+        const u16 *shown = (const u16 *)PLTT;
+        unsigned count = NUM_PALS_TOTAL * 16;
+
+        if (!fading || memcmp(shown, gPlttBufferUnfaded, count * sizeof(u16)) == 0)
+            return false;
+        FadeFit(shown, gPlttBufferUnfaded, count, amount, rgb);
+        /* Below one step of the game's own 16 it is rounding, not a fade. */
+        if (*amount < 1.0f / 32.0f)
+            *amount = 0.0f;
+    }
+#endif
+    return *amount > 0.0f;
 }
 
 void VoxelWorld_GetLocation(int *mapGroup, int *mapNum)

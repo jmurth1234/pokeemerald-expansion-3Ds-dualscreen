@@ -152,6 +152,12 @@ CTR_GBA_BATTLE_SRCS := battle_main battle_bg battle_intro battle_interface battl
 CTR_GBA_BATTLE_OBJS := $(patsubst %,build/root/src/%.o,$(CTR_GBA_BATTLE_SRCS))
 $(CTR_GBA_BATTLE_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE -include $(abspath compat/ctr_gba_battle.h)
 $(CTR_GBA_BATTLE_OBJS): compat/ctr_gba_battle.h $(ROOT)/include/gba/defines.h
+# The battle transitions: GBA windows and scanline tables, shown over the field
+# at the battle scene's scale (compat/ctr_gba_transition.h).
+CTR_GBA_TRANSITION_SRCS := battle_transition battle_transition_frontier
+CTR_GBA_TRANSITION_OBJS := $(patsubst %,build/root/src/%.o,$(CTR_GBA_TRANSITION_SRCS))
+$(CTR_GBA_TRANSITION_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE -include $(abspath compat/ctr_gba_transition.h)
+$(CTR_GBA_TRANSITION_OBJS): compat/ctr_gba_transition.h $(ROOT)/include/gba/defines.h
 # preproc truncates this translation unit to zero bytes (a known tool bug also
 # hit by the DS build). It has no charmap string literals, so it is safe to skip.
 build/root/src/field_camera.o: $(ROOT)/src/field_camera.c Makefile full.mk
