@@ -29766,7 +29766,7 @@ index 00000000..e99ff4c0
 +    return gBDPCMBlockBuffer[current & 63]; // index same as current % 64
 +}
 diff --git c/src/sprite.c w/src/sprite.c
-index 400ff93f..5b8bc326 100644
+index 400ff93f..21fc723c 100644
 --- c/src/sprite.c
 +++ w/src/sprite.c
 @@ -7,6 +7,16 @@
@@ -30007,20 +30007,28 @@ index 400ff93f..5b8bc326 100644
          sSpriteCopyRequests[sSpriteCopyRequestCount].src = src;
          sSpriteCopyRequests[sSpriteCopyRequestCount].dest = dest;
          sSpriteCopyRequests[sSpriteCopyRequestCount].size = size;
-@@ -1507,7 +1652,11 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
+@@ -1507,7 +1652,19 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
  
  static u16 LoadSpriteSheetWithOffset(const struct SpriteSheet *sheet, u32 offset)
  {
 -    s16 tileStart = AllocSpriteTiles(sheet->size / TILE_SIZE_4BPP);
 +    u32 sheetSize = sheet->size;
++    u32 tileCount;
++    s16 tileStart;
 +#ifdef PORT_BRIDGE
 +    sheetSize = GetPortSpriteAssetSize(sheet->data, sheetSize);
++    // An externalized asset that failed to resolve stays a tiny stub; that size
++    // is not a real sheet. AllocSpriteTiles(0) means "free every tile", so bail
++    // out instead of wiping the tiles all the other sprites already own.
++    if (sheetSize < TILE_SIZE_4BPP || sheetSize <= offset)
++        return 0;
 +#endif
-+    s16 tileStart = AllocSpriteTiles(sheetSize / TILE_SIZE_4BPP);
++    tileCount = sheetSize / TILE_SIZE_4BPP;
++    tileStart = AllocSpriteTiles(tileCount);
  
      if (tileStart < 0)
      {
-@@ -1518,8 +1667,12 @@ static u16 LoadSpriteSheetWithOffset(const struct SpriteSheet *sheet, u32 offset
+@@ -1518,8 +1675,12 @@ static u16 LoadSpriteSheetWithOffset(const struct SpriteSheet *sheet, u32 offset
      }
      else
      {
@@ -30035,7 +30043,7 @@ index 400ff93f..5b8bc326 100644
          return (u16)tileStart;
      }
  }
-@@ -1695,6 +1848,9 @@ u8 LoadSpritePaletteInSlot(const struct SpritePalette *palette, u8 paletteNum)
+@@ -1695,6 +1856,9 @@ u8 LoadSpritePaletteInSlot(const struct SpritePalette *palette, u8 paletteNum)
  
  void DoLoadSpritePalette(const u16 *src, u16 paletteOffset)
  {
