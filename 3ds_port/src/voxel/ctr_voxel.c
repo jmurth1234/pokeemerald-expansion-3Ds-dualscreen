@@ -2755,7 +2755,10 @@ static void UpdateTimeTint(bool indoor)
         VoxelWorld_TimeTint(sTimeTint);
 }
 
-static void SetGrade(bool indoor)
+/* `applyTime` folds the day/night tint in. Terrain needs it: its textures are
+ * baked from the unfaded tilesets. Sprites must not take it - their atlas is
+ * decoded from the already-tinted shown palette - or they darken twice. */
+static void SetGrade(bool indoor, bool applyTime)
 {
     float sun[3] = {1.08f, 1.03f, 0.93f}, shade[3] = {0.80f, 0.86f, 1.02f};
     float fogScale = 0.0f, fogStart = 0.0f, fogMax = 0.0f;
@@ -2794,11 +2797,12 @@ static void SetGrade(bool indoor)
         }
         /* The expansion's day/night tint multiplies the map palettes; fold it
          * into both ends of the sun/shade grade so the ground follows it too. */
-        for (int i = 0; i < 3; ++i)
-        {
-            sun[i] *= sTimeTint[i];
-            shade[i] *= sTimeTint[i];
-        }
+        if (applyTime)
+            for (int i = 0; i < 3; ++i)
+            {
+                sun[i] *= sTimeTint[i];
+                shade[i] *= sTimeTint[i];
+            }
         fogStart = eye * VOXEL_HAZE_START;
         fogScale = haze / (eye * VOXEL_HAZE_RAMP);
         fogMax = haze;
@@ -3005,7 +3009,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     C3D_ColorLogicOp(GPU_LOGICOP_COPY);
 
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniProjection, &projection);
-    SetGrade(indoor);
+    SetGrade(indoor, true);
 
     /*
      * Ordinary terrain first, then the tree material with alpha test, then
@@ -3056,7 +3060,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     {
         /* Mirrored sprite art lies just above reflective ground. One draw for
          * every visible reflection, blended without writing depth. */
-        SetGrade(true);
+        SetGrade(true, false);
         C3D_TexBind(0, &sSpriteAtlas);
         C3D_AlphaTest(true, GPU_GREATER, 0);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
@@ -3071,7 +3075,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
         TerrainTexEnv();
         FadeFor(false);
-        SetGrade(indoor);
+        SetGrade(indoor, true);
     }
 
 #if CTR_VOXEL_LIGHTING
@@ -3086,7 +3090,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
      */
     if (sShadowVertices != 0)
     {
-        SetGrade(true);
+        SetGrade(true, false);
         C3D_TexBind(0, &sSpriteAtlas);
         C3D_AlphaTest(true, GPU_GREATER, 0);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
@@ -3105,9 +3109,13 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         C3D_ColorLogicOp(GPU_LOGICOP_COPY);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
         TerrainTexEnv();
-        SetGrade(indoor);
+        SetGrade(indoor, true);
     }
 #endif
+
+    /* Sprites take the weather grade but not the day/night tint: their atlas is
+     * already decoded from the tinted shown palette. */
+    SetGrade(indoor, false);
 
     /*
      * Billboards last. The atlas is RGBA5551, so transparency is one bit and
