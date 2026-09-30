@@ -2743,6 +2743,18 @@ static void BindVertices(const VoxelGpuVertex *vertices)
 /* 0xAABBGGRR, as the texture environment takes it. */
 #define VOXEL_HAZE_COLOUR 0xFFECDECEu
 
+/* The day/night multiplier for this frame; identity until SetGrade(true) or an
+ * update has run. Filled from the game once per draw (see UpdateTimeTint). */
+static float sTimeTint[3] = {1.0f, 1.0f, 1.0f};
+
+static void UpdateTimeTint(bool indoor)
+{
+    if (indoor)
+        sTimeTint[0] = sTimeTint[1] = sTimeTint[2] = 1.0f;
+    else
+        VoxelWorld_TimeTint(sTimeTint);
+}
+
 static void SetGrade(bool indoor)
 {
     float sun[3] = {1.08f, 1.03f, 0.93f}, shade[3] = {0.80f, 0.86f, 1.02f};
@@ -2779,6 +2791,13 @@ static void SetGrade(bool indoor)
             break;
         default:
             break;
+        }
+        /* The expansion's day/night tint multiplies the map palettes; fold it
+         * into both ends of the sun/shade grade so the ground follows it too. */
+        for (int i = 0; i < 3; ++i)
+        {
+            sun[i] *= sTimeTint[i];
+            shade[i] *= sTimeTint[i];
         }
         fogStart = eye * VOXEL_HAZE_START;
         fogScale = haze / (eye * VOXEL_HAZE_RAMP);
@@ -2923,10 +2942,20 @@ static void FadeTexEnv(const VoxelFade *fade)
     C3D_TexEnvColor(env, FadeColour(fade->amount, fade->rgb));
 }
 
+/* The world's haze, tinted by the time of day so a night horizon darkens too. */
+static uint32_t WorldHaze(void)
+{
+    unsigned r = (unsigned)((VOXEL_HAZE_COLOUR & 255) * sTimeTint[0] + 0.5f);
+    unsigned g = (unsigned)(((VOXEL_HAZE_COLOUR >> 8) & 255) * sTimeTint[1] + 0.5f);
+    unsigned b = (unsigned)(((VOXEL_HAZE_COLOUR >> 16) & 255) * sTimeTint[2] + 0.5f);
+
+    return 0xFF000000u | b << 16 | g << 8 | r;
+}
+
 /* Environments 1 and 2 for what is drawn next: the world's or a sprite's. */
 static void FadeFor(bool sprites)
 {
-    HazeTexEnv(sprites ? SpriteHaze() : VOXEL_HAZE_COLOUR);
+    HazeTexEnv(sprites ? SpriteHaze() : WorldHaze());
     FadeTexEnv(sprites ? &sSpriteFade : &sWorldFade);
 }
 
@@ -2963,6 +2992,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
 
     /* texture0 x graded colour, then the distance haze, then the fade. */
+    indoor = current != NULL && current->indoor;
+    UpdateTimeTint(indoor);
     PrepareFades();
     TerrainTexEnv();
     FadeFor(false);
@@ -2974,7 +3005,6 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     C3D_ColorLogicOp(GPU_LOGICOP_COPY);
 
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniProjection, &projection);
-    indoor = current != NULL && current->indoor;
     SetGrade(indoor);
 
     /*

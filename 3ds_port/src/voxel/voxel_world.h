@@ -95,6 +95,9 @@ typedef enum {
     VOXEL_WEATHER_SHADE
 } VoxelWeatherClass;
 VoxelWeatherClass VoxelWorld_Weather(void);
+/* The expansion's time-of-day tint as a per-channel multiplier (1,1,1 when the
+ * map has no natural light, i.e. indoors, caves, or DNS disabled). */
+void VoxelWorld_TimeTint(float rgb[3]);
 /* The palette fade on the backgrounds as a blend towards rgb (0-1) by amount,
  * false when there is none (voxel_world.c). */
 bool VoxelWorld_ScreenFade(float *amount, float rgb[3]);

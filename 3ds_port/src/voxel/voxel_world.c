@@ -549,6 +549,47 @@ void VoxelWorld_GetPlayerWorldCoords(float *worldX, float *worldZ)
     if (worldZ != NULL) *worldZ = z;
 }
 
+/*
+ * The expansion's time-of-day tint as a per-channel multiplier, the same one
+ * the GBA renderer multiplies every map palette by (palette.c's TimeMixPalettes,
+ * driven by gTimeBlend). Terrain textures are baked from the unfaded tileset
+ * palettes, so unlike sprites - decoded from the shown palette, tint and all -
+ * the voxel ground has to apply it itself.
+ *
+ * gTimeBlend interpolates two BlendSettings by weight: weight 0 is the end
+ * blend, 256 the start. A tint stores its multiplier in the low three bytes;
+ * the day entry is not a tint and is the identity.
+ */
+#ifdef PLATFORM_3DS
+static float TimeTintChannel(const struct BlendSettings *blend, unsigned channel)
+{
+    if (!blend->isTint)
+        return 1.0f;
+    return (float)((blend->blendColor >> (channel * 8)) & 0xFF) / 256.0f;
+}
+#endif
+
+void VoxelWorld_TimeTint(float rgb[3])
+{
+#ifdef PLATFORM_3DS
+    if (MapHasNaturalLight(gMapHeader.mapType)
+     && (gTimeBlend.startBlend.isTint || gTimeBlend.endBlend.isTint))
+    {
+        float weight = (float)gTimeBlend.weight / 256.0f;
+
+        for (unsigned c = 0; c < 3; ++c)
+        {
+            float start = TimeTintChannel(&gTimeBlend.startBlend, c);
+            float end = TimeTintChannel(&gTimeBlend.endBlend, c);
+
+            rgb[c] = start * weight + end * (1.0f - weight);
+        }
+        return;
+    }
+#endif
+    rgb[0] = rgb[1] = rgb[2] = 1.0f;
+}
+
 VoxelWeatherClass VoxelWorld_Weather(void)
 {
 #ifdef PLATFORM_3DS
