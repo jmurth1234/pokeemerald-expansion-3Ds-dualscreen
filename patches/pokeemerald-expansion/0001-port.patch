@@ -17239,7 +17239,7 @@ index 96223eb2..6bac077b 100644
  
  static void CameraPanningCB_PanAhead(void)
 diff --git c/src/field_control_avatar.c w/src/field_control_avatar.c
-index b271b1d2..6330552a 100644
+index b271b1d2..3bfdab71 100644
 --- c/src/field_control_avatar.c
 +++ w/src/field_control_avatar.c
 @@ -113,6 +113,10 @@ void FieldGetPlayerInput(struct FieldInput *input, u16 newKeys, u16 heldKeys)
@@ -17253,6 +17253,38 @@ index b271b1d2..6330552a 100644
                  input->pressedStartButton = TRUE;
              if (newKeys & SELECT_BUTTON)
                  input->pressedSelectButton = TRUE;
+@@ -223,6 +227,16 @@ int ProcessPlayerFieldInput(struct FieldInput *input)
+     }
+     if (input->pressedAButton && TrySetupDiveDownScript() == TRUE)
+         return TRUE;
++    // The debug menu is the R+START chord; it has to be tested before the
++    // plain START shortcut below or that opens the start menu and returns.
++    if (input->input_field_1_2 && DEBUG_OVERWORLD_MENU && !DEBUG_OVERWORLD_IN_MENU)
++    {
++        PlaySE(SE_WIN_OPEN);
++        FreezeObjectEvents();
++        Debug_ShowMainMenu();
++        return TRUE;
++    }
++
+     if (input->pressedStartButton)
+     {
+         FlagSet(FLAG_OPENED_START_MENU);
+@@ -240,14 +254,6 @@ int ProcessPlayerFieldInput(struct FieldInput *input)
+     if (input->pressedRButton && TryStartDexNavSearch())
+         return TRUE;
+ 
+-    if (input->input_field_1_2 && DEBUG_OVERWORLD_MENU && !DEBUG_OVERWORLD_IN_MENU)
+-    {
+-        PlaySE(SE_WIN_OPEN);
+-        FreezeObjectEvents();
+-        Debug_ShowMainMenu();
+-        return TRUE;
+-    }
+-
+     if (CanTriggerSpinEvolution())
+     {
+         ResetSpinTimer();
 diff --git c/src/field_door.c w/src/field_door.c
 index 508efc0f..d593a58a 100644
 --- c/src/field_door.c
