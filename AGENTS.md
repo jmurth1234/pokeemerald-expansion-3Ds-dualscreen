@@ -36,8 +36,27 @@ into the build trees. So:
 - **Game-tree changes** are made in `build/expansion/` and then captured in the
   patch (below).
 
+`make` builds from the **build tree's** copy (`build/expansion/3ds_port/...`),
+so a repo-root port edit does nothing until it is synced there:
+
+```sh
+cp 3ds_port/src/voxel/ctr_voxel.c build/expansion/3ds_port/src/voxel/
+```
+
+Re-running `tools/bootstrap.py` also copies the port, but it resets the game
+tree when the patch digest changed, which discards uncommitted game-side debug
+edits - during iteration, `cp` the specific files instead. A port `Makefile`
+flag change does relink; a port `.c` change recompiles. Watch for the
+`-DEMERALD`-style trap: the port recompiles the game sources with its own
+flags, so anything the game Makefile passed via `-D$(GAME_VERSION)` must be
+repeated in `3ds_port/Makefile`'s `GAMEFLAGS` (missing `EMERALD` silently
+emptied `gWildMonHeaders`).
+
 Game translation units have no header dependency tracking: after editing a
-shared header, delete the affected `build/root/src/*.o`.
+shared header, delete the affected `build/root/src/*.o`. Under `-j8` the
+asset-table step occasionally writes 0 entries (a race with the on-demand
+asset generation); if `romfs/assets/asset_map.txt` is tiny, re-run `make`
+(or `-j1`) rather than deploying that build.
 
 ## Regenerating the expansion patch
 
