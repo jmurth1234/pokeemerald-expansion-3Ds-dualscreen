@@ -36,7 +36,10 @@ SOURCES += src/3ds_data.c src/3ds_pak.c src/3ds_settings.c
 SOURCES += src/3ds_video.c src/3ds_video_decode.c src/3ds_bottom_screen.c
 LIBS := -lcitro2d -lcitro3d $(LIBS)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
-GAMEFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -DMODERN=1 -DUBFIX -D__INTELLISENSE__ -DTESTING=0
+# EMERALD is what the game's own Makefile passes via -D$(GAME_VERSION); the
+# expansion's data/wild_encounters.h gates every wild-mon header on it, so
+# without it gWildMonHeaders is empty and no wild battle can ever start.
+GAMEFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -DMODERN=1 -DUBFIX -DEMERALD -D__INTELLISENSE__ -DTESTING=0
 GAMEFLAGS += -iquote include -iquote ../include -iquote ../include/constants -iquote ..
 # VOXEL=0 compiles the voxel overworld out entirely.
 VOXEL ?= 1
