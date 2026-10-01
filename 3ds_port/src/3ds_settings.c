@@ -30,6 +30,9 @@ static int sPitch = 2, sZoom = 1;
 /* The HD-2D tilt-shift blur over the voxel picture (3ds_video.c): on unless
  * turned off. */
 static bool sVoxelBlur = true;
+/* Battles in front of the voxel world rather than the GBA's scenery
+ * (3ds_video.c, RenderBattleWorld): off unless turned on. */
+static bool sVoxelBattle = false;
 /* The FPS counter in the top screen's corner (3ds_video.c): off unless
  * turned on. */
 static bool sShowFps = false;
@@ -64,12 +67,15 @@ void CtrSettings_Load(void)
             sZoom = Find(sZooms, COUNT(sZooms), value, sZoom);
         else if (strncmp(line, "voxel_blur=", 11) == 0)
             sVoxelBlur = line[11] != '0';
+        else if (strncmp(line, "voxel_battle=", 13) == 0)
+            sVoxelBattle = line[13] == '1';
         else if (strncmp(line, "fps=", 4) == 0)
             sShowFps = line[4] == '1';
     }
     fclose(file);
-    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d fps=%d", sVoxel ? 1 : 0,
-                 sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0, sShowFps ? 1 : 0);
+    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d battle=%d fps=%d",
+                 sVoxel ? 1 : 0, sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0,
+                 sVoxelBattle ? 1 : 0, sShowFps ? 1 : 0);
 }
 
 /*
@@ -221,6 +227,19 @@ void CtrSettings_SetVoxelBlur(bool on)
     if (sVoxelBlur == on)
         return;
     sVoxelBlur = on;
+    Save();
+}
+
+bool CtrSettings_VoxelBattle(void)
+{
+    return sVoxelBattle;
+}
+
+void CtrSettings_SetVoxelBattle(bool on)
+{
+    if (sVoxelBattle == on)
+        return;
+    sVoxelBattle = on;
     Save();
 }
 

@@ -57,6 +57,7 @@ unsigned CtrVideo_VoxelUploadsLeft(void)
 #endif
 #if CTR_VOXEL_ENABLED
 #include "voxel/ctr_voxel.h"
+#include "voxel/voxel_battle.h"
 #endif
 
 /*
@@ -119,6 +120,18 @@ static bool sStageRequested, sStage;
 static bool sCentred;
 static unsigned sCentredRequested, sCentredScreen;
 static bool sBattleRequested, sBattle;
+/*
+ * A battle in front of the voxel world (RenderBattleWorld): this frame's
+ * scenery is the world, and the layers it stands in for are left out of the
+ * battle's own picture - BG3, its scenery, and while the intro slides that
+ * in, the entry picture on BG1 and BG2.
+ */
+static bool sBattleWorld;
+static unsigned sWorldLayers;
+/* battle_bg.c: BG3 holds a move's background rather than the scenery.
+ * battle_intro.c: the intro is sliding the scenery in. */
+unsigned char CtrBattleBg_MoveBgShown(void);
+unsigned char CtrBattleIntro_Sliding(void);
 /* Visible extent in GBA coordinates. */
 #define VIEW_LEFT ((int)floorf(-sOffX / sZoom) - sViewX)
 #define VIEW_TOP ((int)floorf(-sOffY / sZoom) - sViewY)
@@ -3461,6 +3474,12 @@ static void ScenePrepare(void)
     C3D_TexSetWrap(&sSceneTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 }
 
+#if CTR_VOXEL_ENABLED
+static void GpuSplit(void);
+#else
+#define GpuSplit() C3D_FrameSplit(0)
+#endif
+
 /*
  * The battle scene - everything but the text box - at SCENE_ZOOM into its own
  * surface, then that surface on the logical one at CTR_BATTLE_ZOOM. The scene
@@ -3506,7 +3525,7 @@ static void RenderBattleScene(uint32_t clear)
     C2D_TargetClear(sScene, 0);
     C2D_SceneBegin(sScene);
     Blend(5, false, false);
-    sLayerExclude = 1;
+    sLayerExclude = 1 | sWorldLayers;
     if (!(Reg(0) & 128)) Compose();
     sLayerExclude = 0;
     C2D_Flush();
@@ -3526,6 +3545,8 @@ static void RenderBattleScene(uint32_t clear)
     C2D_ViewReset();
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSceneTex, &cut}, ox, oy, 0, NULL, scale, scale);
+    /* The sky above the scenery, which the world has of its own. */
+    if (!sBattleWorld)
     {
         /* Two tile rows, the period of the stripes the terrain repeats. */
         const float rows = 16 * SCENE_ZOOM;
@@ -4021,6 +4042,176 @@ static void RenderVoxel(uint32_t clear, bool stereo, float slider)
     {
         RenderVoxelEye(sTop, clear, 0.0f);
     }
+}
+
+/*
+ * The 3D battle: the battle in front of the voxel world (CtrSettings_
+ * VoxelBattle). The world is the battle's scenery - drawn where the GBA draws
+ * BG3, from the stage the voxel module chose near the player - and the rest
+ * of the battle is the game's own picture over it, composed as the 2D battle
+ * is (RenderBattleScene and the text box) into the logical surface cleared
+ * transparent, once the world has gone to the screen with its blur and
+ * glow. Whatever the GBA does to its scenery the world takes: BG3's
+ * brightness (a move darkening the field), its palette fading
+ * (VoxelWorld_ScreenFade), its scroll (a move shaking it,
+ * CtrVoxel_SetBattleFrame) and the windows that hide it (the intro's curtain).
+ */
+
+/* Where the windows hide BG3 - the intro's curtain opening from the middle -
+ * the world is hidden too: the backdrop is there. */
+static void BattleWorldCurtain(uint32_t backdrop)
+{
+    int rects[WINDOW_RECTS][4];
+    unsigned masks[WINDOW_RECTS], count;
+
+    if (!(Reg(0) & 0x6000))
+        return;
+    count = WindowPartition(VIEW_TOP, VIEW_BOTTOM, rects, masks);
+    for (unsigned i = 0; i < count; ++i)
+    {
+        float x0, y0, x1, y1;
+
+        if (masks[i] & 8)
+            continue;
+        x0 = (rects[i][0] + sViewX) * sZoom + sOffX;
+        x1 = (rects[i][2] + sViewX) * sZoom + sOffX;
+        y0 = (rects[i][1] + sViewY) * sZoom + sOffY;
+        y1 = (rects[i][3] + sViewY) * sZoom + sOffY;
+        C2D_DrawRectSolid(x0, y0, 0, x1 - x0, y1 - y0, backdrop);
+    }
+}
+
+/*
+ * The GBA's scenery has a base under each side, which the world has not: a
+ * soft shadow on the ground under each battler and trainer instead, the dark
+ * blue of the world's own shadows fading out from the middle. One small
+ * texture (linear memory, made once), stretched to each shadow.
+ */
+#define BATTLE_SHADOW_W 64
+#define BATTLE_SHADOW_H 16
+#define BATTLE_SHADOW_ALPHA 0.50f
+static C3D_Tex sBattleShadowTex;
+static bool sBattleShadowFailed;
+
+static bool BattleShadowTexture(void)
+{
+    uint32_t *texels;
+
+    if (sBattleShadowTex.data || sBattleShadowFailed)
+        return sBattleShadowTex.data != NULL;
+    if (!C3D_TexInit(&sBattleShadowTex, BATTLE_SHADOW_W, BATTLE_SHADOW_H, GPU_RGBA8))
+    {
+        memset(&sBattleShadowTex, 0, sizeof(sBattleShadowTex));
+        sBattleShadowFailed = true;
+        return false;
+    }
+    C3D_TexSetFilter(&sBattleShadowTex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&sBattleShadowTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    texels = sBattleShadowTex.data;
+    for (unsigned y = 0; y < BATTLE_SHADOW_H; ++y)
+        for (unsigned x = 0; x < BATTLE_SHADOW_W; ++x)
+        {
+            float u = (x + 0.5f) / (BATTLE_SHADOW_W / 2) - 1.0f, v = (y + 0.5f) / (BATTLE_SHADOW_H / 2) - 1.0f;
+            float d = 1.0f - (u * u + v * v), a = d > 0.0f ? BATTLE_SHADOW_ALPHA * d * sqrtf(d) : 0.0f;
+
+            texels[CtrVideo_Texel(x, y, BATTLE_SHADOW_W)] = 8u << 24 | 20u << 16 | 40u << 8
+                                                           | (uint32_t)(a * 255.0f + 0.5f);
+        }
+    C3D_TexFlush(&sBattleShadowTex);
+    return true;
+}
+
+static void BattleWorldShadows(void)
+{
+    static const Tex3DS_SubTexture whole = {BATTLE_SHADOW_W, BATTLE_SHADOW_H, 0, 1, 1, 0};
+    VoxelBattleShadow shadows[4];
+    unsigned count = VoxelBattle_Shadows(shadows, 4);
+
+    if (count == 0 || !BattleShadowTexture())
+        return;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        float x = (shadows[i].x + sViewX) * sZoom + sOffX, y = (shadows[i].y + sViewY) * sZoom + sOffY;
+        float rx = shadows[i].rx * sZoom, ry = shadows[i].ry * sZoom;
+
+        C2D_DrawImageAt((C2D_Image){&sBattleShadowTex, &whole}, x - rx, y - ry, 0, NULL,
+                        rx * 2.0f / BATTLE_SHADOW_W, ry * 2.0f / BATTLE_SHADOW_H);
+    }
+}
+
+/* BG3's scroll from rest, GBA pixels, either way round its 256-pixel turn:
+ * the scenery rests at 0 (or 256, the same picture). */
+static float BattleScenerySway(unsigned reg)
+{
+    return (float)((int)((Reg(reg) + 128) & 255) - 128);
+}
+
+static void RenderBattleWorld(uint32_t clear)
+{
+    const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+    unsigned control = Reg(0x50), effect = (control >> 6) & 3;
+    float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
+    float bloom;
+
+    /* The world is BG3: its brightness is BG3's. */
+    CtrVoxel_SetBrightness((control & 0x08) ? bright : 0.0f, 0.0f, effect == 2);
+    C2D_TargetClear(sLogical, clear);
+    CtrVoxel_Draw(sLogical, 0.0f);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    sGpuEarly = GpuStartAtSplit();
+
+    /* The world to the screen, as in the field. */
+    C2D_Prepare();
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    BlendForget();
+    bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
+    if (bloom > 0.005f)
+        VoxelBloomPrepare();
+    C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(sTop);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+    if (CtrSettings_VoxelBlur())
+        VoxelDiorama();
+    if (bloom > 0.005f)
+        VoxelBloomCompose(bloom);
+    if (!(Reg(0) & 128))
+    {
+        /* Blended over the world, not added as the glow was. */
+        Blend(5, false, false);
+        BattleWorldShadows();
+        BattleWorldCurtain(clear);
+    }
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    GpuSplit();
+
+    /* The battle's own picture over it: the logical surface again, cleared
+     * transparent, composed as RenderEye composes the 2D battle. */
+    sParallax = 0.0f;
+    sLayerShift = 0.0f;
+    BlendForget();
+    C2D_TargetClear(sLogical, 0);
+    if (sScene) RenderBattleScene(0);
+    C2D_SceneBegin(sLogical);
+    Blend(5, false, false);
+    /* After a scene composed on its own only the text box is left; without
+     * its surface, everything but what the world stands in for. */
+    sLayerExclude = sScene ? 63 & ~(1u | 32u) : sWorldLayers;
+    if (!(Reg(0) & 128)) Compose();
+    sLayerExclude = 0;
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    GpuSplit();
+
+    BlendForget();
+    C2D_SceneBegin(sTop);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+    C2D_Flush();
 }
 #endif
 
@@ -5178,6 +5369,30 @@ void CtrVideo_Present(void)
 #else
     const bool voxel = false, overworld = false, blank = false;
 #endif
+    /*
+     * A battle in front of the voxel world: the world updated as the battle's
+     * scenery whenever the option is on, and drawn as it while BG3 shows the
+     * scenery - a move's background on BG3 is the 2D battle's, whole.
+     */
+    sBattleWorld = false;
+    sWorldLayers = 0;
+#if CTR_VOXEL_ENABLED
+    bool battleUpdated = false;
+    if (sBattle && CtrSettings_Voxel() && CtrSettings_VoxelBattle() && CtrVoxel_IsAvailableForBattle())
+    {
+        bool sliding = CtrBattleIntro_Sliding() != 0, moveBg = CtrBattleBg_MoveBgShown() != 0;
+
+        if (!CtrVoxel_InBattle())
+            CtrVoxel_BeginBattle();
+        /* The intro slides the scenery in line by line: no shake there. */
+        CtrVoxel_SetBattleFrame(sliding, sliding || moveBg ? 0.0f : BattleScenerySway(0x1c),
+                                sliding || moveBg ? 0.0f : BattleScenerySway(0x1e));
+        battleUpdated = CtrVoxel_Update();
+        sBattleWorld = battleUpdated && !moveBg && (Reg(0) & 0x800) && !(Reg(0) & 128);
+        if (sBattleWorld)
+            sWorldLayers = (1u << 3) | (sliding && !VoxelBattle_IsLink() ? (1u << 1) | (1u << 2) : 0u);
+    }
+#endif
     /* The 2D field centres its text windows as the voxel overlay does. */
     sFieldUi = field && !voxel;
     float slider = osGet3DSliderState();
@@ -5224,6 +5439,13 @@ void CtrVideo_Present(void)
         sPlanes = 0;
         C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
     }
+#if CTR_VOXEL_ENABLED
+    else if (sBattleWorld)
+    {
+        sPlanes = 0;
+        RenderBattleWorld(clear);
+    }
+#endif
     else if (!stereo)
     {
         sPlanes = 0;
@@ -5282,7 +5504,7 @@ void CtrVideo_Present(void)
                      (unsigned long)sStats.errors, sUsed,
                      (unsigned long)linearSpaceFree(), (unsigned long)vramSpaceFree());
 #if CTR_VOXEL_ENABLED
-        if (voxel)
+        if (voxel || sBattleWorld)
         {
             const CtrVoxelStats *stats = CtrVoxel_GetStats();
             CtrLog_Write(CTR_LOG_VIDEO,
@@ -5353,6 +5575,10 @@ void CtrVideo_Shutdown(void)
     if (sBloomTex.data) C3D_TexDelete(&sBloomTex);
     memset(&sBloomTex, 0, sizeof(sBloomTex));
     if (sSurface.data) C3D_TexDelete(&sSurface);
+#if CTR_VOXEL_ENABLED
+    if (sBattleShadowTex.data) C3D_TexDelete(&sBattleShadowTex);
+    memset(&sBattleShadowTex, 0, sizeof(sBattleShadowTex));
+#endif
     LeavesRelease();
     if (sAtlas.data) C3D_TexDelete(&sAtlas);
     if (sC3d) C3D_Fini();

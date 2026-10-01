@@ -101,4 +101,20 @@ unsigned long CtrVoxel_ReleaseIdleVram(void);
 /* A map just entered by a cut is still being built (see VOXEL_WARMUP_MS). */
 bool CtrVoxel_IsWarmingUp(void);
 
+/*
+ * The 3D battle (3ds_video.c, RenderBattleWorld). From Begin to End, Update
+ * draws the world as the battle's scenery: seen from a camera of its own on
+ * a stage chosen near the player (voxel_battle.c), with nobody in it. Begin
+ * once per battle, on its first frame; Update ends it by itself, giving the
+ * field its camera back, once the game has left the battle.
+ */
+bool CtrVoxel_IsAvailableForBattle(void);
+void CtrVoxel_BeginBattle(void);
+void CtrVoxel_EndBattle(void);
+bool CtrVoxel_InBattle(void);
+/* Before each battle Update: whether the intro is sliding its scenery in
+ * (the camera glides in meanwhile), and how far BG3 is scrolled from rest in
+ * GBA pixels (a move shaking the scenery shakes the camera). */
+void CtrVoxel_SetBattleFrame(bool introSliding, float shakeX, float shakeY);
+
 #endif

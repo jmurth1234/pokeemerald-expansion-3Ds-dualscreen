@@ -486,7 +486,8 @@ enum { SCR_MAP, SCR_POKEMON, SCR_BAG, SCR_CARD, SCR_POKEDEX, SCR_POKENAV, SCR_SA
 #define CTR_SHOW_FPS 1
 #endif
 enum { OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND, OPT_BUTTON_MODE, OPT_FRAME,
-       OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPTION_ROWS };
+       OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPT_VOXEL_BATTLE,
+       OPTION_ROWS };
 #if CTR_VOXEL_ENABLED
 #define OPTION_SHOWN OPTION_ROWS
 #else
@@ -1376,12 +1377,13 @@ static int sOptionScroll, sOptionScrollStart;
 #define OPTION_PREVIEW_GAP 10
 #define OPTION_PREVIEW_H 36
 
-/* The 3D camera and blur rows only with the voxel overworld on. */
+/* The 3D camera, blur and battle rows only with the voxel overworld on. */
 static bool8 OptionRowShown(int row, bool8 voxel)
 {
     if (row >= OPTION_SHOWN || (row == OPT_FPS && !CTR_SHOW_FPS))
         return FALSE;
-    return voxel || (row != OPT_VOXEL_PITCH && row != OPT_VOXEL_ZOOM && row != OPT_VOXEL_BLUR);
+    return voxel || (row != OPT_VOXEL_PITCH && row != OPT_VOXEL_ZOOM && row != OPT_VOXEL_BLUR
+                     && row != OPT_VOXEL_BATTLE);
 }
 
 static int OptionRowsShown(bool8 voxel)
@@ -2183,6 +2185,7 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             s->options[OPT_VOXEL_PITCH] = CtrSettings_VoxelPitch();
             s->options[OPT_VOXEL_ZOOM] = CtrSettings_VoxelZoom();
             s->options[OPT_VOXEL_BLUR] = CtrSettings_VoxelBlur();
+            s->options[OPT_VOXEL_BATTLE] = CtrSettings_VoxelBattle();
             if (sOptionScroll > OptionsMaxScroll(s->options[OPT_VOXEL]))
                 sOptionScroll = OptionsMaxScroll(s->options[OPT_VOXEL]);
             s->optionScroll = (u8)sOptionScroll;
@@ -2789,7 +2792,8 @@ static const u8 *OptionValue(int row, u8 value)
     case 4: return value == 0 ? gText_ButtonTypeNormal : value == 1 ? gText_ButtonTypeLR : gText_ButtonTypeLEqualsA;
     case OPT_FPS:
     case OPT_VOXEL: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
-    case OPT_VOXEL_BLUR: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
+    case OPT_VOXEL_BLUR:
+    case OPT_VOXEL_BATTLE: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
     case OPT_VOXEL_PITCH: return Number(value, 2, STR_CONV_MODE_LEFT_ALIGN);
     case OPT_VOXEL_ZOOM:
         StringCopy(frame, Number(value, 3, STR_CONV_MODE_LEFT_ALIGN));
@@ -2830,11 +2834,12 @@ static void DrawOptions(const ViewState *s)
     static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
     const u8 *names[OPTION_ROWS] = {gText_TextSpeed, gText_BattleScene, gText_BattleStyle, gText_Sound,
                                     gText_ButtonMode, gText_Frame, Ascii("SHOW FPS"), Ascii("VOXEL 3D"),
-                                    Ascii("3D ANGLE"), Ascii("3D ZOOM"), Ascii("3D BLUR")};
+                                    Ascii("3D ANGLE"), Ascii("3D ZOOM"), Ascii("3D BLUR"),
+                                    Ascii("3D BATTLE")};
     /* The frame stays last, above its preview. */
     static const u8 order[OPTION_ROWS] = {OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND,
                                           OPT_BUTTON_MODE, OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH,
-                                          OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPT_FRAME};
+                                          OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPT_VOXEL_BATTLE, OPT_FRAME};
     /* The 3D rows only mean something with the voxel overworld on; with them
      * there is no room left for the frame's preview, nor for every row: the
      * list then scrolls (OptionsDrag). */
@@ -3888,7 +3893,7 @@ static void ActivateOption(u8 id)
 {
     bool8 back = id >= HIT_OPTION + HIT_OPTION_BACK;
     u8 row = (id - HIT_OPTION) % HIT_OPTION_BACK;
-    static const u8 counts[OPTION_ROWS] = {3, 2, 2, 2, 3, WINDOW_FRAMES_COUNT, 2, 2, 0, 0, 2};
+    static const u8 counts[OPTION_ROWS] = {3, 2, 2, 2, 3, WINDOW_FRAMES_COUNT, 2, 2, 0, 0, 2, 2};
     u8 value, step = back ? counts[row] - 1 : 1;
 
     if (!OptionRowShown(row, TRUE))
@@ -3910,6 +3915,14 @@ static void ActivateOption(u8 id)
         if (!CtrSettings_Voxel())
             return;
         CtrSettings_SetVoxelBlur(!CtrSettings_VoxelBlur());
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (row == OPT_VOXEL_BATTLE)
+    {
+        if (!CtrSettings_Voxel())
+            return;
+        CtrSettings_SetVoxelBattle(!CtrSettings_VoxelBattle());
         PlaySE(SE_SELECT);
         return;
     }

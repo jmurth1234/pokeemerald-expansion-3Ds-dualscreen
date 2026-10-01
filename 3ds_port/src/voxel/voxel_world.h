@@ -52,6 +52,8 @@ typedef struct
 
 /* Cheap enough to call once per frame: no payload is touched. */
 bool VoxelWorld_IsMapAvailable(void);
+/* The same during a battle, which keeps the map it was started from. */
+bool VoxelWorld_IsBattleMapAvailable(void);
 
 /*
  * Opens a batch of lookups during which resolved payload pointers may be
@@ -83,6 +85,8 @@ const VoxelMapInstance *VoxelWorld_Instance(unsigned index);
 const VoxelMapInstance *VoxelWorld_GetInstanceAt(int worldX, int worldY);
 
 int VoxelWorld_GetMetatileId(int worldX, int worldY);
+/* The cell's collision bits (0: walkable). */
+unsigned VoxelWorld_GetCollision(int worldX, int worldY);
 unsigned VoxelWorld_GetMetatileBehavior(int worldX, int worldY);
 /* Reflective behavior whose metatile art actually depicts water or ice. */
 bool VoxelWorld_IsVisibleReflectiveSurface(int worldX, int worldY);

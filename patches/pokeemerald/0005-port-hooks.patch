@@ -680,7 +680,7 @@ index c3658da89f92f6dccddeb5bc30465b13301a6874..6fd3cdad8e5809fa36d018f608ae46f2
          AI_THINKING_STRUCT->funcResult = AI_WEATHER_RAIN;
      if (gBattleWeather & B_WEATHER_SANDSTORM)
 diff --git a/src/battle_anim.c b/src/battle_anim.c
-index fb2817af992d03c73137f68500e831714b09cc5f..61f404dc0e8d826e9a856bd33ba6d117cf91ea06 100644
+index fb2817af992d03c73137f68500e831714b09cc5f..694136255ff490575163d13ef1cb07ec0e127839 100644
 --- a/src/battle_anim.c
 +++ b/src/battle_anim.c
 @@ -28,6 +28,10 @@
@@ -694,7 +694,17 @@ index fb2817af992d03c73137f68500e831714b09cc5f..61f404dc0e8d826e9a856bd33ba6d117
  static void Cmd_loadspritegfx(void);
  static void Cmd_unloadspritegfx(void);
  static void Cmd_createsprite(void);
-@@ -237,6 +241,10 @@ void LaunchBattleAnimation(const u8 *const animsTable[], u16 tableId, bool8 isMo
+@@ -88,6 +92,9 @@ static void Task_LoopAndPlaySE(u8 taskId);
+ static void Task_WaitAndPlaySE(u8 taskId);
+ static void LoadDefaultBg(void);
+ static void LoadMoveBg(u16 bgId);
++#ifdef PLATFORM_3DS
++void CtrBattleBg_SetMoveBgShown(bool8 shown); // battle_bg.c
++#endif
+ 
+ EWRAM_DATA static const u8 *sBattleAnimScriptPtr = NULL;
+ EWRAM_DATA static const u8 *sBattleAnimScriptRetAddr = NULL;
+@@ -237,6 +244,10 @@ void LaunchBattleAnimation(const u8 *const animsTable[], u16 tableId, bool8 isMo
  
      sMonAnimTaskIdArray[0] = TASK_NONE;
      sMonAnimTaskIdArray[1] = TASK_NONE;
@@ -705,7 +715,7 @@ index fb2817af992d03c73137f68500e831714b09cc5f..61f404dc0e8d826e9a856bd33ba6d117
      sBattleAnimScriptPtr = animsTable[tableId];
      gAnimScriptActive = TRUE;
      sAnimFramesToWait = 0;
-@@ -247,9 +255,14 @@ void LaunchBattleAnimation(const u8 *const animsTable[], u16 tableId, bool8 isMo
+@@ -247,9 +258,14 @@ void LaunchBattleAnimation(const u8 *const animsTable[], u16 tableId, bool8 isMo
  
      if (isMoveAnim)
      {
@@ -722,7 +732,7 @@ index fb2817af992d03c73137f68500e831714b09cc5f..61f404dc0e8d826e9a856bd33ba6d117
              {
                  m4aMPlayVolumeControl(&gMPlayInfo_BGM, TRACKS_ALL, 128);
                  break;
-@@ -327,6 +340,11 @@ static void RunAnimScriptCommand(void)
+@@ -327,6 +343,11 @@ static void RunAnimScriptCommand(void)
  {
      do
      {
@@ -734,6 +744,16 @@ index fb2817af992d03c73137f68500e831714b09cc5f..61f404dc0e8d826e9a856bd33ba6d117
          sScriptCmdTable[sBattleAnimScriptPtr[0]]();
      } while (sAnimFramesToWait == 0 && gAnimScriptActive);
  }
+@@ -1200,6 +1221,9 @@ static void LoadMoveBg(u16 bgId)
+     }
+     else
+     {
++#ifdef PLATFORM_3DS
++        CtrBattleBg_SetMoveBgShown(TRUE);
++#endif
+         LZDecompressVram(gBattleAnimBackgroundTable[bgId].tilemap, (void *)BG_SCREEN_ADDR(26));
+         LZDecompressVram(gBattleAnimBackgroundTable[bgId].image, (void *)BG_CHAR_ADDR(2));
+         LoadCompressedPalette(gBattleAnimBackgroundTable[bgId].palette, BG_PLTT_ID(2), PLTT_SIZE_4BPP);
 diff --git a/src/battle_anim_electric.c b/src/battle_anim_electric.c
 index cc36e608f891cddbc96ca6c03733b59ee5e46dbd..7ac706efd2312c64d2eb3acfcaf0cf2ceb1d4729 100644
 --- a/src/battle_anim_electric.c
@@ -801,6 +821,49 @@ index fa6bd69343adbc65a216b3de88cae52b5dffb767..28c76ec7328cbecaacdf02d115ba1e2b
          var0 = sprite->data[5] - 2;
          if (var0 < 2)
          {
+diff --git a/src/battle_bg.c b/src/battle_bg.c
+index a1ce702c5948964aed3b07827739189a80082812..6b1e6b2f38f7176fb459783263c596446217e974 100644
+--- a/src/battle_bg.c
++++ b/src/battle_bg.c
+@@ -757,8 +757,28 @@ void LoadBattleMenuWindowGfx(void)
+     }
+ }
+ 
++#ifdef PLATFORM_3DS
++// The 3DS can draw the overworld in 3D in place of the battle's scenery on
++// BG3. A move's background is loaded into the same BG3 (LoadMoveBg) and has to
++// be shown instead, so the renderer asks which of the two BG3 holds.
++static bool8 sCtrMoveBgShown;
++
++bool8 CtrBattleBg_MoveBgShown(void)
++{
++    return sCtrMoveBgShown;
++}
++
++void CtrBattleBg_SetMoveBgShown(bool8 shown)
++{
++    sCtrMoveBgShown = shown;
++}
++#endif
++
+ void DrawMainBattleBackground(void)
+ {
++#ifdef PLATFORM_3DS
++    sCtrMoveBgShown = FALSE;
++#endif
+     if (gBattleTypeFlags & (BATTLE_TYPE_LINK | BATTLE_TYPE_FRONTIER | BATTLE_TYPE_EREADER_TRAINER | BATTLE_TYPE_RECORDED_LINK))
+     {
+         LZDecompressVram(gBattleEnvironmentTiles_Building, (void *)(BG_CHAR_ADDR(2)));
+@@ -1282,6 +1302,9 @@ bool8 LoadChosenBattleElement(u8 caseId)
+         }
+         break;
+     case 4:
++#ifdef PLATFORM_3DS
++        sCtrMoveBgShown = FALSE;
++#endif
+         if (gBattleTypeFlags & (BATTLE_TYPE_FRONTIER | BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED_LINK | BATTLE_TYPE_EREADER_TRAINER))
+         {
+             LZDecompressVram(gBattleEnvironmentTilemap_Building, (void *)(BG_SCREEN_ADDR(26)));
 diff --git a/src/battle_controller_player.c b/src/battle_controller_player.c
 index 4b564ad141f4a8308b33b99997f60cae760117c3..11095bc7ac57e3688f84e03f8e836897eb0e8e2a 100644
 --- a/src/battle_controller_player.c
@@ -1137,6 +1200,29 @@ index 4262ceeb93d684dba270872c0752fc957f1c6708..5e1fc0055c41131c5a3c799f70b52cc5
      LoadSpritePalette(&sStatusSummaryBarSpritePal);
      LoadSpritePalette(&sStatusSummaryBallsSpritePal);
  
+diff --git a/src/battle_intro.c b/src/battle_intro.c
+index 0a0226c608da187311d58ef67ec06ce98de539ab..71b7ace46257a1daaae3f3c04c4566fc58c23d70 100644
+--- a/src/battle_intro.c
++++ b/src/battle_intro.c
+@@ -137,6 +137,18 @@ void HandleIntroSlide(u8 environment)
+     gTasks[taskId].data[6] = 0;
+ }
+ 
++#ifdef PLATFORM_3DS
++// Whether the scenery is still sliding in. The 3DS's 3D battle draws the
++// overworld in its place and has the camera glide in instead; BG1 holds the
++// entry picture of the scenery meanwhile (DrawBattleEntryBackground).
++bool8 CtrBattleIntro_Sliding(void)
++{
++    return FuncIsActiveTask(BattleIntroSlide1) || FuncIsActiveTask(BattleIntroSlide2)
++        || FuncIsActiveTask(BattleIntroSlide3) || FuncIsActiveTask(BattleIntroSlideLink)
++        || FuncIsActiveTask(BattleIntroSlidePartner);
++}
++#endif
++
+ static void BattleIntroSlideEnd(u8 taskId)
+ {
+     DestroyTask(taskId);
 diff --git a/src/battle_main.c b/src/battle_main.c
 index ed50332bb801f155d11e88ea844d082c6f52ffa8..2a51f0bf42119ca5558542093686bbfc15659f36 100644
 --- a/src/battle_main.c

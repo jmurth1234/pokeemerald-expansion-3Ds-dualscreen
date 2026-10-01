@@ -291,6 +291,14 @@ bool VoxelWorld_IsMapAvailable(void)
     return gMain.callback2 == CB2_Overworld || gMain.callback2 == CB2_OverworldBasic;
 }
 
+bool VoxelWorld_IsBattleMapAvailable(void)
+{
+    /* A battle leaves the map it was started from loaded, live grid and all:
+     * the field picks up where it stopped when the battle is over. */
+    return gMain.inBattle && gMapHeader.mapLayout != NULL && gSaveBlock1Ptr != NULL
+        && gBackupMapLayout.map != NULL;
+}
+
 /* ── Instances ──────────────────────────────────────────────────────────── */
 
 static void FillInstance(VoxelMapInstance *inst, const struct MapHeader *header,
@@ -484,6 +492,11 @@ static u16 GetRawBlock(int worldX, int worldY, const VoxelMapInstance **outInst)
 int VoxelWorld_GetMetatileId(int worldX, int worldY)
 {
     return GetRawBlock(worldX, worldY, NULL) & MAPGRID_METATILE_ID_MASK;
+}
+
+unsigned VoxelWorld_GetCollision(int worldX, int worldY)
+{
+    return (GetRawBlock(worldX, worldY, NULL) & MAPGRID_COLLISION_MASK) >> MAPGRID_COLLISION_SHIFT;
 }
 
 static u16 GetMetatileAttribute(const VoxelMapInstance *inst, int metatileId)
@@ -806,12 +819,25 @@ bool VoxelWorld_ScreenFade(float *amount, float rgb[3])
         bool fading = gPaletteFade.active || gPaletteFade.y != 0
                    || (gWeatherPtr != NULL && gWeatherPtr->palProcessingState == WEATHER_PAL_STATE_SCREEN_FADING_IN)
                    || (gWeatherPtr != NULL && gWeatherPtr->palProcessingState == WEATHER_PAL_STATE_SCREEN_FADING_OUT);
-        const u16 *shown = (const u16 *)PLTT;
+        const u16 *shown = (const u16 *)PLTT, *unfaded = gPlttBufferUnfaded;
         unsigned count = NUM_PALS_TOTAL * 16;
 
-        if (!fading || memcmp(shown, gPlttBufferUnfaded, count * sizeof(u16)) == 0)
+        /*
+         * In a battle the world stands in for the scenery, and fades as its
+         * three palettes do (BG 2-4, LoadBattleTerrainGfx), whatever does it:
+         * a palette fade, or a move blending the background towards a colour
+         * without one. The battlers' palettes fade on their own.
+         */
+        if (gMain.inBattle)
+        {
+            shown += BG_PLTT_ID(2);
+            unfaded += BG_PLTT_ID(2);
+            count = 3 * 16;
+            fading = true;
+        }
+        if (!fading || memcmp(shown, unfaded, count * sizeof(u16)) == 0)
             return false;
-        FadeFit(shown, gPlttBufferUnfaded, count, amount, rgb);
+        FadeFit(shown, unfaded, count, amount, rgb);
         /* Below one step of the game's own 16 it is rounding, not a fade. */
         if (*amount < 1.0f / 32.0f)
             *amount = 0.0f;

@@ -65,6 +65,9 @@ void CtrSettings_StepVoxelZoom(int direction);
 /* The voxel picture's tilt-shift blur, on by default. */
 bool CtrSettings_VoxelBlur(void);
 void CtrSettings_SetVoxelBlur(bool on);
+/* Battles in front of the voxel world (3ds_video.c), off by default. */
+bool CtrSettings_VoxelBattle(void);
+void CtrSettings_SetVoxelBattle(bool on);
 /* The FPS counter on the top screen, off by default. */
 bool CtrSettings_ShowFps(void);
 void CtrSettings_SetShowFps(bool on);

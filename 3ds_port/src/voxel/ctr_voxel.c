@@ -38,6 +38,7 @@
 #include "ctr_voxel.h"
 #include "voxel_arena.h"
 #include "voxel_atlas.h"
+#include "voxel_battle.h"
 #include "voxel_camera.h"
 #include "voxel_entities.h"
 #include "voxel_regions.h"
@@ -4197,6 +4198,9 @@ bool CtrVoxel_Update(void)
         sStatus = "off";
         return false;
     }
+    /* The game has left the battle: the field is drawn again, as it was. */
+    if (sBattle.on && !VoxelBattle_GameInBattle())
+        CtrVoxel_EndBattle();
     started = svcGetSystemTick();
     ++sFrame;
 
@@ -4241,7 +4245,14 @@ bool CtrVoxel_Update(void)
      * one, because that is the granularity at which the geometry changes.
      */
     VoxelWorld_GetPlayerWorldCoords(&playerX, &playerZ);
-    VoxelEntities_GetPlayerWorldPos(&smoothX, &smoothZ);
+    /* In a battle the player's sprite is one of the battle's. */
+    if (sBattle.on)
+    {
+        smoothX = playerX;
+        smoothZ = playerZ;
+    }
+    else
+        VoxelEntities_GetPlayerWorldPos(&smoothX, &smoothZ);
 
     mapChanged = mapGroup != sMeshMapGroup || mapNum != sMeshMapNum;
     if (mapChanged)
@@ -4249,15 +4260,48 @@ bool CtrVoxel_Update(void)
         for (unsigned a = 0; a < VOXEL_ATLAS_SLOTS; ++a)
             sAtlases[a].extendPending = false;
         cut = !HandleMapChange(mapGroup, mapNum, smoothX, smoothZ);
+        /* A battle on a map the field never drew: the field's camera is the
+         * one the cut just placed on the player. */
+        if (sBattle.on)
+            sBattle.field = sCamera;
     }
-    else
+    else if (!sBattle.on)
     {
         VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(smoothX + 0.5f, smoothZ + 0.5f), 0);
         VoxelCamera_Update(&sCamera, smoothX, smoothZ);
     }
-    /* A cut moves the player; a crossing only the coordinates, and
-     * HandleMapChange has moved the last position with them. */
-    TrackMotion(smoothX, smoothZ, cut);
+    if (sBattle.on)
+    {
+        if (!sBattle.chosen)
+        {
+            uint64_t searchStart = svcGetSystemTick();
+            float ms;
+
+            if (!sBattle.begun)
+                VoxelBattle_BeginStage();
+            sBattle.begun = true;
+            sBattle.chosen = VoxelBattle_StepStage(VOXEL_BATTLE_STAGE_CELLS, VOXEL_BATTLE_STAGE_SPOTS,
+                                                   &sBattle.targetX, &sBattle.targetZ, &sBattle.ground);
+            ms = MsSince(searchStart);
+            ++sBattle.searchFrames;
+            sBattle.searchMs += ms;
+            if (ms > sBattle.searchWorstMs)
+                sBattle.searchWorstMs = ms;
+            if (sBattle.chosen)
+                CtrLog_Write(CTR_LOG_VIDEO, "VOXEL battle stage searched in %u frames, %.1f ms "
+                             "(worst frame %.1f)", (unsigned)sBattle.searchFrames, sBattle.searchMs,
+                             sBattle.searchWorstMs);
+        }
+        BattleCamera();
+        /* Nobody moves in a battle, and nothing is led towards. */
+        TrackMotion(sLastX, sLastZ, true);
+    }
+    else
+    {
+        /* A cut moves the player; a crossing only the coordinates, and
+         * HandleMapChange has moved the last position with them. */
+        TrackMotion(smoothX, smoothZ, cut);
+    }
     /* Heading off the current map into the one beside it (see
      * VOXEL_CROSSING_RESERVE_MS)? */
     {
@@ -4269,7 +4313,7 @@ bool CtrVoxel_Update(void)
         const VoxelMapInstance *next = (dx || dz)
             ? VoxelWorld_GetInstanceAt((int)floorf(aheadX), (int)floorf(aheadZ)) : NULL;
 
-        sCrossingSoon = next != NULL && next != here;
+        sCrossingSoon = next != NULL && next != here && !sBattle.on;
     }
     /* Recorded after the shift, for the next crossing. */
     RememberInstanceOrigins();
@@ -4322,8 +4366,22 @@ bool CtrVoxel_Update(void)
     /*
      * Billboards last, rebuilt every frame: they interpolate between tiles, so
      * they move on frames where nothing else does. Built around the camera's
-     * tile, which keeps their coordinates small enough to pack.
+     * tile, which keeps their coordinates small enough to pack. Nobody
+     * stands in a battle's scenery: the game's sprites are the battle's,
+     * drawn over it.
      */
+    if (sBattle.on)
+    {
+        sDynamicX = (int)floorf(sCamera.targetX);
+        sDynamicZ = (int)floorf(sCamera.targetZ);
+        sSpriteVertices = sReflectionVertices = 0;
+        sStats.reflections = 0;
+#if CTR_VOXEL_LIGHTING
+        sShadowVertices = 0;
+#endif
+        sStats.spritesMs = 0.0f;
+    }
+    else
     {
         uint64_t spritesStart = svcGetSystemTick();
         VoxelBuilder sprites, reflections;
@@ -4335,6 +4393,7 @@ bool CtrVoxel_Update(void)
 
         sDynamicX = (int)floorf(sCamera.targetX);
         sDynamicZ = (int)floorf(sCamera.targetZ);
+
         VoxelBuilder_Init(&sprites, dynamic, VOXEL_SPRITE_RESERVE);
         VoxelBuilder_SetOrigin(&sprites, sDynamicX, sDynamicZ);
         VoxelBuilder_Init(&reflections, dynamic + VOXEL_REFLECTION_FIRST,
@@ -4376,6 +4435,7 @@ bool CtrVoxel_Update(void)
         sStats.spritesMs = (float)((svcGetSystemTick() - spritesStart) * 1000.0 / SYSCLOCK_ARM11);
     }
     ReportPackErrors("the billboards around", sDynamicX, sDynamicZ, mapGroup, mapNum);
+
 
     sStats.chunks = 0;
     for (unsigned i = 0; i < VOXEL_CHUNK_SLOTS; ++i)
