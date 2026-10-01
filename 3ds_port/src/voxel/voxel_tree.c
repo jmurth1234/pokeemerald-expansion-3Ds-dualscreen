@@ -52,11 +52,13 @@ static void EmitSmallCell(VoxelBuilder *builder, int x, int y)
 
     VoxelMesh_Top(builder, wx, wz, 0.0f, 0.0f,
                   48.0f / VOXEL_TREE_TEXTURE_DIM, 0.5f, 1.0f, 0.25f, 1.0f);
+    builder->rounded = true;
     VoxelBuilder_Quad(builder,
         &(VoxelVertex){wx,        baseHeight + rise, baseZ - run, 0.5f,  0.5f, 1.0f},
         &(VoxelVertex){wx + 1.0f, baseHeight + rise, baseZ - run, 0.75f, 0.5f, 1.0f},
         &(VoxelVertex){wx + 1.0f, baseHeight,        baseZ,       0.75f, 0.0f, 1.0f},
         &(VoxelVertex){wx,        baseHeight,        baseZ,       0.5f,  0.0f, 1.0f});
+    builder->rounded = false;
 }
 
 static void EmitCell(VoxelBuilder *builder, int x, int y, int part)
@@ -87,11 +89,14 @@ static void EmitCell(VoxelBuilder *builder, int x, int y, int part)
     u1 = u0 + 16.0f / VOXEL_TREE_TEXTURE_DIM;
     v0 = 1.0f - row * 18.0f / VOXEL_TREE_TEXTURE_DIM;
     v1 = v0 - 18.0f / VOXEL_TREE_TEXTURE_DIM;
+    /* A crown card: lit as the rounded crown it stands for. */
+    builder->rounded = true;
     VoxelBuilder_Quad(builder,
         &(VoxelVertex){wx,        baseHeight + top * rise,    baseZ - top * run,    u0, v0, 1.0f},
         &(VoxelVertex){wx + 1.0f, baseHeight + top * rise,    baseZ - top * run,    u1, v0, 1.0f},
         &(VoxelVertex){wx + 1.0f, baseHeight + bottom * rise, baseZ - bottom * run, u1, v1, 1.0f},
         &(VoxelVertex){wx,        baseHeight + bottom * rise, baseZ - bottom * run, u0, v1, 1.0f});
+    builder->rounded = false;
 }
 
 void VoxelTree_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,

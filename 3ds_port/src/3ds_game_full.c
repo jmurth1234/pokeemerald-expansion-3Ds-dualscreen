@@ -18,6 +18,7 @@
 #include "sound_mixer.h"
 #include "m4a.h"
 #include "scanline_effect.h"
+#include "item_menu.h"
 #include "port_platform.h"
 #include "port_log.h"
 
@@ -178,6 +179,38 @@ void CtrCentredClock_SetVBlankCallback(IntrCallback callback)
 void CtrCentredPokenav_SetVBlankCallback(IntrCallback callback)
 {
     SetCentredCallback(callback, CTR_CENTRED_POKENAV);
+}
+
+void CtrCentredStorage_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, CTR_CENTRED_STORAGE);
+}
+
+void CtrCentredSummary_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, CTR_CENTRED_SUMMARY);
+}
+
+/* The bag from the field goes left of the column, from anywhere else over the
+ * whole bottom screen. */
+void CtrCentredBag_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, gBagPosition.location == ITEMMENULOCATION_FIELD ? CTR_CENTRED_BAG
+                                                                                  : CTR_CENTRED_BAG_WHOLE);
+}
+
+/* The Pokédex's own callback. The page it shows for a mon just caught puts
+ * back the battle's, which stays the battle's. */
+IntrCallback CtrPokedex_VBlankCallback(void);
+
+void CtrCentredPokedex_SetVBlankCallback(IntrCallback callback)
+{
+    if (callback == CtrPokedex_VBlankCallback())
+    {
+        SetCentredCallback(callback, CTR_CENTRED_POKEDEX);
+        return;
+    }
+    SetVBlankCallback(callback);
 }
 
 void CtrBattle_SetVBlankCallback(IntrCallback callback)

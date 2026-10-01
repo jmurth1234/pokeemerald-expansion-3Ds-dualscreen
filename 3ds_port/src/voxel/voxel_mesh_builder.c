@@ -91,6 +91,8 @@ void VoxelBuilder_Init(VoxelBuilder *builder, VoxelVertex *storage, unsigned cap
     builder->lighting = false;
     builder->lightingRefine = true;
     builder->lightingConstant = -1.0f;
+    builder->rounded = false;
+    builder->vertexFace = false;
 }
 
 void VoxelBuilder_SetOrigin(VoxelBuilder *builder, int originX, int originZ)
@@ -279,15 +281,16 @@ void VoxelMesh_East(VoxelBuilder *b, float wx, float wz, float yBottom, float yT
 
 /* ── Single tiles ───────────────────────────────────────────────────────── */
 
-/* Height of the block a shape is drawn as, or 0 for a flat tile. Negative
- * recesses it. The values are the reference's. Terrain has none: what stands
- * up outdoors is modelled or read off its drawing, never raised from here. */
+/* Height of the block a shape is drawn as, or 0 for a flat tile.
+ * The values are the reference's. Terrain has none: what stands
+ * up outdoors is modelled or read off its drawing, never raised from here.
+ * Water lies flush with the ground: recessed, its rim drew a line along every
+ * shore that the art, which already draws its own bank, does not have. */
 static float ShapeHeight(VoxelVisualShape shape)
 {
     switch (shape)
     {
     case VOXEL_SHAPE_DECAL:   return 0.02f; /* rugs and mats, just off the floor */
-    case VOXEL_SHAPE_WATER:   return -0.10f;
     case VOXEL_SHAPE_COUNTER: return 0.70f;
     default:                  return 0.0f;
     }
@@ -435,60 +438,6 @@ static void EmitUpright(VoxelBuilder *builder, int x, int y,
         &(VoxelVertex){wx,        height, wz, u0, v0, SHADE_TOP});
 }
 
-/*
- * The rim of a recessed tile (water): down from the ground round it to the
- * sunken top, wherever the neighbour is not recessed with it. Without it the
- * gap showed the clear colour, a black line along every shore. Each rim wears
- * the strip of the tile's own drawing along that edge, the drawn bank folded
- * down, so it reads as the shore the artist drew.
- */
-/* What a neighbour of recessed water is drawn as: water drawn as relief (the
- * shoulder of a rock in the sea, surfed behind) stands on its lattice, not
- * recessed, so the rim is wanted against it too. */
-static VoxelVisualShape RimNeighbour(int x, int y)
-{
-    VoxelVisualShape shape = VoxelMesh_Classify(x, y);
-
-    if (shape == VOXEL_SHAPE_WATER
-     && VoxelRelief_Cell(VoxelWorld_GetInstanceAt(x, y), x, y) != NULL)
-        return VOXEL_SHAPE_FLAT;
-    return shape;
-}
-
-static void EmitRim(VoxelBuilder *b, int x, int y, VoxelVisualShape shape, float h,
-                    float u0, float v0, float u1, float v1)
-{
-    float wx = (float)x, wz = (float)y;
-    float du = (u1 - u0) * -h, dv = (v1 - v0) * -h;
-    VoxelVisualShape n = RimNeighbour(x, y - 1), s = RimNeighbour(x, y + 1);
-    VoxelVisualShape w = RimNeighbour(x - 1, y), e = RimNeighbour(x + 1, y);
-
-    if (n != shape && n != VOXEL_SHAPE_VOID) /* faces south, at the north edge */
-        VoxelBuilder_Quad(b,
-            &(VoxelVertex){wx,        h,    wz, u0, v0,      SHADE_SOUTH},
-            &(VoxelVertex){wx + 1.0f, h,    wz, u1, v0,      SHADE_SOUTH},
-            &(VoxelVertex){wx + 1.0f, 0.0f, wz, u1, v0 + dv, SHADE_SOUTH},
-            &(VoxelVertex){wx,        0.0f, wz, u0, v0 + dv, SHADE_SOUTH});
-    if (s != shape && s != VOXEL_SHAPE_VOID) /* faces north, at the south edge */
-        VoxelBuilder_Quad(b,
-            &(VoxelVertex){wx + 1.0f, h,    wz + 1.0f, u1, v1,      SHADE_NORTH},
-            &(VoxelVertex){wx,        h,    wz + 1.0f, u0, v1,      SHADE_NORTH},
-            &(VoxelVertex){wx,        0.0f, wz + 1.0f, u0, v1 - dv, SHADE_NORTH},
-            &(VoxelVertex){wx + 1.0f, 0.0f, wz + 1.0f, u1, v1 - dv, SHADE_NORTH});
-    if (w != shape && w != VOXEL_SHAPE_VOID) /* faces east, at the west edge */
-        VoxelBuilder_Quad(b,
-            &(VoxelVertex){wx, h,    wz + 1.0f, u0,      v1, SHADE_EAST},
-            &(VoxelVertex){wx, h,    wz,        u0,      v0, SHADE_EAST},
-            &(VoxelVertex){wx, 0.0f, wz,        u0 + du, v0, SHADE_EAST},
-            &(VoxelVertex){wx, 0.0f, wz + 1.0f, u0 + du, v1, SHADE_EAST});
-    if (e != shape && e != VOXEL_SHAPE_VOID) /* faces west, at the east edge */
-        VoxelBuilder_Quad(b,
-            &(VoxelVertex){wx + 1.0f, h,    wz,        u1,      v0, SHADE_WEST},
-            &(VoxelVertex){wx + 1.0f, h,    wz + 1.0f, u1,      v1, SHADE_WEST},
-            &(VoxelVertex){wx + 1.0f, 0.0f, wz + 1.0f, u1 - du, v1, SHADE_WEST},
-            &(VoxelVertex){wx + 1.0f, 0.0f, wz,        u1 - du, v0, SHADE_WEST});
-}
-
 static void EmitTile(VoxelBuilder *builder, int x, int y, VoxelVisualShape shape)
 {
     float wx = (float)x, wz = (float)y;
@@ -513,11 +462,6 @@ static void EmitTile(VoxelBuilder *builder, int x, int y, VoxelVisualShape shape
     }
 
     VoxelMesh_Top(builder, wx, wz, h, 0.0f, u0, v0, u1, v1, SHADE_TOP);
-    if (h < 0.0f)
-    {
-        EmitRim(builder, x, y, shape, h, u0, v0, u1, v1);
-        return;
-    }
     if (h == 0.0f)
         return;
 
@@ -544,6 +488,42 @@ static void EmitTile(VoxelBuilder *builder, int x, int y, VoxelVisualShape shape
  * the drawing at (u, h, v + h). Level cells need one quad; slopes take the
  * 4-pixel lattice. Shade 1: the drawing's own light is already in it.
  */
+#if CTR_VOXEL_LIGHTING
+/*
+ * The sun's face term at lattice point (a, c) of cell (x, y), from the slope
+ * a tile across: two points either side, reaching into the neighbouring
+ * cells. The lattice follows the drawing pixel by pixel - a ledge's berm
+ * rises 3 px on one row and 2 on the next - and a quad's own normal turned
+ * that into stripes a quarter of a tile apart wherever a slope faces away
+ * from the sun. The shape of a mountain or a berm is a tile or more across;
+ * over an even span the alternation cancels out and the shape stays.
+ *
+ * Points (u, h, v + h): the surface's tangents are (1, hu, hu) and
+ * (0, hv, 1 + hv), so its upward normal is (-hu, 1 + hv, -hv).
+ */
+static float ReliefHeight(const int16_t *const cells[3][3], int a, int c)
+{
+    const int n = VOXEL_RELIEF_SIDE - 1;
+    int cx = a < 0 ? 0 : a > n ? 2 : 1, cz = c < 0 ? 0 : c > n ? 2 : 1;
+    const int16_t *g = cells[cz][cx];
+
+    if (g == NULL)
+        return 0.0f;
+    a -= (cx - 1) * n;
+    c -= (cz - 1) * n;
+    return (float)g[c * VOXEL_RELIEF_SIDE + a];
+}
+
+static float ReliefFace(const int16_t *const cells[3][3], int a, int c)
+{
+    /* pixels over four lattice steps (a tile): tiles per tile */
+    float hu = (ReliefHeight(cells, a + 2, c) - ReliefHeight(cells, a - 2, c)) / 16.0f;
+    float hv = (ReliefHeight(cells, a, c + 2) - ReliefHeight(cells, a, c - 2)) / 16.0f;
+
+    return VoxelLighting_Face(-hu, 1.0f + hv, -hv);
+}
+#endif
+
 static void EmitRelief(VoxelBuilder *b, int x, int y, const int16_t *g, const int16_t *s,
                        int artY)
 {
@@ -567,6 +547,21 @@ static void EmitRelief(VoxelBuilder *b, int x, int y, const int16_t *g, const in
         b->artShaded = false;
         return;
     }
+#if CTR_VOXEL_LIGHTING
+    const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
+    const int16_t *cells[3][3];
+    float face[VOXEL_RELIEF_SIDE * VOXEL_RELIEF_SIDE];
+
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dx = -1; dx <= 1; ++dx)
+            cells[dz + 1][dx + 1] = dx == 0 && dz == 0 ? g
+                                  : VoxelWorld_GetInstanceAt(x + dx, y + dz) == inst
+                                  ? VoxelRelief_Cell(inst, x + dx, y + dz) : NULL;
+    for (int c = 0; c <= n; ++c)
+        for (int a = 0; a <= n; ++a)
+            face[c * VOXEL_RELIEF_SIDE + a] = ReliefFace(cells, a, c);
+    b->vertexFace = b->lighting;
+#endif
     for (int j = 0; j < n; ++j)
         for (int i = 0; i < n; ++i)
         {
@@ -578,12 +573,18 @@ static void EmitRelief(VoxelBuilder *b, int x, int y, const int16_t *g, const in
                 int a = i + di[k], c = j + dj[k];
                 float h = g[c * VOXEL_RELIEF_SIDE + a] / 16.0f;
                 float d = s[c * VOXEL_RELIEF_SIDE + a] / 16.0f;
+                float shade = SHADE_TOP;
 
+#if CTR_VOXEL_LIGHTING
+                if (b->vertexFace)
+                    shade = face[c * VOXEL_RELIEF_SIDE + a];
+#endif
                 p[k] = (VoxelVertex){ x + a / (float)n, h, y + c / (float)n + d,
-                                      u0 + (u1 - u0) * a / n, v0 + (v1 - v0) * c / n, SHADE_TOP };
+                                      u0 + (u1 - u0) * a / n, v0 + (v1 - v0) * c / n, shade };
             }
             VoxelBuilder_Quad(b, &p[0], &p[1], &p[2], &p[3]);
         }
+    b->vertexFace = false;
     b->artShaded = false;
 }
 

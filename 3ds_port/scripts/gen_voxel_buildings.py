@@ -461,7 +461,8 @@ def reuse_everywhere():
     for entry in entries:
         lid = entry.get("id")
         if (not lid or lid in modelled or lid in outdoor or "blockdata_filepath" not in entry
-                or "0" in (entry.get("primary_tileset"), entry.get("secondary_tileset"))
+                # No tileset: "0" in the source tree, "NULL" in the builder's.
+                or {"0", "NULL"} & {entry.get("primary_tileset"), entry.get("secondary_tileset")}
                 or not os.path.exists(os.path.join(vb.ROOT, entry["blockdata_filepath"]))):
             continue
         place_reused(vb.LayoutArt(lid), None)

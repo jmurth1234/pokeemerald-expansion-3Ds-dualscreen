@@ -31,6 +31,8 @@
 
 #include "voxel_building.h"
 #include "voxel_file.h"
+#include "voxel_grade.h"
+#include "voxel_lighting.h"
 #include "voxel_relief.h"
 
 #ifndef VOXEL_BUILDINGS_PATH
@@ -283,8 +285,12 @@ bool VoxelBuildings_ReadPage(unsigned page, unsigned first, unsigned count, uint
         /* Slices go straight into the caller's buffer, never through stdio's. */
         setvbuf(sPageFile, NULL, _IONBF, 0);
     }
-    return fseek(sPageFile, (long)(sPages[page].offset + first * sizeof(uint16_t)), SEEK_SET) == 0
-        && fread(dest, sizeof(uint16_t), count, sPageFile) == count;
+    if (fseek(sPageFile, (long)(sPages[page].offset + first * sizeof(uint16_t)), SEEK_SET) != 0
+     || fread(dest, sizeof(uint16_t), count, sPageFile) != count)
+        return false;
+    /* On the reading thread, off the render thread's frame. */
+    VoxelGrade_Texels(dest, count);
+    return true;
 }
 
 /* The placements of one layout, which the generator sorted by layout. */
@@ -445,6 +451,14 @@ bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst
                 /* a patch is written a, b, c, a, c, d */
                 if (step == 6)
                     VoxelBuilder_Quad(builder, &t[0], &t[1], &t[2], &t[5]);
+#if CTR_VOXEL_LIGHTING
+                else if (builder->lighting)
+                {
+                    /* Lit by the same sun as the terrain, not by the side
+                     * the drawing was made for. */
+                    VoxelLighting_ModelTri(builder, &t[0], &t[1], &t[2], t[0].shade);
+                }
+#endif
                 else
                     VoxelBuilder_Tri(builder, &t[0], &t[1], &t[2]);
             }

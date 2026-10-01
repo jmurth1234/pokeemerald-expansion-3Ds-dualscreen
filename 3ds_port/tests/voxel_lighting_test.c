@@ -131,6 +131,11 @@ int main(void)
     assert(VoxelLighting_Sample(4.5f, 3, 4.5f) == 1.0f);
     assert(VoxelLighting_Sample(3.9f, 0, 4.5f) > 0.9f);
     assert(VoxelLighting_Sample(3.9f, 0, 4.5f) < 1.0f); /* AO on the sunny side */
+    /* Faces: the sun's, from the northwest - south and east in the ambient. */
+    assert(VoxelLighting_Face(0, 1, 0) == 1.0f);
+    assert(VoxelLighting_Face(0, 0, 1) == VOXEL_AMBIENT);
+    assert(VoxelLighting_Face(1, 0, 0) == VOXEL_AMBIENT);
+    assert(VoxelLighting_Face(-1, 0, 0) > 0.9f && VoxelLighting_Face(0, 0, -1) < 0.9f);
     /* Compare a cache-cold oracle with a densely reused sample grid, including
      * nearby but unequal coordinates sharing buckets and different heights. */
     float reference[3][25][25];

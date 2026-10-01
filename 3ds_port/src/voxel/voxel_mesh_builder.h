@@ -55,8 +55,13 @@ typedef struct
      * is raised by it, straight up. */
     float base;
     bool lighting; /* opt-in for outdoor chunks and border receivers */
-    bool artShaded; /* relief: no face term, the drawing is lit already */
+    bool artShaded; /* relief: its drawing is its own; lit like any face */
     bool lightingRefine; /* ground subdivision; disabled for the fixed-size belt */
+    /* A tree's crown card: a rounded volume, not the plane it is drawn on. */
+    bool rounded;
+    /* The relief's lattice: each vertex's shade already holds its face term,
+     * worked out a tile across (see EmitRelief), not its quad's. */
+    bool vertexFace;
     /* When not negative, the light every corner gets instead of its own
      * sample: one sample for a small object drawn as many faces. */
     float lightingConstant;

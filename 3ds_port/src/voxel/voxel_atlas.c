@@ -14,6 +14,7 @@
 
 #include "3ds_video.h"
 #include "voxel_atlas.h"
+#include "voxel_grade.h"
 
 /* Largest 4bpp tileset payload: 512 tiles of 32 bytes, doubled for headroom
  * because a compressed payload only declares its size at run time. */
@@ -63,7 +64,7 @@ static void FillSolidSlots(uint16_t *dest)
         unsigned slot = VOXEL_SOLID_BASE + c;
         unsigned baseX = (slot % VOXEL_ATLAS_COLUMNS) * VOXEL_ATLAS_SLOT;
         unsigned baseY = (slot / VOXEL_ATLAS_COLUMNS) * VOXEL_ATLAS_SLOT;
-        uint16_t texel = CtrVideo_RGBA5551(sSolidColors[c]);
+        uint16_t texel = VoxelGrade_RGBA5551(sSolidColors[c]);
 
         for (unsigned y = 0; y < VOXEL_ATLAS_SLOT; ++y)
             for (unsigned x = 0; x < VOXEL_ATLAS_SLOT; ++x)
@@ -103,7 +104,7 @@ static void BuildColorTable(struct AtlasSource *src)
         {
             uint16_t bgr15 = c == 0 ? backdrop : LookupColor(src, p, c);
 
-            src->texel[p][c] = CtrVideo_RGBA5551(bgr15);
+            src->texel[p][c] = VoxelGrade_RGBA5551(bgr15);
             src->black[p][c] = (bgr15 & 0x7FFF) == 0;
         }
 }

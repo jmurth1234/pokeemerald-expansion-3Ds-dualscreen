@@ -24,6 +24,9 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset);
  * compositor reads it: on the backgrounds and on the sprites, towards white
  * or black. The palette fade is read by the voxel module itself. */
 void CtrVoxel_SetBrightness(float backgrounds, float sprites, bool white);
+/* How much glow the 2D compositor adds around the brightest parts of the
+ * voxel picture this frame (0: none): the light's bloom, 0 indoors. */
+float CtrVoxel_Bloom(void);
 
 typedef struct
 {

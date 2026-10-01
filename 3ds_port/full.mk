@@ -101,7 +101,7 @@ VOXEL_GAME_SRCS := src/voxel/voxel_world.c src/voxel/voxel_camera.c \
 	src/voxel/voxel_atlas.c src/voxel/voxel_mesh_builder.c src/voxel/voxel_entities.c \
 	src/voxel/voxel_regions.c src/voxel/voxel_tree.c src/voxel/voxel_sign.c \
 	src/voxel/voxel_building.c src/voxel/voxel_relief.c \
-	src/voxel/voxel_arena.c
+	src/voxel/voxel_arena.c src/voxel/voxel_grade.c
 ifeq ($(VOXEL_LIGHTING),1)
 VOXEL_GAME_SRCS += src/voxel/voxel_lighting.c
 endif
@@ -144,7 +144,8 @@ $(CTR_GBA_STAGE_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE -include $(abspath compat/c
 $(CTR_GBA_STAGE_OBJS): compat/ctr_gba_stage.h $(ROOT)/include/gba/defines.h
 # GBA screens shown centred, margins only from layers that wrap on the GBA
 # (compat/ctr_gba_centred.h).
-CTR_GBA_CENTRED_SRCS := region_map field_region_map main_menu naming_screen wallclock
+CTR_GBA_CENTRED_SRCS := region_map field_region_map main_menu naming_screen wallclock \
+	pokemon_summary_screen
 CTR_GBA_CENTRED_OBJS := $(patsubst %,build/root/src/%.o,$(CTR_GBA_CENTRED_SRCS))
 $(CTR_GBA_CENTRED_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE -include $(abspath compat/ctr_gba_centred.h)
 $(CTR_GBA_CENTRED_OBJS): compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h
@@ -152,6 +153,8 @@ $(CTR_GBA_CENTRED_OBJS): compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h
 build/root/src/main_menu.o: FULLCFLAGS += -DCTR_CENTRED_MAIN_MENU
 build/root/src/naming_screen.o: FULLCFLAGS += -DCTR_CENTRED_NAMING
 build/root/src/wallclock.o: FULLCFLAGS += -DCTR_CENTRED_CLOCK
+# On the bottom screen, as the PC's boxes it is mostly opened from.
+build/root/src/pokemon_summary_screen.o: FULLCFLAGS += -DCTR_CENTRED_SUMMARY
 # The PokéNav: every screen of it laid out for the GBA screen, shown whole on
 # the bottom screen. pokenav.c installs all of its VBlank callbacks.
 CTR_GBA_POKENAV_SRCS := $(patsubst $(ROOT)/src/%.c,%,$(wildcard $(ROOT)/src/pokenav*.c))
@@ -160,6 +163,24 @@ $(CTR_GBA_POKENAV_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE
 $(CTR_GBA_POKENAV_OBJS): $(ROOT)/include/gba/defines.h
 build/root/src/pokenav.o: FULLCFLAGS += -DCTR_CENTRED_POKENAV -include $(abspath compat/ctr_gba_centred.h)
 build/root/src/pokenav.o: compat/ctr_gba_centred.h
+# The PC's boxes: laid out for the GBA screen, shown on the bottom screen too.
+build/root/src/pokemon_storage_system.o: FULLCFLAGS += -DCTR_GBA_STAGE -DCTR_CENTRED_STORAGE \
+	-include $(abspath compat/ctr_gba_centred.h)
+build/root/src/pokemon_storage_system.o: compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h
+# The bag as the game draws it, on the bottom screen: left of the column when
+# opened from the field, over the whole screen from a battle, a shop, the PC.
+build/root/src/item_menu.o: FULLCFLAGS += -DCTR_GBA_STAGE -DCTR_CENTRED_BAG \
+	-include $(abspath compat/ctr_gba_centred.h)
+build/root/src/item_menu.o: compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h
+# The Pokédex as the game draws it, left of the column: its list, search,
+# entries, area, cry and size screens. pokedex.c installs their VBlank
+# callbacks.
+CTR_GBA_DEX_OBJS := $(patsubst %,build/root/src/%.o,pokedex pokedex_area_screen pokedex_area_region_map \
+	pokedex_cry_screen)
+$(CTR_GBA_DEX_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE
+$(CTR_GBA_DEX_OBJS): $(ROOT)/include/gba/defines.h
+build/root/src/pokedex.o: FULLCFLAGS += -DCTR_CENTRED_POKEDEX -include $(abspath compat/ctr_gba_centred.h)
+build/root/src/pokedex.o: compat/ctr_gba_centred.h
 # The battle scene: one 240x160 composition whose sprites, windows, scanline
 # tables and BG pages are all laid out for the GBA screen, shown 1:1 and filled
 # out to the whole top screen by the compositor (compat/ctr_gba_battle.h).

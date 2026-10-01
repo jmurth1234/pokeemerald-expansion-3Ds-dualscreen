@@ -377,6 +377,12 @@ _ROCKY_WATER = {}
 SHORE_STRIP = 8     # cells: a patch of shore this small, reached from nowhere, is the water's
 FLAT_BEHAVIOURS = {vc.MB[k] for k in vc.MB if "BRIDGE" in k or "_LOG_" in k or k.endswith("_DOOR")
                    or k == "MB_NO_RUNNING"} - {vc.MB.get("MB_REFLECTION_UNDER_BRIDGE")}
+# A pier: planks the player walks, drawn in the upper layer over the water
+# beside them (Mr Briney's, off Route 104's cliff). It stands on the ground it
+# runs out from; its pixels do not join the water's, or the sea below a cliff
+# and the land on top of it would be one terrace.
+_PIER = {}      # group -> canvas cells of pier
+SANDS = {vc.MB[k] for k in vc.MB if "SAND" in k}
 
 # Every map whose mountains are drawn with the General tileset's rock is read
 # off its drawing: a layout on it with at least DRAWN_MIN cells of face or
@@ -653,7 +659,15 @@ def _give_up_seams(n, samples, fixed):
     """The world's offsets: solved, and while some pair of nodes is joined
     more than a half level off what it asks, the worst of them is given up
     - one seam at a time, so that a map pulled two ways follows one of them
-    and the step is at the other, not halfway at both."""
+    and the step is at the other, not halfway at both.
+
+    A loop of seams a level short (the sea below Route 104's beach and the
+    sea round Slateport) spreads its level over every seam round it, a few
+    pixels each, never a half level at any: but the maps stand whole levels
+    up, and where two of them round to levels apart the step is there. That
+    seam is given up too, and the world solved again without it, so the
+    pixels of the loop are not left on every map, tipping terraces drawn
+    between two levels far away."""
     def median(v):
         v = sorted(v)
         return v[len(v) // 2]
@@ -665,6 +679,13 @@ def _give_up_seams(n, samples, fixed):
             e = abs(off[a] - off[b] - d)
             if w >= SEAM_WEIGHT and e > err:
                 worst, err = (a, b), e
+        if worst is None:
+            whole = [LEVEL * round(v / LEVEL) for v in off]
+            err = 0.0
+            for (a, b), (d, w) in pairs.items():
+                e = abs(off[a] - off[b] - d)
+                if w >= SEAM_WEIGHT and abs(whole[a] - whole[b] - d) > 8.0 and e > err:
+                    worst, err = (a, b), e
         if worst is None:
             return off
         del pairs[worst]
@@ -900,6 +921,37 @@ def drawn_canvas(name):
                            for (dx, dy) in ((1, 0), (-1, 0), (0, 1), (0, -1))):
                         flat[oy + cy][ox + cx] = "bridge"
                         grow = True
+    # a pier: walked planks drawn over the player (not the sand a rock's
+    # foot is drawn over), a run of them out into the water
+    pier = _PIER[name] = set()
+    four = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    for lid, (ox, oy) in members.items():
+        L, A = layouts[lid], _ART[lid]
+        planks = {(cx, cy) for cy in range(L.h) for cx in range(L.w)
+                  if not flat[oy + cy][ox + cx] and L.role_at(cx, cy) == "floor"
+                  and not L.blocked(cx, cy) and L.behaviour(cx, cy) not in SANDS
+                  and L.covers(A.metatile(cx, cy))}
+        seen = set()
+        for start in sorted(planks):
+            if start in seen:
+                continue
+            run, stack = [], [start]
+            seen.add(start)
+            while stack:
+                c = stack.pop()
+                run.append(c)
+                for (dx, dy) in four:
+                    q = (c[0] + dx, c[1] + dy)
+                    if q in planks and q not in seen:
+                        seen.add(q)
+                        stack.append(q)
+            # it runs out into the water: water on three sides of it at least
+            # (a tree's crown or a rock's top drawn over the shore has it on one)
+            sides = {(dx, dy) for (x, y) in run for (dx, dy) in four
+                     if 0 <= x + dx < L.w and 0 <= y + dy < L.h
+                     and L.role_at(x + dx, y + dy) == "water"}
+            if len(sides) >= 3:
+                pier.update((ox + x, oy + y) for (x, y) in run)
     # a rock pixel is what most rock round it is: faces are speckled with the
     # tops' colours and the tops with the faces'
     voted = [row[:] for row in kind]
@@ -957,6 +1009,16 @@ def drawn_prepare(name):
     # regions
     region = [[-1] * W for _ in range(H)]
     sizes = []
+    pier = _PIER[name]
+
+    def apart(a, b, i, j):
+        """A pier's planks join only the land they are walked from - not the
+        water, the rock or the posts under them - across a cell edge."""
+        c, d = (a // 16, b // 16), (i // 16, j // 16)
+        if c == d or (c in pier) == (d in pier):
+            return False
+        other = d if c in pier else c
+        return flat[other[1]][other[0]] not in ("floor", "bridge")
     for y in range(H):
         for x in range(W):
             k = kind[y][x]
@@ -969,7 +1031,8 @@ def drawn_prepare(name):
                 a, b = stack.pop()
                 count += 1
                 for (i, j) in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1)):
-                    if 0 <= i < W and 0 <= j < H and region[j][i] < 0 and kind[j][i] == k:
+                    if (0 <= i < W and 0 <= j < H and region[j][i] < 0 and kind[j][i] == k
+                            and not apart(a, b, i, j)):
                         region[j][i] = n
                         stack.append((i, j))
             sizes.append(count)
@@ -1601,6 +1664,80 @@ def ledge_berms(layout, art, h):
     return len(cells)
 
 
+def ledges_on_ground(layout, h):
+    """Lay every ledge cell back on the ground round it, before its berm.
+
+    A ledge is modelled the same everywhere: a berm on the ground, as Route
+    101 has it (flat land, the lip raised). Where a map's relief is solved,
+    the solver reads the brown lip as rock and sinks the cell up to half a
+    level, which with the berm added became a trench, toothed at every
+    lattice step - shading the grass beside it in stripes. Each ledge cell's
+    points go back to the plane of its four corners, which it shares with the
+    ground round it. A point on an edge shared with rock (a blocked cell that
+    is no ledge) is the rock's and stays as solved; one shared with walkable
+    ground or the map's edge is laid flat too, where the sinking reached.
+    """
+    def keeps(cx, cy):
+        return ((cx, cy) not in cells and not layout.off_map(cx, cy)
+                and layout.blocked(cx, cy))
+
+    cells = ledge_cells(layout)
+    P = PER_CELL
+    for (x, y) in cells:
+        x0, y0 = x * P, y * P
+        c00, c10 = h[y0][x0], h[y0][x0 + P]
+        c01, c11 = h[y0 + P][x0], h[y0 + P][x0 + P]
+        for j in range(P + 1):
+            for i in range(P + 1):
+                if i in (0, P) and j in (0, P):
+                    continue  # the corners are the ground's
+                sides = []
+                if i == 0: sides.append((x - 1, y))
+                if i == P: sides.append((x + 1, y))
+                if j == 0: sides.append((x, y - 1))
+                if j == P: sides.append((x, y + 1))
+                if any(keeps(*s) for s in sides):
+                    continue
+                t, s = i / float(P), j / float(P)
+                h[y0 + j][x0 + i] = ((c00 * (1 - t) + c10 * t) * (1 - s)
+                                     + (c01 * (1 - t) + c11 * t) * s)
+
+
+PIER_REACH = 2      # pixels round a lattice point its planks are looked for
+
+
+def pier_ends(group, layout_id, layout, h):
+    """A pier's planks run on into the water cell at its end (Mr Briney's
+    starts half a cell into the sea): the points of that cell where they
+    are drawn, in the upper layer, stand with the pier, and the drop to the
+    water is taken in the water's own pixels beside them, not by bending
+    the last plank down to the sea."""
+    if group not in _PIER:
+        drawn_canvas(group)
+    ox, oy = DRAWN[group][layout_id]
+    pier = {(x - ox, y - oy) for (x, y) in _PIER[group]
+            if 0 <= x - ox < layout.w and 0 <= y - oy < layout.h}
+    if not pier:
+        return
+    art = vc.pair_for(layout.primary, layout.secondary)
+    shift = _SHIFT.get(layout_id)
+    for (px, py) in pier:
+        level = h[py * PER_CELL + PER_CELL // 2][px * PER_CELL + PER_CELL // 2]
+        for dx in (-1, 1):
+            cx, cy = px + dx, py
+            if (cx, cy) in pier or not (0 <= cx < layout.w) or layout.role_at(cx, cy) != "water":
+                continue
+            drawn = art.layer_pixels(layout.metatile(cx, cy), 1)
+            for j in range(PER_CELL + 1):
+                for i in range(PER_CELL + 1):
+                    x, y = i * STEP, j * STEP
+                    if any((a, b) in drawn for a in range(x - PIER_REACH, x + PIER_REACH)
+                           for b in range(y - PIER_REACH, y + PIER_REACH)):
+                        for grid in (h, shift):
+                            if grid is not None:
+                                grid[cy * PER_CELL + j][cx * PER_CELL + i] = level
+
+
 def flat_lattice(layout):
     return [[0.0] * (layout.w * PER_CELL + 1) for _ in range(layout.h * PER_CELL + 1)]
 
@@ -1611,8 +1748,11 @@ def layout_heights(layout_id):
     group = drawn_group(layout_id)
     if group:
         h = [row[:] for row in solve_drawn(group)[layout_id]]
+        ledges_on_ground(roles_layout, h)
+        pier_ends(group, layout_id, roles_layout, h)
     elif layout_id in ENABLED:
         role, cell, h = solve(roles_layout)
+        ledges_on_ground(roles_layout, h)
     else:
         h = flat_lattice(roles_layout)
     art = _ART.get(layout_id)

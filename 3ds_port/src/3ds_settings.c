@@ -26,6 +26,9 @@ static const int sPitches[] = {34, 37, 40, 43, 46};
 static const int sZooms[] = {90, 100, 110, 120};
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 static int sPitch = 2, sZoom = 1;
+/* The HD-2D tilt-shift blur over the voxel picture (3ds_video.c): on unless
+ * turned off. */
+static bool sVoxelBlur = true;
 
 static int Find(const int *values, int count, int value, int fallback)
 {
@@ -55,10 +58,12 @@ void CtrSettings_Load(void)
             sPitch = Find(sPitches, COUNT(sPitches), value, sPitch);
         else if (sscanf(line, "voxel_zoom=%d", &value) == 1)
             sZoom = Find(sZooms, COUNT(sZooms), value, sZoom);
+        else if (strncmp(line, "voxel_blur=", 11) == 0)
+            sVoxelBlur = line[11] != '0';
     }
     fclose(file);
-    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d", sVoxel ? 1 : 0,
-                 sPitches[sPitch], sZooms[sZoom]);
+    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d", sVoxel ? 1 : 0,
+                 sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0);
 }
 
 static void Save(void)
@@ -67,8 +72,8 @@ static void Save(void)
 
     if (file == NULL)
         return;
-    fprintf(file, "voxel=%d\nvoxel_pitch=%d\nvoxel_zoom=%d\n", sVoxel ? 1 : 0,
-            sPitches[sPitch], sZooms[sZoom]);
+    fprintf(file, "voxel=%d\nvoxel_pitch=%d\nvoxel_zoom=%d\nvoxel_blur=%d\n", sVoxel ? 1 : 0,
+            sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0);
     fclose(file);
 }
 
@@ -111,4 +116,17 @@ void CtrSettings_StepVoxelPitch(int direction)
 void CtrSettings_StepVoxelZoom(int direction)
 {
     Step(&sZoom, COUNT(sZooms), direction);
+}
+
+bool CtrSettings_VoxelBlur(void)
+{
+    return sVoxelBlur;
+}
+
+void CtrSettings_SetVoxelBlur(bool on)
+{
+    if (sVoxelBlur == on)
+        return;
+    sVoxelBlur = on;
+    Save();
 }

@@ -140,7 +140,15 @@ static int OamUnwrapY(unsigned index, int y)
 
 #if CTR_VOXEL_ENABLED
 static uint32_t sVoxelWeatherOam[4];
-static bool sVoxelWeatherOnly;
+/*
+ * Which sprites the voxel view draws over itself: the weather, before its
+ * text layer, and then the sprites placed on the screen rather than on the
+ * map (sScreenOam), which on the GBA sit over the text layer: the mon shown
+ * for a field move over its banner, Fly's bird and its rider. The map's own
+ * sprites are cards in the 3D scene (voxel_entities.c).
+ */
+enum { VOXEL_OBJ_NONE, VOXEL_OBJ_WEATHER, VOXEL_OBJ_SCREEN };
+static unsigned sVoxelObjPass = VOXEL_OBJ_NONE;
 
 void CtrVideo_ClearVoxelWeatherOam(void)
 {
@@ -212,6 +220,9 @@ void CtrVideo_NotifyTilesetAnimWrite(const void *dest, unsigned bytes)
 }
 static CtrVideoStats sStats;
 static C3D_Tex sAtlas, sSurface;
+/* The voxel bloom's quarter-size target (VoxelBloomPrepare); absent, no bloom. */
+static C3D_Tex sBloomTex;
+static C3D_RenderTarget *sBloom;
 static C3D_RenderTarget *sLogical, *sTop, *sTopRight;
 static bool sStereo;
 static Tile sTiles[CACHE_COUNT];
@@ -280,6 +291,18 @@ static float sLayerOrigin;
  */
 #define CTR_FIELD_UI_SHIFT 76.0f
 static bool sFieldUi;
+/*
+ * The banner of a field move (src/field_effect.c, the mon shown for Surf, Cut,
+ * Fly...) is BG0 too, but a pattern of streaks meant to wrap across the whole
+ * screen as on the GBA, not a window: while it is up BG0 is drawn over the
+ * full width and not moved to the text band.
+ */
+static bool sFieldBanner;
+
+void CtrVideo_SetFieldBanner(bool banner)
+{
+    sFieldBanner = banner;
+}
 /* The 2D field this frame: its text backgrounds are drawn from layer
  * textures kept up to date cell by cell (LayerRenderCells). */
 static bool sFieldLayers;
@@ -1497,6 +1520,16 @@ typedef struct
     bool across;
     /* Instead of layers: the visible background drawn behind the others. */
     bool backmost;
+    /* The layers' margins read on through the tilemap, as the GBA wraps it,
+     * instead of repeating the picture's edge row and column. */
+    bool wrap;
+    /* Instead: one tile of the layer, at tileColumn, tileRow, over all the
+     * margins - a backdrop of stripes the picture's edges only cut. */
+    bool tile;
+    uint8_t tileColumn, tileRow;
+    /* Or that tilemap entry itself, whatever the tilemap holds now. */
+    bool entry;
+    uint16_t tileEntry;
     uint8_t skyRows, bandRow, bandChars;
     int8_t bandX, bandY;
 } CentredFill;
@@ -1511,9 +1544,36 @@ static const CentredFill sCentredFills[CTR_CENTRED_SCREENS] =
     /* Whatever background is at the back of the PokéNav screen on show
      * (CentredLayers): the dots, the Hoenn sea, the ribbons' wood. */
     [CTR_CENTRED_POKENAV] = {.backmost = true},
+    /* The PC's scrolling pattern, which the GBA wraps round its 32x32 map. */
+    [CTR_CENTRED_STORAGE] = {.layers = 1u << 3, .wrap = true},
+    [CTR_CENTRED_SUMMARY] = {0},
+    /* The bag's stripes, as they are left of its pocket name. */
+    [CTR_CENTRED_BAG] = {.layers = 1u << 2, .tile = true, .tileColumn = 0, .tileRow = 5},
+    [CTR_CENTRED_BAG_WHOLE] = {.layers = 1u << 2, .tile = true, .tileColumn = 0, .tileRow = 5},
+    /* The Pokédex: a tile its screen on show names (CentredFillOf), or else
+     * whatever is at the back of it. */
+    [CTR_CENTRED_POKEDEX] = {.backmost = true},
 };
 
 int CtrPokenavList_Bg(void);
+/* pokedex.c: the tile of a layer the Pokédex's screen on show carries out to
+ * the edges, as bg << 16 | column << 8 | row, or with 1 << 20 as
+ * bg << 16 | the tilemap entry; -1 when it names none. */
+int CtrPokedex_Backdrop(void);
+
+/* How a centred screen's margins are filled. The Pokédex's depend on which of
+ * its screens is up: its stripes, the search's green, the area map's sea. */
+static const CentredFill *CentredFillOf(unsigned screen)
+{
+    static CentredFill dex;
+    int backdrop;
+
+    if (screen != CTR_CENTRED_POKEDEX || (backdrop = CtrPokedex_Backdrop()) < 0) return &sCentredFills[screen];
+    dex = (CentredFill){.layers = (uint8_t)(1u << ((backdrop >> 16) & 3)), .tile = true,
+                        .tileColumn = (uint8_t)(backdrop >> 8), .tileRow = (uint8_t)backdrop,
+                        .entry = (backdrop & (1 << 20)) != 0, .tileEntry = (uint16_t)backdrop};
+    return &dex;
+}
 
 /* The backgrounds a centred screen carries out to its edges. */
 static unsigned CentredLayers(const CentredFill *fill)
@@ -1558,7 +1618,7 @@ static void DrawCentredMargins(unsigned bg, const CentredFill *fill, int from, i
     unsigned chars = ((control >> 2) & 3) * 0x4000;
     bool color256 = (control & 128) != 0;
     unsigned scrollX = Reg(0x10 + bg * 4) & 511, scrollY = Reg(0x12 + bg * 4) & 511;
-    unsigned mask = (size & 1) ? 63u : 31u;
+    unsigned mask = (size & 1) ? 63u : 31u, rows = (size & 2) ? 63u : 31u;
     int ox = (int)(scrollX & 7), oy = (int)(scrollY & 7);
 
     ViewBase();
@@ -1566,7 +1626,9 @@ static void DrawCentredMargins(unsigned bg, const CentredFill *fill, int from, i
     for (int w = from; w < to && w * 8 - oy + sSpanShiftY < sClipY1; ++w)
     {
         bool beside = w >= 0 && w < 20;
-        unsigned row = w < 0 ? (unsigned)fill->inset[1] : w >= 20 ? 19u - (unsigned)fill->inset[3]
+        unsigned row = fill->tile ? fill->tileRow
+                     : fill->wrap ? (unsigned)(w + (int)(scrollY >> 3)) & rows
+                     : w < 0 ? (unsigned)fill->inset[1] : w >= 20 ? 19u - (unsigned)fill->inset[3]
                      : (unsigned)(w + (int)(scrollY >> 3));
         unsigned rowBase;
 
@@ -1579,9 +1641,11 @@ static void DrawCentredMargins(unsigned bg, const CentredFill *fill, int from, i
             int slot;
 
             if (inside && beside) continue;
-            column = v < 0 ? (unsigned)fill->inset[0] : v >= 30 ? 29u - (unsigned)fill->inset[2]
+            column = fill->tile ? fill->tileColumn
+                   : fill->wrap ? ((unsigned)v + (scrollX >> 3)) & mask
+                   : v < 0 ? (unsigned)fill->inset[0] : v >= 30 ? 29u - (unsigned)fill->inset[2]
                    : ((unsigned)v + (scrollX >> 3)) & mask;
-            entry = Read16(rowBase + (column & 31) * 2 + (column >> 5) * 2048);
+            entry = fill->entry ? fill->tileEntry : Read16(rowBase + (column & 31) * 2 + (column >> 5) * 2048);
             address = chars + (entry & 1023) * (color256 ? 64 : 32);
             if (address >= 0x10000) continue;
             slot = GetTileSlot(address, entry >> 12, color256);
@@ -1624,10 +1688,49 @@ static void DrawNavBackmost(unsigned bg, bool texture)
     }
 }
 
+/* The PokéNav keeps its own band by band path (NavCompose, DrawBandBgTex). */
+static bool CentredTexture(unsigned bg)
+{
+    return sCentredScreen != CTR_CENTRED_POKENAV && LayerDrawable(bg);
+}
+
+/*
+ * Lines [top, bottom) of a centred screen's picture: from the layer's texture
+ * when it has one (LayersPrepare), one quad where the tiles are 30 per line.
+ * Walked tile by tile, the PC's four layers were ~3000 quads a frame and 30
+ * fps on an Old 3DS; the bag's three, 1800 and a frame dropped every second.
+ */
+static void DrawCentredPicture(unsigned bg, int top, int bottom)
+{
+    if (!CentredTexture(bg) || sSpanShiftX || sSpanShiftY)
+    {
+        DrawCentredSpan(bg, 0, 240, top, bottom);
+        return;
+    }
+    ViewBase();
+    DrawLayerRect(bg, 0, 240, top, bottom, 0, (float)top, 1, 1, false, 0, 0);
+}
+
+/*
+ * The margins of a layer that reads on through its tilemap (fill->wrap): the
+ * texture repeats as the tilemap wraps, so they are the four bands around the
+ * picture cut from it at their own place.
+ */
+static bool DrawWrapMarginsTex(unsigned bg, const CentredFill *fill)
+{
+    if (!fill->wrap || fill->across || !CentredTexture(bg)) return false;
+    ViewBase();
+    DrawLayerRect(bg, VIEW_LEFT, VIEW_RIGHT, VIEW_TOP, 0, VIEW_LEFT, VIEW_TOP, 1, 1, false, 0, 0);
+    DrawLayerRect(bg, VIEW_LEFT, VIEW_RIGHT, 160, VIEW_BOTTOM, VIEW_LEFT, 160, 1, 1, false, 0, 0);
+    DrawLayerRect(bg, VIEW_LEFT, 0, 0, 160, VIEW_LEFT, 0, 1, 1, false, 0, 0);
+    DrawLayerRect(bg, 240, VIEW_RIGHT, 0, 160, 240, 0, 1, 1, false, 0, 0);
+    return true;
+}
+
 /* True when the centred screen draws this layer itself. */
 static bool DrawCentredBg(unsigned bg)
 {
-    const CentredFill *fill = &sCentredFills[sCentredScreen];
+    const CentredFill *fill = CentredFillOf(sCentredScreen);
 
     bool speech = fill->bandRow && ((Reg(8) >> 2) & 3) == fill->bandChars;
 
@@ -1647,8 +1750,9 @@ static bool DrawCentredBg(unsigned bg)
             DrawCentredMargins(bg, fill, 0, sky);
             sSpanShiftY = 0;
         }
-        DrawCentredSpan(bg, 0, 240, sky * 8, 160);
-        DrawCentredMargins(bg, fill, sky ? sky : -64, 64);
+        DrawCentredPicture(bg, sky * 8, 160);
+        if (sky || !DrawWrapMarginsTex(bg, fill))
+            DrawCentredMargins(bg, fill, sky ? sky : -64, 64);
         return true;
     }
     if (bg == 0 && speech)
@@ -1692,9 +1796,15 @@ static void DrawTextBg(unsigned bg)
     if (sCentred)
     {
         if (DrawCentredBg(bg)) return;
+        if (CentredTexture(bg))
+        {
+            DrawCentredPicture(bg, 0, 160);
+            return;
+        }
         if (right > 240) right = 240;
         if (bottom > 160) bottom = 160;
     }
+    if (bg == 0 && sFieldBanner) right = CTR_GAME_WIDTH;
     if (right > sClipX1) right = sClipX1;
     if (bottom > sClipY1) bottom = sClipY1;
     if (left < sClipX0) left = sClipX0;
@@ -1735,7 +1845,8 @@ typedef struct
 static LayerTexture sLayers[4];
 /* Whether each background is drawn from its texture this frame. */
 static bool sLayerReady[4];
-static uint32_t sLayerFailFrame;
+static uint32_t sLayerFail[4];
+static bool sLayerFailLogged;
 /*
  * A stage whose layer textures found no VRAM because the depth planes hold it.
  * Its layers drawn tile by tile cost 30 ms a frame on an Old 3DS, so the
@@ -1809,10 +1920,37 @@ static void LayersRelease(void)
  */
 static bool LineWindows(void);
 
+/* A texture and render target for background bg at its tilemap's size. */
+static bool LayerCreate(unsigned bg, unsigned width, unsigned height)
+{
+    LayerTexture *layer = &sLayers[bg];
+
+    if (C3D_TexInitVRAM(&layer->tex, width, height, GPU_RGBA5551)
+        && (layer->target = C3D_RenderTargetCreateFromTex(&layer->tex, GPU_TEXFACE_2D, 0, -1)))
+        return true;
+    LayerRelease(bg);
+    return false;
+}
+
 static void LayersPrepare(void)
 {
-    unsigned want = LineBackgrounds() | (sStage || sFieldLayers || LineWindows() ? TextBackgrounds() : 0);
+    /* A centred screen too (DrawCentredPicture), the PokéNav only when its
+     * line windows need them. */
+    bool centred = sCentred && sCentredScreen != CTR_CENTRED_POKENAV;
+    unsigned want = LineBackgrounds()
+                  | (sStage || sFieldLayers || centred || LineWindows() ? TextBackgrounds() : 0);
 
+    /* The wanted ones of the wrong size go first, so what they held is
+     * free for any of this frame's new ones. */
+    for (unsigned bg = 0; bg < 4; ++bg)
+    {
+        unsigned size = Reg(8 + bg * 2) >> 14;
+
+        if ((want & (1u << bg)) && sLayers[bg].tex.data
+            && (sLayers[bg].tex.width != ((size & 1) ? 512 : 256)
+                || sLayers[bg].tex.height != ((size & 2) ? 512 : 256)))
+            LayerRelease(bg);
+    }
     for (unsigned bg = 0; bg < 4; ++bg)
     {
         LayerTexture *layer = &sLayers[bg];
@@ -1826,34 +1964,54 @@ static void LayersPrepare(void)
                 LayerRelease(bg);
             continue;
         }
-        if (layer->tex.data && (layer->tex.width != width || layer->tex.height != height))
-            LayerRelease(bg);
         if (!layer->tex.data)
         {
-            if (sLayerFailFrame && sStats.frames - sLayerFailFrame < LAYER_RETRY_FRAMES) continue;
-            if (!C3D_TexInitVRAM(&layer->tex, width, height, GPU_RGBA5551)
-                || !(layer->target = C3D_RenderTargetCreateFromTex(&layer->tex, GPU_TEXFACE_2D, 0, -1)))
+            if (sLayerFail[bg] && sStats.frames - sLayerFail[bg] < LAYER_RETRY_FRAMES) continue;
+            if (!LayerCreate(bg, width, height))
             {
-                LayerRelease(bg);
-                if (sStage && sBandsReady)
-                {
-                    /* Tile by tile for this one frame; a plane goes, or with
-                     * only two left, all of them (sPlaneShrinkAsked). */
-                    if (sBandCount > 2)
-                        sPlaneShrinkAsked = true;
-                    else
+                /*
+                 * VRAM is taken and given back by every screen (the bottom
+                 * surface, the voxel atlases, the other layers), so a block
+                 * this size may be missing with enough free in pieces. The
+                 * layers kept for a screen that is not up, and the voxel
+                 * world's idle memory, go before this one gives up.
+                 */
+                unsigned freed = 0;
+
+                for (unsigned other = 0; other < 4; ++other)
+                    if (!(want & (1u << other)) && sLayers[other].tex.data)
                     {
-                        sStageWithoutPlanes = true;
-                        CtrVideo_RequestPlaneRelease();
+                        LayerRelease(other);
+                        ++freed;
                     }
+#if CTR_VOXEL_ENABLED
+                if (!sStage) freed += CtrVoxel_ReleaseIdleVram() > 0;
+#endif
+                if (!freed || !LayerCreate(bg, width, height))
+                {
+                    if (sStage && sBandsReady)
+                    {
+                        /* Tile by tile for this one frame; a plane goes, or with
+                         * only two left, all of them (sPlaneShrinkAsked). */
+                        if (sBandCount > 2)
+                            sPlaneShrinkAsked = true;
+                        else
+                        {
+                            sStageWithoutPlanes = true;
+                            CtrVideo_RequestPlaneRelease();
+                        }
+                        continue;
+                    }
+                    if (!sLayerFailLogged)
+                        CtrLog_Write(CTR_LOG_ERROR, "VIDEO: no VRAM for a %ux%u layer texture (free=%lu); "
+                                     "tile walk", width, height, (unsigned long)vramSpaceFree());
+                    sLayerFailLogged = true;
+                    /* Only this layer waits; the others still try. */
+                    sLayerFail[bg] = sStats.frames | 1;
                     continue;
                 }
-                if (!sLayerFailFrame)
-                    CtrLog_Write(CTR_LOG_ERROR, "VIDEO: no VRAM for a %ux%u layer texture (free=%lu); "
-                                 "tile walk", width, height, (unsigned long)vramSpaceFree());
-                sLayerFailFrame = sStats.frames | 1;
-                continue;
             }
+            sLayerFail[bg] = 0;
             C3D_TexSetFilter(&layer->tex, GPU_NEAREST, GPU_NEAREST);
             C3D_TexSetWrap(&layer->tex, GPU_REPEAT, GPU_REPEAT);
         }
@@ -1995,6 +2153,8 @@ static bool DrawFieldBgTex(unsigned bg)
     width = layer->tex.width;
     height = layer->tex.height;
     x1 = sClipX1 < (int)width ? sClipX1 : (int)width;
+    /* The texture repeats as the tilemap wraps. */
+    if (bg == 0 && sFieldBanner) x1 = sClipX1;
     y1 = sClipY1 < (int)height ? sClipY1 : (int)height;
     if (x0 >= x1 || y0 >= y1) return true;
     sx = Reg(0x10 + bg * 4) & 511;
@@ -2640,8 +2800,14 @@ static void DrawObjects(unsigned priority, bool effects)
     for (int i = 127; i >= 0; --i)
     {
 #if CTR_VOXEL_ENABLED
-        if (sVoxelWeatherOnly && !(sVoxelWeatherOam[i >> 5] & (1u << (i & 31))))
-            continue;
+        if (sVoxelObjPass != VOXEL_OBJ_NONE)
+        {
+            bool weather = (sVoxelWeatherOam[i >> 5] & (1u << (i & 31))) != 0;
+            bool screen = (sScreenOam[i >> 5] & (1u << (i & 31))) != 0;
+
+            if (sVoxelObjPass == VOXEL_OBJ_WEATHER ? !weather : (weather || !screen))
+                continue;
+        }
 #endif
         if (sObjFilter != OBJ_ALL && TransitionOam((unsigned)i) != (sObjFilter == OBJ_TRANSITION))
             continue;
@@ -2674,7 +2840,7 @@ static void DrawObjects(unsigned priority, bool effects)
             if (sOamAnchored[i >> 5] & (1u << (i & 31))) y = OamUnwrapY((unsigned)i, y);
             else if (y >= VIEW_BOTTOM) y -= 256;
 #if CTR_VOXEL_ENABLED
-            if (sVoxelWeatherOnly)
+            if (sVoxelObjPass == VOXEL_OBJ_WEATHER)
             {
                 x += CTR_STAGE_X;
                 y += CTR_STAGE_Y;
@@ -2787,7 +2953,7 @@ static void Layers(unsigned mask)
             if ((mode == 1 && bg == 3) || (mode == 2 && bg < 2)) continue;
             if (Reg(8 + bg * 2) & 0x40) Error(11, "BG mosaic not supported");
             int clipY0 = sClipY0, clipY1 = sClipY1, viewY = sViewY, drop = StageLayerDrop(bg);
-            bool lines = sNavBand && !(CentredLayers(&sCentredFills[sCentredScreen]) & (1u << bg));
+            bool lines = sNavBand && !(CentredLayers(CentredFillOf(sCentredScreen)) & (1u << bg));
 
             sViewY += drop;
             sClipY0 -= drop;
@@ -2815,7 +2981,7 @@ static void Layers(unsigned mask)
              * the GPU. Guessing that from fps alone costs a hardware run. */
             uint64_t start = svcGetSystemTick();
             float shift = sLayerShift;
-            if (sFieldUi && bg == 0) sLayerShift += CTR_FIELD_UI_SHIFT / sShiftZoom;
+            if (sFieldUi && bg == 0 && !sFieldBanner) sLayerShift += CTR_FIELD_UI_SHIFT / sShiftZoom;
             if (((mode == 1 && bg == 2) || mode == 2) && sNavBand && !lines) DrawNavBackmostAffine(bg);
             else if ((mode == 1 && bg == 2) || mode == 2) DrawAffineBg(bg);
             else if (sBattle && bg == 0) DrawBattleTextLayer(bg);
@@ -2944,7 +3110,7 @@ static struct
  */
 static bool DrawBandBgTex(unsigned bg)
 {
-    const CentredFill *fill = &sCentredFills[sCentredScreen];
+    const CentredFill *fill = CentredFillOf(sCentredScreen);
 
     if (!sLineBand.on || !LayerDrawable(bg)) return false;
     ViewBase();
@@ -3146,6 +3312,13 @@ bool CtrVideo_Init(void)
     step = "logical render target";
     sLogical = C3D_RenderTargetCreateFromTex(&sSurface, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
     if (!sLogical) goto fail;
+    /* Not fatal: without it the voxel picture has no bloom. */
+    if (C3D_TexInitVRAM(&sBloomTex, 128, 64, GPU_RGB565))
+    {
+        C3D_TexSetFilter(&sBloomTex, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&sBloomTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        sBloom = C3D_RenderTargetCreateFromTex(&sBloomTex, GPU_TEXFACE_2D, 0, -1);
+    }
     step = "top screen render target";
     sTop = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     if (!sTop) goto fail;
@@ -3319,15 +3492,17 @@ static void RenderBattleScene(uint32_t clear)
 }
 
 /*
- * The PokéNav's surface on the bottom screen: 240x240, the area left of the
- * button column. It is not linked to the screen, since a linked target is
- * copied over the whole of it and would cover the column the bottom screen
- * draws itself; after the frame it is copied into the first 240 columns of
+ * The bottom screen's surface, the whole 320x240 screen. The PokéNav uses
+ * the 240x240 area left of the button column; the PC's boxes all of it. It
+ * is not linked to the screen, since a linked target is copied over the
+ * whole of it and would cover the column the bottom screen draws itself;
+ * after the frame the PokéNav's part is copied into the first 240 columns of
  * the framebuffer, which are exactly that area (the framebuffer runs column
- * by column from the left edge). Made when the PokéNav opens, given back a
- * few seconds after it closes.
+ * by column from the left edge), and the boxes' into all of it. Made when
+ * one of them opens, given back a few seconds after it closes.
  */
 #define BOTTOM_SIZE 240
+#define BOTTOM_WIDTH 320
 static C3D_RenderTarget *sBottom;
 static uint32_t sBottomUsed, sBottomFailFrame;
 static bool sBottomFailed;
@@ -3354,10 +3529,10 @@ static bool BottomReady(bool wanted)
     sBottomUsed = sStats.frames;
     if (sBottom) return true;
     if (sBottomFailed && sStats.frames - sBottomFailFrame < LAYER_RETRY_FRAMES) return false;
-    sBottom = C3D_RenderTargetCreate(BOTTOM_SIZE, BOTTOM_SIZE, GPU_RB_RGB565, -1);
+    sBottom = C3D_RenderTargetCreate(BOTTOM_SIZE, BOTTOM_WIDTH, GPU_RB_RGB565, -1);
 #if CTR_VOXEL_ENABLED
     if (!sBottom && CtrVoxel_ReleaseIdleVram() > 0)
-        sBottom = C3D_RenderTargetCreate(BOTTOM_SIZE, BOTTOM_SIZE, GPU_RB_RGB565, -1);
+        sBottom = C3D_RenderTargetCreate(BOTTOM_SIZE, BOTTOM_WIDTH, GPU_RB_RGB565, -1);
 #endif
     if (!sBottom)
     {
@@ -3377,14 +3552,40 @@ static bool sBottomInUse;
 
 bool CtrVideo_BottomInUse(void) { return sBottomInUse; }
 
-/* After the frame: the composed picture into the bottom screen's framebuffer. */
+/* The screens drawn over the whole bottom screen, rather than left of the column. */
+static bool BottomWhole(unsigned screen)
+{
+    return screen == CTR_CENTRED_STORAGE || screen == CTR_CENTRED_SUMMARY || screen == CTR_CENTRED_BAG_WHOLE;
+}
+
+/* The screens drawn on the bottom screen at all. */
+static bool BottomScreen(unsigned screen)
+{
+    return screen == CTR_CENTRED_POKENAV || screen == CTR_CENTRED_BAG || screen == CTR_CENTRED_POKEDEX
+        || BottomWhole(screen);
+}
+
+bool CtrVideo_BottomWhole(void) { return sBottomInUse && BottomWhole(sCentredScreen); }
+
+/*
+ * The composed picture into the bottom screen's framebuffer, inside the
+ * frame: there citro3d queues the transfer after the drawing (a split) instead
+ * of waiting for it. Called after C3D_FrameEnd it waited for the GPU to finish
+ * the whole frame and then for the copy, every frame a bottom screen is up:
+ * the PC, the bag and the Pokédex spent ~5 ms of CPU a frame on an Old 3DS
+ * beyond their layers and sprites, and dropped frames. The framebuffer is
+ * single-buffered (3ds_log.c) and the CPU canvas only writes the column past
+ * it.
+ */
 static void BottomTransfer(void)
 {
     u32 *fb = (u32 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
 
+    unsigned columns = BottomWhole(sCentredScreen) ? BOTTOM_WIDTH : BOTTOM_SIZE;
+
     if (!sBottom || !fb || gfxGetScreenFormat(GFX_BOTTOM) != GSP_RGB565_OES) return;
-    C3D_SyncDisplayTransfer((u32 *)sBottom->frameBuf.colorBuf, GX_BUFFER_DIM(BOTTOM_SIZE, BOTTOM_SIZE),
-                            fb, GX_BUFFER_DIM(BOTTOM_SIZE, BOTTOM_SIZE),
+    C3D_SyncDisplayTransfer((u32 *)sBottom->frameBuf.colorBuf, GX_BUFFER_DIM(BOTTOM_SIZE, columns),
+                            fb, GX_BUFFER_DIM(BOTTOM_SIZE, columns),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0)
                             | GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565)
                             | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565)
@@ -3431,6 +3632,45 @@ static void NavCompose(void)
     ClipToView();
 }
 
+/*
+ * The PC's boxes (and a summary, and the bag) on the bottom screen: the GBA
+ * picture 1:1 in the middle of the whole screen, or of the area left of the
+ * column. Around it only the layer at the back goes on - the boxes' scrolling
+ * pattern, the bag's stripes, the summary's backdrop; everything else,
+ * sprites included, is cut at the picture's edges, where the GBA screen ends
+ * and parks what it hides.
+ */
+#define STORAGE_MARGIN_X ((BOTTOM_WIDTH - 240) / 2)
+
+static void StorageComposePart(int left, int right, int top, int bottom, unsigned exclude)
+{
+    ClipToView();
+    sClipX0 = left;
+    sClipX1 = right;
+    sClipY0 = top;
+    sClipY1 = bottom;
+    sLayerExclude = exclude;
+    C2D_Flush();
+    sScissored = true;
+    RestoreScissor();
+    Compose();
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    sScissored = false;
+    sLayerExclude = 0;
+}
+
+static void StorageCompose(int marginX)
+{
+    unsigned back = CentredLayers(CentredFillOf(sCentredScreen)) ? CentredLayers(CentredFillOf(sCentredScreen))
+                                                                   : 1u << 3;
+    unsigned marginsOnly = 63u & ~back;
+
+    StorageComposePart(-marginX, 240 + marginX, -CTR_STAGE_Y, 160 + CTR_STAGE_Y, marginsOnly);
+    StorageComposePart(0, 240, 0, 160, 0);
+    ClipToView();
+}
+
 int CtrVideo_BottomPictureY(int y)
 {
     for (unsigned b = 0; b < sNavBandCount; ++b)
@@ -3464,8 +3704,10 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     if (scene) sLayerExclude = 63 & ~(1u | 32u);
     if (!(Reg(0) & 128))
     {
-        if (target == sBottom) NavCompose();
-        else Compose();
+        if (target != sBottom) Compose();
+        else if (BottomWhole(sCentredScreen)) StorageCompose(STORAGE_MARGIN_X);
+        else if (sCentredScreen == CTR_CENTRED_BAG || sCentredScreen == CTR_CENTRED_POKEDEX) StorageCompose(0);
+        else NavCompose();
     }
     sLayerExclude = 0;
     C2D_Flush();
@@ -3477,13 +3719,15 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     C2D_SceneBegin(target);
     if (target == sBottom)
     {
-        /* The middle 240 columns of the logical frame: the picture and the
-         * margins above and below it. Tilted as a screen target is. */
-        const Tex3DS_SubTexture middle = {BOTTOM_SIZE, BOTTOM_SIZE,
-            (CTR_GAME_WIDTH - BOTTOM_SIZE) / 2 / 512.0f, 1,
-            (CTR_GAME_WIDTH + BOTTOM_SIZE) / 2 / 512.0f, 1 - BOTTOM_SIZE / 256.0f};
+        /* The middle 240 columns of the logical frame, or 320 for the boxes:
+         * the picture and the margins around it. Tilted as a screen target is. */
+        int width = BottomWhole(sCentredScreen) ? BOTTOM_WIDTH : BOTTOM_SIZE;
+        const Tex3DS_SubTexture middle = {(u16)width, BOTTOM_SIZE,
+            (CTR_GAME_WIDTH - width) / 2 / 512.0f, 1,
+            (CTR_GAME_WIDTH + width) / 2 / 512.0f, 1 - BOTTOM_SIZE / 256.0f};
 
-        C2D_SceneSize(BOTTOM_SIZE, BOTTOM_SIZE, true);
+        /* The framebuffer's own measures, as for a screen target. */
+        C2D_SceneSize(BOTTOM_SIZE, BOTTOM_WIDTH, true);
         C2D_ViewReset();
         Blend(5, false, false);
         C2D_DrawImageAt((C2D_Image){&sSurface, &middle}, 0, 0, 0, NULL, 1, 1);
@@ -3500,28 +3744,119 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
 
 #if CTR_VOXEL_ENABLED
 /*
+ * HD-2D diorama: the tilt-shift of a miniature. The camera always looks north,
+ * so the top of the screen is the distance and the bottom the nearest ground;
+ * both are blurred, most at the screen's edge and not at all by the focus band
+ * around the player. Each band is two copies of the world surface drawn over
+ * it with bilinear filtering half a texel off either way, so each copy is the
+ * average of four texels and the two together are centred on the pixel;
+ * fading in from the focus band to the edge. A wider
+ * blur than the four one-pixel taps it replaces, for about the same fill.
+ * The surface is sampled NEAREST again afterwards: the picture itself stays
+ * pixel-sharp.
+ */
+#define DIORAMA_TOP 100    /* rows blurred at the top */
+#define DIORAMA_BOTTOM 56  /* ... and at the bottom */
+
+static void SurfaceFilter(GPU_TEXTURE_FILTER_PARAM filter)
+{
+    /* Batched draws sample with the state at the flush: flush first, and
+     * rebind so the new filter reaches the GPU. */
+    C2D_Flush();
+    C3D_TexSetFilter(&sSurface, filter, filter);
+    C3D_TexBind(0, &sSurface);
+}
+
+static void DioramaTap(int y0, int rows, bool top, float dx, float dy, float alpha)
+{
+    /* One column short at each side: the surface past the picture is not
+     * part of it. */
+    const Tex3DS_SubTexture region = {CTR_GAME_WIDTH - 2, (u16)rows,
+        (1.0f + dx) / 512.0f, 1.0f - (y0 + dy) / 256.0f,
+        (1.0f + dx + CTR_GAME_WIDTH - 2) / 512.0f, 1.0f - (y0 + dy + rows) / 256.0f};
+    C2D_ImageTint tint;
+
+    C2D_AlphaImageTint(&tint, 0.0f);
+    if (top)
+        C2D_TopImageTint(&tint, C2D_Color32f(1.0f, 1.0f, 1.0f, alpha), 0.0f);
+    else
+        C2D_BottomImageTint(&tint, C2D_Color32f(1.0f, 1.0f, 1.0f, alpha), 0.0f);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &region}, 1, y0, 0, &tint, 1, 1);
+}
+
+static void VoxelDiorama(void)
+{
+    SurfaceFilter(GPU_LINEAR);
+    /* Half a texel either way: two 2x2 averages on either side of each
+     * pixel, together centred on it - a blur that does not shift the picture. */
+    DioramaTap(0, DIORAMA_TOP, true, 0.5f, 0.5f, 0.67f);
+    DioramaTap(0, DIORAMA_TOP, true, -0.5f, -0.5f, 0.50f);
+    DioramaTap(CTR_GAME_HEIGHT - DIORAMA_BOTTOM, DIORAMA_BOTTOM, false, 0.5f, 0.5f, 0.60f);
+    DioramaTap(CTR_GAME_HEIGHT - DIORAMA_BOTTOM, DIORAMA_BOTTOM, false, -0.5f, -0.5f, 0.45f);
+    SurfaceFilter(GPU_NEAREST);
+}
+
+/*
+ * Bloom: the brightest parts of the picture - sunlit sand, white walls, water
+ * catching the light - glow softly into their surroundings. The world surface
+ * is drawn at a quarter of its size into a small target, keeping only what is
+ * brighter than BLOOM_THRESHOLD (texture environment 4, which citro2d leaves
+ * free), then stretched back over the screen with bilinear filtering and
+ * added. Two passes: 6000 pixels, then one additive screen.
+ */
+#define BLOOM_W (CTR_GAME_WIDTH / 4)
+#define BLOOM_H (CTR_GAME_HEIGHT / 4)
+#define BLOOM_THRESHOLD 0.85f
+
+static void VoxelBloomPrepare(void)
+{
+    const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+    unsigned t = (unsigned)(BLOOM_THRESHOLD * 255.0f + 0.5f);
+    C3D_TexEnv *env;
+
+    C2D_TargetClear(sBloom, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(sBloom);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    SurfaceFilter(GPU_LINEAR);
+    /* Replace, not blend: the surface's alpha is not the picture's. */
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    /* (colour - threshold) x 4: black below it. */
+    env = C3D_GetTexEnv(4);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_SUBTRACT);
+    C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_4);
+    C3D_TexEnvColor(env, 0xFF000000u | t << 16 | t << 8 | t);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 0.25f, 0.25f);
+    C2D_Flush();
+    C3D_TexEnvInit(C3D_GetTexEnv(4));
+    SurfaceFilter(GPU_NEAREST);
+    BlendForget();
+}
+
+static void VoxelBloomCompose(float strength)
+{
+    const Tex3DS_SubTexture region = {BLOOM_W, BLOOM_H, 0, 1,
+        BLOOM_W / 128.0f, 1 - BLOOM_H / 64.0f};
+    C2D_ImageTint tint;
+
+    C2D_Flush();
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+    C2D_AlphaImageTint(&tint, strength);
+    C2D_DrawImageAt((C2D_Image){&sBloomTex, &region}, 0, 0, 0, &tint, 4.0f, 4.0f);
+    C2D_Flush();
+    BlendForget();
+}
+
+/*
  * The game's own UI and weather over the voxel world. BG0 carries text; only
  * OAM entries tagged by the sprite sorter as weather are composed. Drawing all
  * OBJ here would duplicate the player and every NPC over their billboards.
  */
-/* Fixed north-facing camera: the upper 88 pixels are the distant background.
- * Four one-pixel taps, fading to zero towards the focus plane, reuse the world
- * surface. No extra target, depth readback or full-screen blur on Old 3DS. */
-static void VoxelBackgroundBlur(void)
-{
-    static const int offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-    C2D_ImageTint tint;
-    C2D_AlphaImageTint(&tint, 0.0f);
-    C2D_TopImageTint(&tint, C2D_Color32(255, 255, 255, 56), 0.0f);
-    for (unsigned i = 0; i < 4; ++i)
-    {
-        float x = 1.0f + offsets[i][0], y = 1.0f + offsets[i][1];
-        const Tex3DS_SubTexture region = {CTR_GAME_WIDTH - 2, 87,
-            x / 512.0f, 1.0f - y / 256.0f,
-            (x + CTR_GAME_WIDTH - 2) / 512.0f, 1.0f - (y + 87) / 256.0f};
-        C2D_DrawImageAt((C2D_Image){&sSurface, &region}, 1, 1, 0, &tint, 1, 1);
-    }
-}
 
 static void ComposeVoxelOverlay(void)
 {
@@ -3532,13 +3867,15 @@ static void ComposeVoxelOverlay(void)
     sClipX0 = sClipY0 = 0;
     sClipX1 = CTR_GAME_WIDTH;
     sClipY1 = CTR_GAME_HEIGHT;
-    sVoxelWeatherOnly = true;
+    sVoxelObjPass = VOXEL_OBJ_WEATHER;
     Layers(1u << 4);
-    sVoxelWeatherOnly = false;
     /* Text windows and prompts must stay above the precipitation. */
-    sLayerOrigin = CTR_FIELD_UI_SHIFT;
+    sLayerOrigin = sFieldBanner ? 0.0f : CTR_FIELD_UI_SHIFT;
     Layers(1u << 0);
     sLayerOrigin = 0.0f;
+    sVoxelObjPass = VOXEL_OBJ_SCREEN;
+    Layers(1u << 4);
+    sVoxelObjPass = VOXEL_OBJ_NONE;
 }
 
 /*
@@ -3551,6 +3888,13 @@ static void RenderVoxelEye(C3D_RenderTarget *target, uint32_t clear, float eyeOf
     const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
 
+    /* The brightness effect (BLDY) on the field's backgrounds and sprites. */
+    unsigned control = Reg(0x50), effect = (control >> 6) & 3;
+    float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
+    float bloom;
+
+    CtrVoxel_SetBrightness((control & 0x0e) ? bright : 0.0f, (control & 0x10) ? bright : 0.0f,
+                           effect == 2);
     /* C2D_TargetClear clears colour and depth, which the 3D pass needs. */
     C2D_TargetClear(sLogical, clear);
     CtrVoxel_Draw(sLogical, eyeOffset);
@@ -3563,12 +3907,18 @@ static void RenderVoxelEye(C3D_RenderTarget *target, uint32_t clear, float eyeOf
     C2D_Prepare();
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     BlendForget();
+    bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
+    if (bloom > 0.005f)
+        VoxelBloomPrepare();
     C2D_TargetClear(target, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(target);
     C2D_ViewReset();
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
-    VoxelBackgroundBlur();
+    if (CtrSettings_VoxelBlur())
+        VoxelDiorama();
+    if (bloom > 0.005f)
+        VoxelBloomCompose(bloom);
     if (!(Reg(0) & 128)) ComposeVoxelOverlay();
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -4571,8 +4921,9 @@ void CtrVideo_HoldTop(bool hold)
 void CtrVideo_Present(void)
 {
     if (!sMemory.regs) CtrPlatform_Fatal("VIDEO has no logical memory bound");
-    /* The PokéNav is drawn on the bottom screen, whether or not the top is held. */
-    bool bottom = BottomReady(sCentredRequested == CTR_CENTRED_POKENAV && !sStageRequested);
+    /* The PokéNav, the PC's boxes and the bag are drawn on the bottom screen, whether
+     * or not the top is held. */
+    bool bottom = BottomReady(BottomScreen(sCentredRequested) && !sStageRequested);
     sBottomInUse = bottom;
     if (sHoldTop && !bottom)
     {
@@ -4791,8 +5142,9 @@ void CtrVideo_Present(void)
     if (!bottom) DrawFps(sTop);
     if (stereo) DrawFps(sTopRight);
 #endif
-    C3D_FrameEnd(0);
+    /* Queued in the frame, behind the drawing into sBottom (BottomTransfer). */
     if (bottom) BottomTransfer();
+    C3D_FrameEnd(0);
     ++sStats.frames;
     ++sFpsFrames;
     sStats.cpuMs = (svcGetSystemTick() - start) * 1000.0 / SYSCLOCK_ARM11;
@@ -4882,6 +5234,10 @@ void CtrVideo_Shutdown(void)
     BandsRelease();
     sBandsFailed = false;
     if (sC2d) C2D_Fini();
+    if (sBloom) C3D_RenderTargetDelete(sBloom);
+    sBloom = NULL;
+    if (sBloomTex.data) C3D_TexDelete(&sBloomTex);
+    memset(&sBloomTex, 0, sizeof(sBloomTex));
     if (sSurface.data) C3D_TexDelete(&sSurface);
     LeavesRelease();
     if (sAtlas.data) C3D_TexDelete(&sAtlas);

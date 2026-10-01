@@ -239,6 +239,91 @@ def oldale_house():
 
 OLDALE_HOUSE_EXACT = [(2, 36, 64, 64), (8, 14, 56, 36)]
 
+
+def briney_house():
+    """Mr Briney's cottage on Route 104, cells 15..19 x 47..50 (80 x 64).
+
+    The drawing, from the top:
+
+        rows  0- 8  the ridge's top: thatch bundles, period 8 across
+        rows  9-15  its front: a batten and a short course between dark lines
+        rows 16-35  the thatch: period 8 down (rows 16-23 = 24-31) and across,
+                    its eave course fringed at rows 32-35
+        rows 36-38  fascia
+        rows 39-47  the lattice under the eave (x 0-80)
+        rows 48-63  the ground floor (x 1-80): posts, reed walls, the door
+
+    One storey under a hipped roof, like Oldale's houses. Real depth: the
+    three collision rows, Z 16-64. The verges (x 0-7 and 72-79) are drawn
+    as edge bundles, so the courses are sampled from x 8-72.
+    """
+    front_z, back_z = 64, 16
+    overhang = 2
+    columns = (8, 72)
+    roof = HipRoof(
+        "roof", 0, 80, zf=front_z + overhang, zb=back_z - overhang, y0=27,
+        fascia=Strip((36, 39), wrap=columns),
+        slope=Strip((16, 36), repeat=(16, 24), wrap=columns),
+        teeth=(9, 16), cap=(0, 9), pitch=22.0, run=6,
+        ridge_u=(0, 80), end_tile=Tile(8, 9, 18, 16))
+
+    floor_top, wall_top = 16, 27
+    post = Tile(1, 48, 8, 64, top=floor_top)
+    reed = Tile(8, 48, 18, 64, top=floor_top)
+    lattice = Tile(8, 39, 16, 48, top=25)
+    lattice_end = Tile(0, 39, 3, 48, top=25)
+    ground_floor = Prism(
+        "ground_floor", 1, 80,
+        [(front_z, 0), (front_z, floor_top), (back_z, floor_top), (back_z, 0)],
+        edges={0: Proj(48, 64), 2: reed}, skip=(1, 3),
+        caps=[Band(0, floor_top, reed, front_z, front=post, back=post, z1=back_z)])
+    upper = Prism(
+        "lattice", 0, 80,
+        [(front_z, floor_top), (front_z, wall_top), (back_z, wall_top), (back_z, floor_top)],
+        edges={0: Proj(39, 48), 2: lattice}, skip=(1, 3),
+        caps=[Band(floor_top, wall_top + 1, lattice, front_z, front=lattice_end,
+                   back=lattice_end, z1=back_z)])
+    return [ground_floor, upper, roof]
+
+
+BRINEY_HOUSE_EXACT = [(1, 39, 80, 64), (0, 39, 1, 48), (8, 16, 72, 39)]
+
+
+def flower_shop():
+    """The Pretty Petal flower shop on Route 104, cells 3..8 x 15..18 (96 x 64).
+
+    A flat roof of corrugated sheet, seen from above as the GBA sees every
+    flat top. The drawing, from the top:
+
+        rows  0- 3  the roof's back edge: an outline and three light rows
+        rows  4-27  the sheet, every row the same (ribs period 4 across)
+        rows 28-37  the roof slab's red front and the dark line under it
+        rows 38-63  the facade (x 1-95): posts, the awning, windows, the door
+
+    Real depth: the three collision rows, Z 16-64. The sheet is laid back
+    to them with more of its own rows, the back edge closing it.
+    """
+    front, back = 64, 16
+    wall = 64 - 38
+    top = wall + (38 - 28)
+    post = Tile(1, 38, 6, 64, top=wall)
+    siding = Tile(72, 40, 80, 48, top=wall - 2)
+    rim = Tile(9, 28, 17, 38, top=top)
+    body = Prism(
+        "ground_floor", 1, 95,
+        [(front, 0), (front, wall), (back, wall), (back, 0)],
+        edges={0: Proj(38, 64), 2: siding}, skip=(1, 3),
+        caps=[Band(0, wall, siding, front, front=post, back=post, z1=back)])
+    roof = Prism(
+        "roof", 0, 96,
+        [(front, wall), (front, top), (back, top), (back, wall)],
+        edges={0: Proj(28, 38), 1: Strip((4, 28), repeat=(20, 28), tail=(0, 4)), 2: rim},
+        skip=(3,), caps=[Band(wall, top + 1, rim, front)])
+    return [body, roof]
+
+
+FLOWER_SHOP_EXACT = [(0, 4, 96, 38), (1, 38, 95, 64)]
+
 def kit_house(width):
     """The General tileset's red-roofed house, any width (in pixels).
 
@@ -1056,6 +1141,23 @@ SPECS = [
         "ground": [GRASS],
         "parts": oldale_house,
         "exact": OLDALE_HOUSE_EXACT,
+    },
+    {
+        "name": "briney_house",
+        "layout": "LAYOUT_ROUTE104",
+        "rect": (15, 47, 5, 4),
+        "ground": [GRASS],
+        "parts": briney_house,
+        "exact": BRINEY_HOUSE_EXACT,
+    },
+    {
+        "name": "flower_shop",
+        "layout": "LAYOUT_ROUTE104",
+        "rect": (3, 15, 6, 4),
+        # the cobbled path round it
+        "ground": [GRASS, 0x206, 0x207],
+        "parts": flower_shop,
+        "exact": FLOWER_SHOP_EXACT,
     },
     {
         "name": "kit_house_4",

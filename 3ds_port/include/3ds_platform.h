@@ -58,6 +58,9 @@ int CtrSettings_VoxelPitch(void);
 int CtrSettings_VoxelZoom(void);
 void CtrSettings_StepVoxelPitch(int direction);
 void CtrSettings_StepVoxelZoom(int direction);
+/* The voxel picture's tilt-shift blur, on by default. */
+bool CtrSettings_VoxelBlur(void);
+void CtrSettings_SetVoxelBlur(bool on);
 
 void CtrGame_Init(void);
 void CtrGame_Frame(void);

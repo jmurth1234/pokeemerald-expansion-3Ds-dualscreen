@@ -311,6 +311,9 @@ def main() -> None:
     entries: list[tuple[int, int, str]] = []
     ptr_entries: list[tuple[int, int, int]] = []
     missing_assets: list[str] = []
+    # Symbols that a source file's own INCBIN already accounts for.
+    claimed = {(f"build/root/{src_rel.with_suffix('.o').as_posix()}", sym)
+               for src_rel, sym, _, _ in incbins if src_rel.suffix == ".c"}
 
     for index, (src_rel, sym, rel_paths, is_static) in enumerate(incbins, start=1):
         if (index % 100) == 0:
@@ -320,7 +323,11 @@ def main() -> None:
         addr = sym_addrs.get((obj_rel, sym))
         if addr is None:
             candidates = sym_addrs_by_name.get(sym, [])
-            if not is_static and len(candidates) == 1:
+            # A header has no object of its own: its INCBINs, static ones
+            # included (src/data/wallpapers.h), are in the file that includes it.
+            if src_rel.suffix == ".h":
+                candidates = [c for c in candidates if (c[0], sym) not in claimed]
+            if len(candidates) == 1 and (not is_static or src_rel.suffix == ".h"):
                 obj_rel, addr = candidates[0]
             else:
                 continue

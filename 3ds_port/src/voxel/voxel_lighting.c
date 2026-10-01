@@ -39,7 +39,9 @@ static LightCell sCells[CELL_CACHE_SIZE];
 #define SAMPLE_CACHE_SIZE 4096u
 typedef struct
 {
-    float x, y, z, light;
+    float x, y, z;
+    float contact; /* the contact AO factor, 1 where nothing stands close */
+    bool lit;      /* the ray reached the sun */
     uint32_t generation;
 } LightSample;
 static LightSample sSamples[SAMPLE_CACHE_SIZE];
@@ -228,30 +230,23 @@ static void RayPoint(float x, float y, float z, int step, float *rx, float *ry, 
 bool gVoxelLightingStepEveryPoint; /* the reference march, for the tests */
 #endif
 
-float VoxelLighting_Sample(float x, float y, float z)
+/*
+ * Does the sun reach (x, y, z)? A world point: y counts the map's base.
+ *
+ * Bounded ray through the height proxies, a quarter tile of rise per step.
+ * This runs during meshing, never per fragment. Bias avoids self-shadowing
+ * of a flat roof.
+ *
+ * The ray only climbs, so a box cell that does not stop it at the first
+ * point it has inside cannot stop it at any later one: the march jumps to
+ * the first point in the next cell. That is five to seven cells for a ray
+ * that used to take twenty-six points, with the same answer - only crowns,
+ * which are round, are still tested point by point.
+ */
+static bool Lit(float x, float y, float z)
 {
-    unsigned key = ((uint32_t)Tile(x * 2.0f) * 73856093u
-                  ^ (uint32_t)Tile(z * 2.0f) * 19349663u
-                  ^ (uint32_t)Tile(y * 16.0f) * 83492791u) & (SAMPLE_CACHE_SIZE - 1);
-    LightSample *sample = &sSamples[key];
-    float light = 1.0f;
-
     if (sGeneration == 0)
         VoxelLighting_Reset();
-    if (sample->generation == sGeneration
-     && sample->x == x && sample->y == y && sample->z == z)
-        return sample->light;
-    /*
-     * Bounded ray through the height proxies, a quarter tile of rise per step.
-     * This runs during meshing, never per fragment. Bias avoids self-shadowing
-     * of a flat roof.
-     *
-     * The ray only climbs, so a box cell that does not stop it at the first
-     * point it has inside cannot stop it at any later one: the march jumps to
-     * the first point in the next cell. That is five to seven cells for a ray
-     * that used to take twenty-six points, with the same answer - only crowns,
-     * which are round, are still tested point by point.
-     */
     for (int step = 1; step <= VOXEL_LIGHT_REACH * 4;)
     {
         float rx, ry, rz;
@@ -265,10 +260,7 @@ float VoxelLighting_Sample(float x, float y, float z)
         tz = Tile(rz);
         cell = Cell(tx, tz);
         if (CellOccludes(cell, rx, ry, rz))
-        {
-            light = 0.70f;
-            break;
-        }
+            return false;
         ++step;
 #ifdef VOXEL_LIGHTING_TESTS
         if (gVoxelLightingStepEveryPoint)
@@ -295,19 +287,50 @@ float VoxelLighting_Sample(float x, float y, float z)
             }
         }
     }
-    /* Small contact AO at the bases of solid neighbours; leave roof/crown art
-     * alone. Ambient light keeps the original pixel art legible in shadow. */
-    if (y - Cell(Tile(x), Tile(z))->base <= 0.41f)
-    {
-        unsigned covered = 0;
-        covered += Occludes(x - 0.28f, y + 0.3f, z);
-        covered += Occludes(x + 0.28f, y + 0.3f, z);
-        covered += Occludes(x, y + 0.3f, z - 0.28f);
-        covered += Occludes(x, y + 0.3f, z + 0.28f);
-        light *= 1.0f - 0.035f * (float)covered;
-    }
-    *sample = (LightSample){x, y, z, light, sGeneration};
-    return light;
+    return true;
+}
+
+/* Small contact AO at the bases of solid neighbours; leave roof/crown art
+ * alone. Ambient light keeps the original pixel art legible in shadow. */
+static float Contact(float x, float y, float z)
+{
+    unsigned covered = 0;
+
+    if (y - Cell(Tile(x), Tile(z))->base > 0.41f)
+        return 1.0f;
+    covered += Occludes(x - 0.28f, y + 0.3f, z);
+    covered += Occludes(x + 0.28f, y + 0.3f, z);
+    covered += Occludes(x, y + 0.3f, z - 0.28f);
+    covered += Occludes(x, y + 0.3f, z + 0.28f);
+    return 1.0f - 0.035f * (float)covered;
+}
+
+static const LightSample *CachedSample(float x, float y, float z)
+{
+    unsigned key = ((uint32_t)Tile(x * 2.0f) * 73856093u
+                  ^ (uint32_t)Tile(z * 2.0f) * 19349663u
+                  ^ (uint32_t)Tile(y * 16.0f) * 83492791u) & (SAMPLE_CACHE_SIZE - 1);
+    LightSample *sample = &sSamples[key];
+
+    if (sGeneration == 0)
+        VoxelLighting_Reset();
+    if (sample->generation == sGeneration
+     && sample->x == x && sample->y == y && sample->z == z)
+        return sample;
+    sample->lit = Lit(x, y, z);
+    sample->contact = Contact(x, y, z);
+    sample->x = x;
+    sample->y = y;
+    sample->z = z;
+    sample->generation = sGeneration;
+    return sample;
+}
+
+float VoxelLighting_Sample(float x, float y, float z)
+{
+    const LightSample *sample = CachedSample(x, y, z);
+
+    return (sample->lit ? 1.0f : VOXEL_AMBIENT) * sample->contact;
 }
 
 uint32_t VoxelLighting_Hash(int x0, int z0, int x1, int z1)
@@ -359,25 +382,166 @@ static void RawQuad(VoxelBuilder *builder, const VoxelVertex *a,
     VoxelBuilder_Tri(builder, a, c, d);
 }
 
+float VoxelLighting_Face(float nx, float ny, float nz)
+{
+    /* n . sun over up . sun, the sun unnormalised at (-DX, 1, -DZ): level
+     * ground is 1, a west wall 0.85, a north one 0.55, south and east 0. */
+    float length = sqrtf(nx * nx + ny * ny + nz * nz);
+    float facing;
+
+    if (length <= 0.0f)
+        return 1.0f;
+    facing = (ny - VOXEL_SUN_DX * nx - VOXEL_SUN_DZ * nz) / length;
+    if (facing <= 0.0f)
+        return VOXEL_AMBIENT;
+    if (facing >= 1.0f)
+        return 1.0f;
+    return VOXEL_AMBIENT + (1.0f - VOXEL_AMBIENT) * facing;
+}
+
+/* Where the builder puts a point it is given: the world, base and lift in. */
+static void WorldPoint(const VoxelBuilder *builder, const VoxelVertex *v,
+                       float *x, float *y, float *z)
+{
+    *x = v->x;
+    *y = v->y + builder->lift + builder->base;
+    *z = v->z + builder->shift;
+}
+
+/* ── Faces ──────────────────────────────────────────────────────────────── */
+
+static void EmitPolygon(VoxelBuilder *builder, const VoxelVertex *out, unsigned count)
+{
+    VoxelBuilder_Tri(builder, &out[0], &out[1], &out[2]);
+    if (count == 4)
+        VoxelBuilder_Tri(builder, &out[0], &out[2], &out[3]);
+}
+
+/*
+ * A lit polygon of three or four points, its normal already turned to the
+ * side it is seen from: the sun's face term, and each corner's cast shadow.
+ * A face turned from the sun has no sun to lose, so it casts no ray.
+ */
+static void LightPolygon(VoxelBuilder *builder, const VoxelVertex *const *v, unsigned count,
+                         float nx, float ny, float nz)
+{
+    VoxelVertex out[4];
+    float face = VoxelLighting_Face(nx, ny, nz);
+    bool sunward = face > VOXEL_AMBIENT;
+    float px, py, pz;
+
+    for (unsigned i = 0; i < count; ++i)
+        out[i] = *v[i];
+
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const LightSample *sample;
+
+        WorldPoint(builder, v[i], &px, &py, &pz);
+        if (!sunward)
+        {
+            out[i].shade *= VOXEL_AMBIENT * Contact(px, py, pz);
+            continue;
+        }
+        sample = CachedSample(px, py, pz);
+        out[i].shade *= (sample->lit ? face : VOXEL_AMBIENT) * sample->contact;
+    }
+    EmitPolygon(builder, out, count);
+}
+
+/*
+ * The relief's lattice (builder->vertexFace): each corner brings its own
+ * face term in its shade. A corner turned from the sun casts no ray.
+ */
+static void LightVertexFaces(VoxelBuilder *builder, const VoxelVertex *const *v)
+{
+    VoxelVertex out[4];
+
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        float face = v[i]->shade, px, py, pz;
+
+        out[i] = *v[i];
+        WorldPoint(builder, v[i], &px, &py, &pz);
+        if (face <= VOXEL_AMBIENT + 0.001f)
+        {
+            out[i].shade = VOXEL_AMBIENT * Contact(px, py, pz);
+            continue;
+        }
+        {
+            const LightSample *sample = CachedSample(px, py, pz);
+
+            out[i].shade = (sample->lit ? face : VOXEL_AMBIENT) * sample->contact;
+        }
+    }
+    EmitPolygon(builder, out, 4);
+}
+
 void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
                          const VoxelVertex *b, const VoxelVertex *c,
                          const VoxelVertex *d)
 {
     VoxelVertex corners[4] = {*a, *b, *c, *d};
-    /* Existing face colours carry the art's directional shading. Add a modest
-     * fixed-sun term to the south/east faces without brightening dark art. */
+    const VoxelVertex *points[4] = {a, b, c, d};
+    /* A B C winds a wall outwards and level ground downwards: ground is
+     * turned up, and so is anything else found facing down. */
     float ux = b->x - a->x, uy = b->y - a->y, uz = b->z - a->z;
     float vx = c->x - a->x, vy = c->y - a->y, vz = c->z - a->z;
-    float nx = uy * vz - uz * vy, nz = ux * vy - uy * vx;
-    float face = (nx > 0.01f || nz > 0.01f) && a->y != c->y && !builder->artShaded
-               ? 0.90f : 1.0f;
+    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    float face;
+
+    if (builder->vertexFace && builder->lightingConstant < 0.0f && !builder->rounded)
+    {
+        LightVertexFaces(builder, points);
+        return;
+    }
+    if (ny < 0.0f)
+    {
+        nx = -nx;
+        ny = -ny;
+        nz = -nz;
+    }
+    /* A crown's card stands for a rounded crown: its light is half way
+     * between the card's and the sky's. */
+    if (builder->rounded)
+    {
+        float length = sqrtf(nx * nx + ny * ny + nz * nz);
+
+        if (length > 0.0f)
+        {
+            nx /= length;
+            ny = ny / length + 1.0f;
+            nz /= length;
+        }
+    }
+    face = VoxelLighting_Face(nx, ny, nz);
 
     /* An object lit as a whole (see VoxelSign_Emit): its one sample, and the
-     * face term, for every corner. */
+     * face term, for every corner - unless the sample is in shadow, where
+     * there is no sun left to face. */
     if (builder->lightingConstant >= 0.0f)
     {
+        float light = builder->lightingConstant > VOXEL_AMBIENT + 0.01f
+                    ? builder->lightingConstant * face : builder->lightingConstant;
+
         for (unsigned i = 0; i < 4; ++i)
-            corners[i].shade *= face * builder->lightingConstant;
+            corners[i].shade *= light;
+        RawQuad(builder, &corners[0], &corners[1], &corners[2], &corners[3]);
+        return;
+    }
+
+    /* A crown's card: its corners, lit as the rounded crown. */
+    if (builder->rounded)
+    {
+        for (unsigned i = 0; i < 4; ++i)
+        {
+            float px, py, pz;
+            const LightSample *sample;
+
+            WorldPoint(builder, points[i], &px, &py, &pz);
+            sample = CachedSample(px, py, pz);
+            corners[i].shade *= (sample->lit ? face : VOXEL_AMBIENT) * sample->contact;
+        }
         RawQuad(builder, &corners[0], &corners[1], &corners[2], &corners[3]);
         return;
     }
@@ -396,7 +560,10 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
             {
                 float t = col * 0.5f, s = row * 0.5f;
                 VoxelVertex v = Mix(Mix(*a, *b, t), Mix(*d, *c, t), s);
-                float light = VoxelLighting_Sample(v.x, v.y, v.z);
+                float px, py, pz, light;
+
+                WorldPoint(builder, &v, &px, &py, &pz);
+                light = VoxelLighting_Sample(px, py, pz);
                 if (light < lo) lo = light;
                 if (light > hi) hi = light;
                 v.shade *= light;
@@ -415,9 +582,53 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
             RawQuad(builder, &grid[0], &grid[2], &grid[8], &grid[6]);
         return;
     }
-    for (unsigned i = 0; i < 4; ++i)
-        corners[i].shade *= face * VoxelLighting_Sample(corners[i].x, corners[i].y, corners[i].z);
-    RawQuad(builder, &corners[0], &corners[1], &corners[2], &corners[3]);
+    LightPolygon(builder, points, 4, nx, ny, nz);
+}
+
+/*
+ * The model's shades (voxel_building.py): 1 for the faces the GBA drew,
+ * then the west, east and back sides. They say which side of the triangle
+ * is its outside - the models are not wound consistently - and the sun then
+ * says how lit that side is.
+ */
+#define MODEL_SHADE_WEST 0.80f
+#define MODEL_SHADE_EAST 0.72f
+#define MODEL_SHADE_BACK 0.66f
+
+void VoxelLighting_ModelTri(VoxelBuilder *builder, const VoxelVertex *a,
+                            const VoxelVertex *b, const VoxelVertex *c, float drawnShade)
+{
+    VoxelVertex plain[3] = {*a, *b, *c};
+    float face;
+    float ux = b->x - a->x, uy = b->y - a->y, uz = b->z - a->z;
+    float vx = c->x - a->x, vy = c->y - a->y, vz = c->z - a->z;
+    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    bool flip;
+
+    if (fabsf(drawnShade - MODEL_SHADE_WEST) < 0.02f)
+        flip = nx > 0.0f;
+    else if (fabsf(drawnShade - MODEL_SHADE_EAST) < 0.02f)
+        flip = nx < 0.0f;
+    else if (fabsf(drawnShade - MODEL_SHADE_BACK) < 0.02f)
+        flip = ny + nz > 0.0f;
+    else
+        flip = ny + nz < 0.0f; /* drawn: it faces the GBA's view */
+    if (flip)
+    {
+        nx = -nx;
+        ny = -ny;
+        nz = -nz;
+    }
+    /*
+     * The drawn shade gives way to the sun's facing, and that is all: no
+     * cast shadow on a model, as there never was. A town's models are
+     * thousands of triangles, and a ray from each put a Rustboro chunk at
+     * 40-80 ms on an Old 3DS.
+     */
+    face = VoxelLighting_Face(nx, ny, nz);
+    for (unsigned i = 0; i < 3; ++i)
+        plain[i].shade = face;
+    VoxelBuilder_Tri(builder, &plain[0], &plain[1], &plain[2]);
 }
 
 /* Contact shadows are clipped to each receiving ground tile: no floating blob
@@ -451,9 +662,9 @@ static bool Receiver(int x, int z, float *height)
         return false;
     switch (VoxelWorld_ClassifyTile(x, z))
     {
-    case VOXEL_SHAPE_FLAT: *height = 0.0f; return true;
+    case VOXEL_SHAPE_FLAT:
+    case VOXEL_SHAPE_WATER: *height = 0.0f; return true;
     case VOXEL_SHAPE_DECAL: *height = 0.02f; return true;
-    case VOXEL_SHAPE_WATER: *height = -0.10f; return true;
     default: return false;
     }
 }

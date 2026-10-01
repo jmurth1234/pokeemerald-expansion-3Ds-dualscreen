@@ -11,6 +11,49 @@
 - The builder now accepts the ROM named by the release's recipe, so an
   expansion-based release works with the expansion ROM it was built from.
 
+## 0.1.2 — 2026-09-30
+
+New and improved:
+
+- PokéNav on the bottom screen, driven by touch: laid out as header, body
+  and help bar, a tap moves the cursor straight to the option or entry, and
+  the Hoenn map scrolls smoothly.
+- 3D slider: the intro and the title screen now have stereo depth, and 2D
+  screens keep blended sprites and text windows at their own depth.
+- Battle transitions now play in both the classic 2D field and the voxel
+  overworld, at full speed on Old 3DS.
+- Voxel: the world fades with the screen on warps and battle starts.
+- Voxel: characters are drawn at their proper proportions, stand on their
+  feet and meet their shadow; the walking bob is kept.
+- Voxel: walls and mountain sides facing away from the sun are in shade,
+  lit by the same sun as the cast shadows.
+- Voxel: newly modelled Rustboro's gym (its statues stand in all eight gyms),
+  Oldale's two houses, Mr Briney's cottage and the Pretty Petal flower shop.
+- Voxel: every mountain of the general tileset is drawn; Route 116's
+  mountain is built from straight faces and one-level steps; stairs, lamps
+  and Rustboro's railings stand again.
+- Voxel: Route 104's beach and sea are a level below the route, and Routes
+  105 and 106 follow them down.
+- Intro, title and menus: the margins around the 240x160 picture are made
+  from each screen's own art (Rayquaza stands on the bottom edge under a lit
+  sky, the Professor's sky reaches the top), and menu screens are centred.
+- Title screen and palette fades much smoother on Old 3DS: layer textures
+  are redrawn only where they change, and fades are drawn as a tint.
+- Installation guide in `docs/INSTALLATION.md`, and bug report and feature
+  request forms on GitHub.
+
+Fixes:
+
+- PokéNav tiles and palettes were wrong.
+- With the 3D slider up, black screens came out blue and the save selection
+  lost its backdrop; the intro's leaves scene slowed down.
+- Voxel: sprites went black on their own during warps and battle starts.
+- Voxel: cast shadows striped and came apart from the feet.
+- Voxel: black gaps along the shores of recessed water (now a rim).
+- Voxel: ledges were sunk into a toothed trench; they now sit on the ground
+  as on Route 101, and side ledges are no longer striped by the lighting.
+- Voxel: Rustboro's lamps against walls did not stand.
+
 ## 0.1.1 — 2026-09-27
 
 - The voxel overworld is now off by default. It is switched on from the new
