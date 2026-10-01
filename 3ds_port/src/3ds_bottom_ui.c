@@ -2092,7 +2092,11 @@ static void SnapshotDex(ViewState *s)
     {
         u16 total;
         national = IsNationalPokedexEnabled();
+#ifdef PORT_EXPANSION
+        total = national ? NATIONAL_DEX_COUNT : HOENN_DEX_COUNT - 1;
+#else
         total = national ? NATIONAL_DEX_COUNT : HOENN_DEX_COUNT;
+#endif
         seen = national ? GetNationalPokedexCount(FLAG_GET_SEEN) : GetHoennPokedexCount(FLAG_GET_SEEN);
         own = national ? GetNationalPokedexCount(FLAG_GET_CAUGHT) : GetHoennPokedexCount(FLAG_GET_CAUGHT);
         /* The list ends at the last mon seen, as the game's does. */
