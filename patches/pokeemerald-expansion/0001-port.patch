@@ -19182,7 +19182,7 @@ index 12c0d902..350148df 100644
      // heap was destroyed in the copying process, so reset it
      InitHeap(gHeap, HEAP_SIZE);
 diff --git c/src/m4a.c w/src/m4a.c
-index 08f05319..71e58a12 100644
+index 08f05319..d9f1015b 100644
 --- c/src/m4a.c
 +++ w/src/m4a.c
 @@ -2,22 +2,50 @@
@@ -19639,7 +19639,7 @@ index 08f05319..71e58a12 100644
      s16 b = val + 0x80;
      u8 a = gPokemonCrySong.tuneValue2 - gPokemonCrySong.tuneValue;
      gPokemonCrySong.tieKeyValue = (b >> 8) & 0x7F;
-@@ -1594,21 +1683,25 @@ void SetPokemonCryPitch(s16 val)
+@@ -1594,23 +1683,31 @@ void SetPokemonCryPitch(s16 val)
  
  void SetPokemonCryLength(u16 val)
  {
@@ -19662,11 +19662,18 @@ index 08f05319..71e58a12 100644
  
  bool32 IsPokemonCryPlaying(struct MusicPlayerInfo *mplayInfo)
  {
-+
-     struct MusicPlayerTrack *track = mplayInfo->tracks;
+-    struct MusicPlayerTrack *track = mplayInfo->tracks;
  
++    struct MusicPlayerTrack *track;
++
++    if (mplayInfo == NULL) // no cry has played yet; GBA read address 0 here harmlessly
++        return FALSE;
++
++    track = mplayInfo->tracks;
      if (track->chan && track->chan->track == track)
-@@ -1619,6 +1712,7 @@ bool32 IsPokemonCryPlaying(struct MusicPlayerInfo *mplayInfo)
+         return TRUE;
+     else
+@@ -1619,6 +1716,7 @@ bool32 IsPokemonCryPlaying(struct MusicPlayerInfo *mplayInfo)
  
  void SetPokemonCryChorus(s8 val)
  {
@@ -19674,7 +19681,7 @@ index 08f05319..71e58a12 100644
      if (val)
      {
          gPokemonCrySong.trackCount = 2;
-@@ -1637,20 +1731,21 @@ void SetPokemonCryStereo(u32 val)
+@@ -1637,20 +1735,21 @@ void SetPokemonCryStereo(u32 val)
      if (val)
      {
          REG_SOUNDCNT_H = SOUND_B_TIMER_0 | SOUND_B_LEFT_OUTPUT
@@ -31988,7 +31995,7 @@ index 9c9266ed..3e7c534f 100644
  static const u16 sPokeballShining1_Pal[] = INCGFX_U16("graphics/slot_machine/pokeball_shining_1.pal", ".gbapal");
  static const u16 sPokeballShining2_Pal[] = INCGFX_U16("graphics/slot_machine/pokeball_shining_2.pal", ".gbapal");
 diff --git c/src/sound.c w/src/sound.c
-index 58c3b59a..c2b66a1d 100644
+index 58c3b59a..893117d1 100644
 --- c/src/sound.c
 +++ w/src/sound.c
 @@ -37,7 +37,6 @@ static void Task_Fanfare(u8 taskId);
@@ -32007,7 +32014,7 @@ index 58c3b59a..c2b66a1d 100644
      m4aMPlayStop(&gMPlayInfo_BGM);
      songNum = sFanfares[fanfareNum].songNum;
      sFanfareCounter = sFanfares[fanfareNum].duration;
-@@ -498,6 +498,8 @@ bool8 IsCryFinished(void)
+@@ -498,12 +498,16 @@ bool8 IsCryFinished(void)
  
  void StopCryAndClearCrySongs(void)
  {
@@ -32016,6 +32023,14 @@ index 58c3b59a..c2b66a1d 100644
      m4aMPlayStop(gMPlay_PokemonCry);
      ClearPokemonCrySongs();
  }
+ 
+ void StopCry(void)
+ {
++    if (!gMPlay_PokemonCry)
++        return;
+     m4aMPlayStop(gMPlay_PokemonCry);
+ }
+ 
 diff --git c/src/sound_mixer.c w/src/sound_mixer.c
 new file mode 100644
 index 00000000..e99ff4c0
