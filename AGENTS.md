@@ -1,28 +1,15 @@
 # AGENTS.md
 
-Working notes for agents building/testing this port on this machine. See
+Working notes for agents building/testing this port. See
 `docs/DEVELOPMENT.md` for the project's own description; this file records the
-machine-specific workflow and the debugging gotchas that are easy to relearn
-the hard way.
-
-## Toolchain and environment
-
-devkitPro lives in `~/devkitpro`. Every build needs:
-
-```sh
-export DEVKITPRO=$HOME/devkitpro DEVKITARM=$HOME/devkitpro/devkitARM
-export PATH=$HOME/devkitpro/devkitARM/bin:$HOME/devkitpro/tools/bin:$PATH
-```
-
-Python venv for the build scripts (`Pillow`, `numpy`, `python-xlib`,
-`luma3ds_exception_dump_parser`): `~/.venvs/emerald3ds/bin/python`.
+debugging gotchas that are easy to relearn the hard way.
 
 ## Building
 
 Expansion (the default target for this work):
 
 ```sh
-make -C build/expansion/3ds_port -j8 PYTHON=$HOME/.venvs/emerald3ds/bin/python
+make -C build/expansion/3ds_port -j8 PYTHON=python3
 ```
 
 Vanilla (keep it working too): `make -C build/upstream/3ds_port ...`.
@@ -83,44 +70,10 @@ Verify both directions before committing:
 git -C build/expansion apply --check --reverse patches/pokeemerald-expansion/0001-port.patch
 
 # 2. Patch applies to a clean upstream checkout:
-git -C build/expansion worktree add --detach /tmp/opencode/exp-check e8bd1cd7
-git -C /tmp/opencode/exp-check apply --check <abs path to patch>
-git -C build/expansion worktree remove --force /tmp/opencode/exp-check
+git -C build/expansion worktree add --detach /tmp/exp-check e8bd1cd7
+git -C /tmp/exp-check apply --check <abs path to patch>
+git -C build/expansion worktree remove --force /tmp/exp-check
 ```
-
-## Testing
-
-Acceptance is on hardware; Azahar is for fast iteration/diagnosis.
-
-### Azahar emulator
-
-- Binary: `/usr/bin/azahar`. The running instance is usually launched directly
-  from `build/expansion/3ds_port/emerald3ds.3dsx`, so a rebuild is picked up on
-  restart.
-- SDMC data dir: `~/.local/share/azahar-emu/sdmc/`. To test the packaged copy,
-  deploy with
-  `cp build/expansion/3ds_port/emerald3ds.3dsx ~/.local/share/azahar-emu/sdmc/3ds/emerald3ds/`.
-- Game log: `~/.local/share/azahar-emu/sdmc/3ds/emerald3ds/port.log` (can grow
-  to tens of MB with per-frame logging; grep for `frame=` / marker tags rather
-  than reading it whole).
-- No DSP firmware: audio is disabled, so **audio-only crashes only reproduce on
-  hardware**.
-- Screenshots: `spectacle -b -n -f -o out.png` works. `grim` fails ("compositor
-  doesn't support the screen capture protocol"). `wtype` is blocked (no
-  virtual-keyboard protocol) and X11 XTEST triggers the KDE Remote Control
-  permission dialog, so emulator input cannot be scripted reliably —
-  `/dev/uinput` is accessible (user is in `input`) but unused so far. Ask the
-  user to drive input when needed.
-
-### Hardware
-
-- Luma3DS FTP server on the 3DS: `<3ds-ip>:5000`.
-- Deploy: copy `emerald3ds.3dsx` to `/3ds/emerald3ds/` (FTP).
-- Game log: `/3ds/emerald3ds/port.log`.
-- Crash dumps: `/luma/dumps/arm11/crash_dump_000000NN.dmp`; parse with
-  `luma3ds_exception_dump_parser` (installed in the venv).
-- Loose data: `make devdata`, then
-  `python tools/dev_assets.py --ftp <3ds-ip>:5000`.
 
 ## Debugging gotchas (expansion port)
 
@@ -145,12 +98,3 @@ Acceptance is on hardware; Azahar is for fast iteration/diagnosis.
   the instrumentation before regenerating the patch. Keep a `git -C
   build/expansion status` / diff habit so debug edits don't leak into the
   patch.
-
-## Disk
-
-`/home` is btrfs (`/dev/mapper/omarchy_root`). Metadata can fill while data has
-space: symptoms are `fatal: unable to write new index file` or `couldn't set
-'refs/heads/...'`. Free space by deleting build dirs (e.g.
-`build/expansion-fresh`, `/tmp/opencode`), run `btrfs balance` when possible,
-and as a stopgap use `GIT_INDEX_FILE=/tmp/gitidx git ...` (with
-`git read-tree HEAD`) so git doesn't need to write `.git/index` under `/home`.
