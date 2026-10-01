@@ -1,11 +1,13 @@
 # Explicit exceptions for tools/release_audit.py. Every entry needs a reason.
 
 [large]
-# Files over 1 MiB that are allowed (globs): the release's own executables.
+# Files over 1 MiB that are allowed (globs): the release's own executables,
+# and the versioned source patch the port is built from.
 paths = [
     "Emerald3DS-v*-Windows/Emerald3DS-Builder.exe",
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
     "Emerald3DS-v*-Windows/payload/Emerald3DS.3dsx",
+    "patches/pokeemerald-expansion/0001-port.patch",
 ]
 
 [media]
