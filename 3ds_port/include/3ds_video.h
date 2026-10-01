@@ -83,6 +83,8 @@ enum
     CTR_CENTRED_MAIN_MENU,
     CTR_CENTRED_NAMING,
     CTR_CENTRED_CLOCK,
+    /* The choice of starter from the professor's bag. */
+    CTR_CENTRED_STARTER,
     /*
      * The PokéNav, composed as the others but shown on the bottom screen: its
      * 240x240 area left of the button column, its header on the top edge,

@@ -176,6 +176,11 @@ void CtrCentredClock_SetVBlankCallback(IntrCallback callback)
     SetCentredCallback(callback, CTR_CENTRED_CLOCK);
 }
 
+void CtrCentredStarter_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, CTR_CENTRED_STARTER);
+}
+
 void CtrCentredPokenav_SetVBlankCallback(IntrCallback callback)
 {
     SetCentredCallback(callback, CTR_CENTRED_POKENAV);

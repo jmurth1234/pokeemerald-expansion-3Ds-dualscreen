@@ -1500,8 +1500,8 @@ static void DrawBattleBg(unsigned bg)
  *   rather than the platform that slid to the edge. across keeps a fill to
  *   the sides. Those screens' backgrounds are a
  *   plain field or a pattern of one tile, so it carries on as if the screen
- *   were wider: the clock's teal, the naming screen's stripes and title bar,
- *   the sky of the professor's speech.
+ *   were wider: the clock's teal, the starter's meadow, the naming screen's
+ *   stripes and title bar, the sky of the professor's speech.
  * - skyRows: the speech's sky, the first rows of its background, drawn from
  *   the top of the screen rather than the top of the picture, so it starts at
  *   the top-left corner and carries on to the right as the rest does.
@@ -1541,6 +1541,8 @@ static const CentredFill sCentredFills[CTR_CENTRED_SCREENS] =
     /* Inside the yellow border; the title bar is its top row. */
     [CTR_CENTRED_NAMING] = {.layers = 1u << 3, .inset = {2, 0, 2, 1}},
     [CTR_CENTRED_CLOCK] = {.layers = 1u << 3},
+    /* The meadow round the bag: one plain green tile at every edge of it. */
+    [CTR_CENTRED_STARTER] = {.layers = 1u << 2},
     /* Whatever background is at the back of the PokéNav screen on show
      * (CentredLayers): the dots, the Hoenn sea, the ribbons' wood. */
     [CTR_CENTRED_POKENAV] = {.backmost = true},
@@ -3054,6 +3056,13 @@ static void WindowSpan(unsigned limits, bool vertical, int *first, int *last)
 
     *first = WindowEdge(limits, false, extent);
     *last = WindowEdge(limits, true, extent);
+    /*
+     * A left edge past the right one wraps round the line on the GBA: that is
+     * how a window starts left of the screen. The label of the starter on the
+     * left (starter_choose.c, its column 0 less 4 pixels) is WIN0H 252..108,
+     * which on a centred screen is -4..108, just into the margin.
+     */
+    if (sCentred && !vertical && *first > *last) *first -= 256;
     if (!gba) return;
     if ((limits & 255) > extent || (limits >> 8) > (limits & 255)) *last = (int)extent;
     /* A transition is composed as the GBA picture, margins added after. */
