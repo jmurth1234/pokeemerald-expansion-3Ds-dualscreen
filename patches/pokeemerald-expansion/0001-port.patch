@@ -18822,7 +18822,7 @@ index d5acdfd9..6141b48c
 +}
 +#endif
 diff --git c/src/item_use.c w/src/item_use.c
-index d6ab7971..2a0cc511 100644
+index d6ab7971..73061a6d 100644
 --- c/src/item_use.c
 +++ w/src/item_use.c
 @@ -98,7 +98,7 @@ static const u8 sText_PlayedPokeFlute[] = _("Played the POKé FLUTE.");
@@ -18834,6 +18834,15 @@ index d6ab7971..2a0cc511 100644
  
  // Below is set TRUE by UseRegisteredKeyItemOnField
  #define tUsingRegisteredKeyItem  data[3]
+@@ -1198,7 +1198,7 @@ bool32 CannotUseItemsInBattle(enum Item itemId, struct Pokemon *mon)
+     bool8 cannotUse = FALSE;
+     const u8* failStr = NULL;
+     u32 i, battlerTarget;
+-    u16 hp = GetMonData(mon, MON_DATA_HP);
++    u16 hp = mon != NULL ? GetMonData(mon, MON_DATA_HP) : 0; // ball items pass a NULL mon
+ 
+     if (gPartyMenu.slotId == 0)
+         battlerTarget = B_POSITION_PLAYER_LEFT;
 diff --git c/src/landmark.c w/src/landmark.c
 index c26e61f4..9d641d01 100644
 --- c/src/landmark.c
