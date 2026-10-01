@@ -64,6 +64,9 @@ void CtrSettings_StepVoxelZoom(int direction);
 /* The voxel picture's tilt-shift blur, on by default. */
 bool CtrSettings_VoxelBlur(void);
 void CtrSettings_SetVoxelBlur(bool on);
+/* The FPS counter on the top screen, off by default. */
+bool CtrSettings_ShowFps(void);
+void CtrSettings_SetShowFps(bool on);
 
 void CtrGame_Init(void);
 void CtrGame_Frame(void);

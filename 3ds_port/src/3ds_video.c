@@ -4919,7 +4919,8 @@ static void BlitBands(C3D_RenderTarget *target, unsigned count, float parallax)
 #endif
 #if CTR_SHOW_FPS
 /*
- * The FPS counter (SHOW_FPS=1): a 3x5 pixel font, each pixel a 1x1 solid
+ * The FPS counter (SHOW_FPS=1), shown when the options turn it on
+ * (CtrSettings_ShowFps): a 3x5 pixel font, each pixel a 1x1 solid
  * rectangle, over a translucent box in the top-left corner. Drawn last, over
  * whatever the frame composed, and at zero parallax in both eyes.
  */
@@ -5228,8 +5229,11 @@ void CtrVideo_Present(void)
         RenderEye(sTopRight, clear, -(float)sStats.stereo);
     }
 #if CTR_SHOW_FPS
-    if (!bottom) DrawFps(sTop);
-    if (stereo) DrawFps(sTopRight);
+    if (CtrSettings_ShowFps())
+    {
+        if (!bottom) DrawFps(sTop);
+        if (stereo) DrawFps(sTopRight);
+    }
 #endif
     /* Queued in the frame, behind the drawing into sBottom (BottomTransfer). */
     if (bottom) BottomTransfer();

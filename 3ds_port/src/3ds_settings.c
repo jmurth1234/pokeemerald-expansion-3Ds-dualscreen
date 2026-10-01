@@ -29,6 +29,9 @@ static int sPitch = 2, sZoom = 1;
 /* The HD-2D tilt-shift blur over the voxel picture (3ds_video.c): on unless
  * turned off. */
 static bool sVoxelBlur = true;
+/* The FPS counter in the top screen's corner (3ds_video.c): off unless
+ * turned on. */
+static bool sShowFps = false;
 
 static int Find(const int *values, int count, int value, int fallback)
 {
@@ -45,7 +48,7 @@ void CtrSettings_Load(void)
 
     if (file == NULL)
     {
-        CtrLog_Write(CTR_LOG_FS, "settings: none yet, defaults (voxel=0)");
+        CtrLog_Write(CTR_LOG_FS, "settings: none yet, defaults (voxel=0 fps=0)");
         return;
     }
     while (fgets(line, sizeof(line), file))
@@ -60,10 +63,12 @@ void CtrSettings_Load(void)
             sZoom = Find(sZooms, COUNT(sZooms), value, sZoom);
         else if (strncmp(line, "voxel_blur=", 11) == 0)
             sVoxelBlur = line[11] != '0';
+        else if (strncmp(line, "fps=", 4) == 0)
+            sShowFps = line[4] == '1';
     }
     fclose(file);
-    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d", sVoxel ? 1 : 0,
-                 sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0);
+    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d fps=%d", sVoxel ? 1 : 0,
+                 sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0, sShowFps ? 1 : 0);
 }
 
 static void Save(void)
@@ -72,8 +77,8 @@ static void Save(void)
 
     if (file == NULL)
         return;
-    fprintf(file, "voxel=%d\nvoxel_pitch=%d\nvoxel_zoom=%d\nvoxel_blur=%d\n", sVoxel ? 1 : 0,
-            sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0);
+    fprintf(file, "voxel=%d\nvoxel_pitch=%d\nvoxel_zoom=%d\nvoxel_blur=%d\nfps=%d\n", sVoxel ? 1 : 0,
+            sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0, sShowFps ? 1 : 0);
     fclose(file);
 }
 
@@ -128,5 +133,18 @@ void CtrSettings_SetVoxelBlur(bool on)
     if (sVoxelBlur == on)
         return;
     sVoxelBlur = on;
+    Save();
+}
+
+bool CtrSettings_ShowFps(void)
+{
+    return sShowFps;
+}
+
+void CtrSettings_SetShowFps(bool on)
+{
+    if (sShowFps == on)
+        return;
+    sShowFps = on;
     Save();
 }

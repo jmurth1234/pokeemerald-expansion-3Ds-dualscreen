@@ -477,12 +477,16 @@ static bool8 PalPath(const char *path, Pal *dst, int count)
 enum { SCR_MAP, SCR_POKEMON, SCR_BAG, SCR_CARD, SCR_POKEDEX, SCR_POKENAV, SCR_SAVE, SCR_OPTION, SCR_COUNT };
 
 /*
- * The game's six options, then the port's own: the voxel overworld, off by
- * default and kept in settings.txt rather than in the save (3ds_settings.c).
- * Only a build with the voxel renderer has that row.
+ * The game's six options, then the port's own, off by default and kept in
+ * settings.txt rather than in the save (3ds_settings.c): the FPS counter and
+ * the voxel overworld. Only a build with the counter has its row, and only
+ * one with the voxel renderer has the voxel rows.
  */
+#ifndef CTR_SHOW_FPS
+#define CTR_SHOW_FPS 1
+#endif
 enum { OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND, OPT_BUTTON_MODE, OPT_FRAME,
-       OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPTION_ROWS };
+       OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPTION_ROWS };
 #if CTR_VOXEL_ENABLED
 #define OPTION_SHOWN OPTION_ROWS
 #else
@@ -1365,25 +1369,38 @@ static u8 sScreen = SCR_MAP;
 /* The options list's scroll, in pixels, dragged by the stylus (OptionsDrag). */
 static int sOptionScroll, sOptionScrollStart;
 
-/* Options rows are this far apart; with the 3D rows there are more than fit. */
+/* Options rows are this far apart; with the port's rows there are more than fit. */
 #define OPTION_PITCH (OPTION_SHOWN > 6 ? 26 : 30)
+/* The frame's preview below the rows: its top, past the last row, and the
+ * space it takes. */
+#define OPTION_PREVIEW_GAP 10
+#define OPTION_PREVIEW_H 36
 
 /* The 3D camera and blur rows only with the voxel overworld on. */
 static bool8 OptionRowShown(int row, bool8 voxel)
 {
-    if (row >= OPTION_SHOWN)
+    if (row >= OPTION_SHOWN || (row == OPT_FPS && !CTR_SHOW_FPS))
         return FALSE;
     return voxel || (row != OPT_VOXEL_PITCH && row != OPT_VOXEL_ZOOM && row != OPT_VOXEL_BLUR);
 }
 
-/* How far the options list can scroll: 0 when every row fits. */
-static int OptionsMaxScroll(bool8 voxel)
+static int OptionRowsShown(bool8 voxel)
 {
-    int rows = 0, height;
+    int rows = 0;
 
     for (int i = 0; i < OPTION_ROWS; ++i)
         rows += OptionRowShown(i, voxel);
-    height = 4 + rows * OPTION_PITCH;
+    return rows;
+}
+
+/* How far the options list can scroll: 0 when every row fits, and the
+ * frame's preview with them when it is shown (not with the 3D rows). */
+static int OptionsMaxScroll(bool8 voxel)
+{
+    int height = 4 + OptionRowsShown(voxel) * OPTION_PITCH;
+
+    if (!voxel)
+        height += OPTION_PREVIEW_GAP + OPTION_PREVIEW_H;
     return height > H ? height - H : 0;
 }
 static u8 sAnimFrame;
@@ -2161,6 +2178,7 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             s->options[3] = gSaveBlock2Ptr->optionsSound;
             s->options[4] = gSaveBlock2Ptr->optionsButtonMode;
             s->options[5] = gSaveBlock2Ptr->optionsWindowFrameType;
+            s->options[OPT_FPS] = CtrSettings_ShowFps();
             s->options[OPT_VOXEL] = CtrSettings_Voxel();
             s->options[OPT_VOXEL_PITCH] = CtrSettings_VoxelPitch();
             s->options[OPT_VOXEL_ZOOM] = CtrSettings_VoxelZoom();
@@ -2762,6 +2780,7 @@ static const u8 *OptionValue(int row, u8 value)
     case 2: return value ? gText_BattleStyleSet : gText_BattleStyleShift;
     case 3: return value ? gText_SoundStereo : gText_SoundMono;
     case 4: return value == 0 ? gText_ButtonTypeNormal : value == 1 ? gText_ButtonTypeLR : gText_ButtonTypeLEqualsA;
+    case OPT_FPS:
     case OPT_VOXEL: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
     case OPT_VOXEL_BLUR: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
     case OPT_VOXEL_PITCH: return Number(value, 2, STR_CONV_MODE_LEFT_ALIGN);
@@ -2803,12 +2822,12 @@ static void DrawOptions(const ViewState *s)
 {
     static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
     const u8 *names[OPTION_ROWS] = {gText_TextSpeed, gText_BattleScene, gText_BattleStyle, gText_Sound,
-                                    gText_ButtonMode, gText_Frame, Ascii("VOXEL 3D"), Ascii("3D ANGLE"),
-                                    Ascii("3D ZOOM"), Ascii("3D BLUR")};
+                                    gText_ButtonMode, gText_Frame, Ascii("SHOW FPS"), Ascii("VOXEL 3D"),
+                                    Ascii("3D ANGLE"), Ascii("3D ZOOM"), Ascii("3D BLUR")};
     /* The frame stays last, above its preview. */
     static const u8 order[OPTION_ROWS] = {OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND,
-                                          OPT_BUTTON_MODE, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM,
-                                          OPT_VOXEL_BLUR, OPT_FRAME};
+                                          OPT_BUTTON_MODE, OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH,
+                                          OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPT_FRAME};
     /* The 3D rows only mean something with the voxel overworld on; with them
      * there is no room left for the frame's preview, nor for every row: the
      * list then scrolls (OptionsDrag). */
@@ -2818,6 +2837,7 @@ static void DrawOptions(const ViewState *s)
     /* A scrolling list gives up a tile at its right for the bar, which then
      * stands clear of both the rows and the button column. */
     int tiles = maxScroll > 0 ? 29 : 30, shift = (30 - tiles) * 8;
+    int preview;
 
     for (int slot = 0, row = 0; row < OPTION_ROWS; ++row)
     {
@@ -2846,11 +2866,13 @@ static void DrawOptions(const ViewState *s)
         FillRect(CW - 5, 4, 2, track, TXT_LIGHT);
         FillRect(CW - 5, 4 + (track - thumb) * s->optionScroll / maxScroll, 2, thumb, TXT_DARK);
     }
-    /* What the chosen frame looks like. */
+    /* What the chosen frame looks like, below the rows: it scrolls with
+     * them when they do not all fit. */
     if (camera)
         return;
-    DrawWindowFrame(s->options[5], 24, 196, 24, 3);
-    DrawStrCentered(&sNormal, OptionValue(5, s->options[5]), CW / 2, 200, TXT_DARK, TXT_LIGHT);
+    preview = 4 + OptionRowsShown(camera) * pitch + OPTION_PREVIEW_GAP - s->optionScroll;
+    DrawWindowFrame(s->options[5], 24, preview, 24 - (tiles < 30), 3);
+    DrawStrCentered(&sNormal, OptionValue(5, s->options[5]), CW / 2 - shift / 2, preview + 4, TXT_DARK, TXT_LIGHT);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -3859,11 +3881,17 @@ static void ActivateOption(u8 id)
 {
     bool8 back = id >= HIT_OPTION + HIT_OPTION_BACK;
     u8 row = (id - HIT_OPTION) % HIT_OPTION_BACK;
-    static const u8 counts[OPTION_ROWS] = {3, 2, 2, 2, 3, WINDOW_FRAMES_COUNT, 2, 0, 0, 2};
+    static const u8 counts[OPTION_ROWS] = {3, 2, 2, 2, 3, WINDOW_FRAMES_COUNT, 2, 2, 0, 0, 2};
     u8 value, step = back ? counts[row] - 1 : 1;
 
-    if (row >= OPTION_SHOWN)
+    if (!OptionRowShown(row, TRUE))
         return;
+    if (row == OPT_FPS)
+    {
+        CtrSettings_SetShowFps(!CtrSettings_ShowFps());
+        PlaySE(SE_SELECT);
+        return;
+    }
     if (row == OPT_VOXEL)
     {
         CtrSettings_SetVoxel(!CtrSettings_Voxel());
