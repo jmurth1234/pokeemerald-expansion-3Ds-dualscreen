@@ -3753,6 +3753,67 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
 
 #if CTR_VOXEL_ENABLED
 /*
+ * The GPU set to work on the voxel world as soon as it is recorded, not at
+ * FrameEnd. Citro3D stops its GX queue at FrameBegin and runs it only in
+ * FrameEnd, so the GPU - 6.5-9 ms for a town on an Old 3DS - waited for the
+ * whole present, the 2D compose over the world and FrameEnd's cache flush
+ * included, and a frame whose present ran long missed its VBlank with the CPU
+ * idle. Run from the world's split, the queue takes each later split as it
+ * is made.
+ *
+ * What the GPU reads must then be in memory when it is queued rather than at
+ * FrameEnd, which is when citro3d flushes the linear heap: it is flushed at
+ * each split from here on, and the frame ended with GX_CMDLIST_FLUSH so as
+ * not to do it twice there. The queue is the first member of citro3d's
+ * context (citro3d 1.7.1, as ReleaseDappleUnit's poke); under any other
+ * layout the frame is left as it was.
+ */
+extern uint8_t __C3D_Context[];
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
+static bool sGpuEarly;
+
+static void FlushLinear(void)
+{
+    GSPGPU_FlushDataCache((void *)__ctru_linear_heap, __ctru_linear_heap_size);
+}
+
+static bool GpuStartAtSplit(void)
+{
+    static int sUsable = -1;
+    gxCmdQueue_s *queue = (gxCmdQueue_s *)(void *)__C3D_Context;
+
+    if (sUsable < 0)
+    {
+        sUsable = queue->entries != NULL && queue->maxEntries == 32 && queue->callback != NULL
+               && queue->numEntries <= queue->maxEntries && queue->lastEntry <= queue->numEntries;
+        CtrLog_Write(sUsable ? CTR_LOG_VIDEO : CTR_LOG_ERROR,
+                     sUsable ? "GPU: the voxel world is drawn from its split on"
+                             : "GPU: unknown citro3d layout, the GPU starts at FrameEnd");
+    }
+    if (!sUsable)
+    {
+        C3D_FrameSplit(0);
+        return false;
+    }
+    FlushLinear();
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    gxCmdQueueRun(queue);
+    return true;
+}
+
+/* A split once the GPU is running: what it reads, flushed first. */
+static void GpuSplit(void)
+{
+    if (!sGpuEarly)
+    {
+        C3D_FrameSplit(0);
+        return;
+    }
+    FlushLinear();
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+}
+
+/*
  * HD-2D diorama: the tilt-shift of a miniature. The camera always looks north,
  * so the top of the screen is the distance and the bottom the nearest ground;
  * both are blurred, most at the screen's edge and not at all by the focus band
@@ -3908,9 +3969,10 @@ static void RenderVoxelEye(C3D_RenderTarget *target, uint32_t clear, float eyeOf
     C2D_TargetClear(sLogical, clear);
     CtrVoxel_Draw(sLogical, eyeOffset);
 
-    /* Finish the world before sampling it. UI is drawn on top after blur. */
+    /* Finish the world before sampling it. UI is drawn on top after blur.
+     * The GPU draws it from here while the rest is recorded. */
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    C3D_FrameSplit(0);
+    sGpuEarly = GpuStartAtSplit();
 
     /* Back to the 2D compositor, which assumes its own program and no depth. */
     C2D_Prepare();
@@ -3931,7 +3993,7 @@ static void RenderVoxelEye(C3D_RenderTarget *target, uint32_t clear, float eyeOf
     if (!(Reg(0) & 128)) ComposeVoxelOverlay();
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    C3D_FrameSplit(0);
+    GpuSplit();
 }
 
 static void RenderVoxel(uint32_t clear, bool stereo, float slider)
@@ -4929,6 +4991,8 @@ void CtrVideo_HoldTop(bool hold)
 
 void CtrVideo_Present(void)
 {
+    uint64_t entry = svcGetSystemTick();
+
     if (!sMemory.regs) CtrPlatform_Fatal("VIDEO has no logical memory bound");
     /* The PokéNav, the PC's boxes and the bag are drawn on the bottom screen, whether
      * or not the top is held. */
@@ -5020,6 +5084,14 @@ void CtrVideo_Present(void)
         static uint32_t sLastDropLogged;
         static unsigned sDropsQuiet;
         float gap = sLastBegin ? (start - sLastBegin) * 1000.0f / SYSCLOCK_ARM11 : 0.0f;
+        /*
+         * Which of the two missed the VBlank: the CPU, if it came back to
+         * FrameBegin after it (`arrive` past 16.7), or else the GPU, whose
+         * last frame ended `gpuEnd` after that frame began - its FrameEnd,
+         * the present, plus the drawing, which FrameBegin has waited for.
+         */
+        float arrive = sLastBegin ? (waitStart - sLastBegin) * 1000.0f / SYSCLOCK_ARM11 : 0.0f;
+        float gpuEnd = sStats.cpuMs + C3D_GetDrawingTime();
 
         if (gap > 24.0f && sStats.frames > 120 && sDropsLogged < 3000)
         {
@@ -5029,6 +5101,9 @@ void CtrVideo_Present(void)
             {
                 const CtrTiming *timing = CtrPlatform_GetTiming();
                 const CtrVoxelStats *voxel = CtrVoxel_GetStats();
+                float logMs, logAgo;
+
+                CtrLog_LastDrain(&logMs, &logAgo);
 
                 ++sDropsLogged;
                 sLastDropLogged = sStats.frames;
@@ -5036,11 +5111,16 @@ void CtrVideo_Present(void)
                  * are stale, and present= alone is the 2D compositor. */
                 CtrLog_Write(CTR_LOG_VIDEO, "DROP frame=%lu gap=%.1fms (+%u quiet): present=%.1f "
                              "(voxel=%.1f: world=%.1f atlas=%.1f chunks=%.1f sprites=%.1f) "
-                             "game=%.1f audio+vblank=%.1f",
+                             "after=%.1f/%.1f gpu=%.1f game=%.1f audio+vblank=%.1f "
+                             "arrive=%.1f gpuEnd=%.1f%s bottom=%.1f pre=%.1f log=%.1f@%.0f",
                              (unsigned long)sStats.frames, gap, sDropsQuiet, sStats.cpuMs,
                              voxel->updateMs, voxel->worldMs, voxel->atlasMs,
                              voxel->meshMs - voxel->atlasMs, voxel->spritesMs,
-                             timing->gameMs, timing->vblankMs);
+                             voxel->afterMs, voxel->afterBudgetMs, sStats.gpuMs,
+                             timing->gameMs, timing->vblankMs, arrive, gpuEnd,
+                             arrive > 17.0f ? " (cpu late)" : gpuEnd > 15.5f ? " (gpu late)" : "",
+                             timing->bottomMs, (waitStart - entry) * 1000.0f / SYSCLOCK_ARM11,
+                             logMs, logAgo);
                 sDropsQuiet = 0;
             }
         }
@@ -5153,11 +5233,30 @@ void CtrVideo_Present(void)
 #endif
     /* Queued in the frame, behind the drawing into sBottom (BottomTransfer). */
     if (bottom) BottomTransfer();
-    C3D_FrameEnd(0);
+#if CTR_VOXEL_ENABLED
+    /* The GPU already running (GpuStartAtSplit): the heap is flushed before
+     * the last split is queued, where FrameEnd would flush it after. */
+    if (sGpuEarly)
+    {
+        FlushLinear();
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    }
+    else
+#endif
+        C3D_FrameEnd(0);
+#if CTR_VOXEL_ENABLED
+    sGpuEarly = false;
+#endif
     ++sStats.frames;
     ++sFpsFrames;
     sStats.cpuMs = (svcGetSystemTick() - start) * 1000.0 / SYSCLOCK_ARM11;
     sStats.gpuMs = C3D_GetDrawingTime();
+#if CTR_VOXEL_ENABLED
+    /* The GPU draws the frame now: the voxel world builds what comes next in
+     * the time the CPU would otherwise wait for the VBlank. */
+    if (voxel)
+        CtrVoxel_AfterSubmit(start);
+#endif
     uint64_t now = CtrPlatform_Milliseconds();
     if (now - sFpsStart >= 1000)
     {

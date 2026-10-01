@@ -18,9 +18,9 @@ static bool sVoxel = false;
 
 /*
  * The voxel camera: a few degrees either way of its 40 degree pitch, and a
- * few zoom steps (percent of the adapted distance, higher is closer). Only
- * these values are offered: further out, or flatter, the view would reach
- * past the squares the renderer keeps built around the player.
+ * few zoom steps (percent of the adapted distance, higher is closer). The
+ * renderer builds what the camera actually sees at any of them (its frustum,
+ * ctr_voxel.c); further out or flatter would only cost more chunks per frame.
  */
 static const int sPitches[] = {34, 37, 40, 43, 46};
 static const int sZooms[] = {90, 100, 110, 120};

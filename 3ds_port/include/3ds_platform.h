@@ -14,6 +14,8 @@ typedef struct {
     /* Of the last frame: the game up to its VBlank wait, then audio and the
      * VBlank handler. What remains of workMs is the present. */
     float gameMs, vblankMs;
+    /* ... of which the bottom screen, before the game ran (CtrBottom_Frame). */
+    float bottomMs;
     uint32_t slowFrames;
 } CtrTiming;
 
@@ -41,6 +43,7 @@ uint64_t CtrPlatform_Ticks(void);
 float CtrPlatform_TickMs(uint64_t ticks);
 uint64_t CtrPlatform_FrameCount(void);
 const CtrTiming *CtrPlatform_GetTiming(void);
+void CtrPlatform_NoteBottom(float ms);
 void CtrPlatform_Diagnostic(uint32_t gameFrames, uint32_t aPresses, uint32_t checks);
 void CtrPlatform_ReportMemory(const char *stage);
 

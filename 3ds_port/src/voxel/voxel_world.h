@@ -63,9 +63,18 @@ bool VoxelWorld_IsMapAvailable(void);
  */
 void VoxelWorld_BeginBatch(void);
 
+/* The current map, its connections and theirs (see voxel_world.c). */
 void VoxelWorld_BuildInstances(void);
-/* Layouts of the maps one crossing away, none of them on screen now. */
+/* Layouts of the maps just past those placed, none of them on screen now. */
 unsigned VoxelWorld_NextLayouts(unsigned *layouts, unsigned max);
+/*
+ * The asset payloads the renderer reads for the maps on screen and one
+ * crossing away - each layout's border, each tileset's attributes, metatiles,
+ * palettes and tiles - nearest maps first, for reading them ahead of need.
+ * The game only ever loads its current map's tilesets: a connection drawn
+ * from others had them read off the card by the renderer, mid-frame.
+ */
+unsigned VoxelWorld_NearbyPayloads(const void **payloads, unsigned max);
 unsigned VoxelWorld_InstanceCount(void);
 const VoxelMapInstance *VoxelWorld_Instance(unsigned index);
 const VoxelMapInstance *VoxelWorld_GetInstanceAt(int worldX, int worldY);

@@ -39,6 +39,8 @@ bool VoxelBuildings_ReadPage(unsigned page, unsigned first, unsigned count, uint
 
 /* Tallest cell of any model, in tiles: a bound for shadow rays. */
 float VoxelBuildings_MaxTop(void);
+/* The tallest of the map's own models, in tiles over its base (0 for none). */
+float VoxelBuildings_LayoutTop(const VoxelMapInstance *inst);
 
 /*
  * World cell (x, y) of `inst`, when a model covers it: returns true and gives

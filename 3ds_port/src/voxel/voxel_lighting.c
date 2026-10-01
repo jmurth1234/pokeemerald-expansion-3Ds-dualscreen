@@ -46,6 +46,7 @@ typedef struct
 } LightSample;
 static LightSample sSamples[SAMPLE_CACHE_SIZE];
 static uint32_t sGeneration;
+static unsigned sRays;
 
 /*
  * No caster anywhere on screen is taller than this, so a ray that has climbed
@@ -57,6 +58,15 @@ static float sCeiling;
 #define CROWN_TOP 1.62f
 /* The least the ceiling is ever set to: the tallest sign or lamp drawing. */
 #define PROP_TOP 2.0f
+/*
+ * The same bound map by map: a caster stands on one map, over its base, and
+ * is never taller than that map's own tallest model, relief, prop or crown.
+ * A ray can only meet casters of the maps its reach overlaps (RayCeiling), so
+ * on a route of trees it stops at their height rather than at that of the
+ * tallest building in the game. Every answer is the same.
+ */
+static float sMapCeiling[MAX_VOXEL_MAP_INSTANCES];
+static unsigned sMapCeilings;
 
 static int Tile(float n)
 {
@@ -86,6 +96,31 @@ static float CasterCeiling(void)
     return ceiling + highest;
 }
 
+static void MapCeilings(void)
+{
+    sMapCeilings = 0;
+    for (unsigned i = 0; i < VoxelWorld_InstanceCount() && i < MAX_VOXEL_MAP_INSTANCES; ++i)
+    {
+        const VoxelMapInstance *inst = VoxelWorld_Instance(i);
+        float top = PROP_TOP > CROWN_TOP ? PROP_TOP : CROWN_TOP;
+
+        if (inst == NULL)
+            break;
+        /* Indoors nothing casts (Cell). */
+        if (inst->indoor)
+            top = -1000.0f;
+        else
+        {
+            if (VoxelBuildings_LayoutTop(inst) > top)
+                top = VoxelBuildings_LayoutTop(inst);
+            if (VoxelRelief_DrawnTop(inst) > top)
+                top = VoxelRelief_DrawnTop(inst);
+            top += VoxelRelief_Base(inst);
+        }
+        sMapCeiling[sMapCeilings++] = top;
+    }
+}
+
 void VoxelLighting_Reset(void)
 {
     if (++sGeneration == 0)
@@ -95,6 +130,34 @@ void VoxelLighting_Reset(void)
         sGeneration = 1;
     }
     sCeiling = CasterCeiling();
+    MapCeilings();
+}
+
+/*
+ * The height past which nothing a ray from (x, z) can meet stands: over the
+ * maps its reach overlaps (it runs northwest, towards the sun, and a cell's
+ * point may lie a little off the ray's own), never above the global bound.
+ */
+static float RayCeiling(float x, float z)
+{
+    float x0 = x - VOXEL_SUN_DX * VOXEL_LIGHT_REACH - 1.0f, x1 = x + 1.0f;
+    float z0 = z - VOXEL_SUN_DZ * VOXEL_LIGHT_REACH - 1.0f, z1 = z + 1.0f;
+    float ceiling = -1000.0f;
+    unsigned count = VoxelWorld_InstanceCount();
+
+    /* Maps put on screen since the last reset: the global bound. */
+    if (count != sMapCeilings)
+        return sCeiling;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const VoxelMapInstance *inst = VoxelWorld_Instance(i);
+
+        if ((float)inst->originX < x1 && (float)(inst->originX + inst->width) > x0
+         && (float)inst->originY < z1 && (float)(inst->originY + inst->height) > z0
+         && sMapCeiling[i] > ceiling)
+            ceiling = sMapCeiling[i];
+    }
+    return ceiling < sCeiling ? ceiling : sCeiling;
 }
 
 static const LightCell *Cell(int x, int z)
@@ -245,8 +308,11 @@ bool gVoxelLightingStepEveryPoint; /* the reference march, for the tests */
  */
 static bool Lit(float x, float y, float z)
 {
+    float ceiling;
+
     if (sGeneration == 0)
         VoxelLighting_Reset();
+    ceiling = RayCeiling(x, z);
     for (int step = 1; step <= VOXEL_LIGHT_REACH * 4;)
     {
         float rx, ry, rz;
@@ -254,7 +320,7 @@ static bool Lit(float x, float y, float z)
         const LightCell *cell;
 
         RayPoint(x, y, z, step, &rx, &ry, &rz);
-        if (ry >= sCeiling)
+        if (ry >= ceiling)
             break;
         tx = Tile(rx);
         tz = Tile(rz);
@@ -282,7 +348,7 @@ static bool Lit(float x, float y, float z)
             for (; step <= VOXEL_LIGHT_REACH * 4; ++step)
             {
                 RayPoint(x, y, z, step, &rx, &ry, &rz);
-                if (Tile(rx) != tx || Tile(rz) != tz || ry >= sCeiling)
+                if (Tile(rx) != tx || Tile(rz) != tz || ry >= ceiling)
                     break;
             }
         }
@@ -305,10 +371,17 @@ static float Contact(float x, float y, float z)
     return 1.0f - 0.035f * (float)covered;
 }
 
+/*
+ * Bucketed an eighth of a tile across: a relief lattice puts a point every
+ * quarter tile, and on the half-tile buckets this used to have two of them
+ * shared each bucket, one evicting the other, so a slope cell's shared
+ * corners cast their rays again for each quad that met them. The bucket is
+ * only where to look; the match is exact.
+ */
 static const LightSample *CachedSample(float x, float y, float z)
 {
-    unsigned key = ((uint32_t)Tile(x * 2.0f) * 73856093u
-                  ^ (uint32_t)Tile(z * 2.0f) * 19349663u
+    unsigned key = ((uint32_t)Tile(x * 8.0f) * 73856093u
+                  ^ (uint32_t)Tile(z * 8.0f) * 19349663u
                   ^ (uint32_t)Tile(y * 16.0f) * 83492791u) & (SAMPLE_CACHE_SIZE - 1);
     LightSample *sample = &sSamples[key];
 
@@ -317,6 +390,7 @@ static const LightSample *CachedSample(float x, float y, float z)
     if (sample->generation == sGeneration
      && sample->x == x && sample->y == y && sample->z == z)
         return sample;
+    ++sRays;
     sample->lit = Lit(x, y, z);
     sample->contact = Contact(x, y, z);
     sample->x = x;
@@ -324,6 +398,11 @@ static const LightSample *CachedSample(float x, float y, float z)
     sample->z = z;
     sample->generation = sGeneration;
     return sample;
+}
+
+unsigned VoxelLighting_Rays(void)
+{
+    return sRays;
 }
 
 float VoxelLighting_Sample(float x, float y, float z)

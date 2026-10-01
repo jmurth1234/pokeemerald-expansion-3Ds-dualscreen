@@ -56,10 +56,14 @@ uint64_t CtrPlatform_FrameCount(void)
 }
 
 const CtrTiming *CtrPlatform_GetTiming(void) { return &sTiming; }
+void CtrPlatform_NoteBottom(float ms) { sTiming.bottomMs = ms; }
 
 bool CtrPlatform_Init(void)
 {
     gfxInitDefault();
+    /* A New 3DS runs the application core at 804 MHz with its L2 cache when
+     * asked; an Old 3DS ignores this. */
+    osSetSpeedupEnable(true);
     CtrLog_Init();
     sInitialized = true;
     atexit(CtrPlatform_Shutdown);
@@ -157,6 +161,10 @@ void CtrPlatform_EndFrame(void)
     if (sHooks.vblank)
         sHooks.vblank();
     uint64_t presentStart = svcGetSystemTick();
+    /* Before the present, which reads them: its DROP line is about the frame
+     * that just ran, and the voxel builds after FrameEnd estimate the next. */
+    sTiming.gameMs = (endStart - sWorkStart) * 1000.0f / SYSCLOCK_ARM11;
+    sTiming.vblankMs = (presentStart - endStart) * 1000.0f / SYSCLOCK_ARM11;
     /* FrameEnd(0) also flushes the console's linear LCD buffer. Calling
      * gfxFlushBuffers here would flush BOTH screens again, not just bottom. */
     if (sHooks.videoPresent)
@@ -169,8 +177,6 @@ void CtrPlatform_EndFrame(void)
     sTiming.frameMs = sLastTick ? (tick - sLastTick) * 1000.0 / SYSCLOCK_ARM11 : 0;
     sLastTick = tick;
     sTiming.workMs = (tick - sWorkStart) * 1000.0 / SYSCLOCK_ARM11;
-    sTiming.gameMs = (endStart - sWorkStart) * 1000.0f / SYSCLOCK_ARM11;
-    sTiming.vblankMs = (presentStart - endStart) * 1000.0f / SYSCLOCK_ARM11;
     sTiming.workMs -= CtrVideo_GetStats()->waitMs;
     if (sTiming.workMs < 0) sTiming.workMs = 0;
     if (sTiming.workMs > sTiming.peakWorkMs) sTiming.peakWorkMs = sTiming.workMs;

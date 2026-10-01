@@ -4205,6 +4205,84 @@ void CtrBottom_KeepWorld(void)
     CtrVideo_HoldTop(TRUE);
 }
 
+/*
+ * Walking moves the player's mark on the MAP screen, and nothing else on it:
+ * every move used to redraw the whole screen - the column's buttons and
+ * labels, the name box - 5-15 ms on an Old 3DS, in the frame the move fell
+ * in. Now the mark's old square is restored from the map's cache, the mark
+ * drawn on its new one, and those two squares sent to the screen.
+ */
+static bool8 MapCursorOnlyMoved(const ViewState *now, const ViewState *shown)
+{
+    ViewState moved;
+
+    if (now->screen != SCR_MAP || now->mode == MODE_OFF || now->mode >= MODE_BATTLE_INFO
+     || now->inBattle || now->bagView == BAG_VIEW_WHOLE
+     || now->mapsec == MAPSEC_NONE || shown->mapsec == MAPSEC_NONE
+     || (now->cursorX == shown->cursorX && now->cursorY == shown->cursorY))
+        return FALSE;
+    moved = *now;
+    moved.cursorX = shown->cursorX;
+    moved.cursorY = shown->cursorY;
+    return memcmp(&moved, shown, sizeof(moved)) == 0;
+}
+
+/* The mark's 2x2 tiles at a cursor cell, clipped to the screen. */
+static void MarkRect(u8 cx, u8 cy, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = MAP_ORIGIN_X + cx * 8 - 4;
+    *y0 = MAP_ORIGIN_Y + cy * 8 - 4;
+    *x1 = *x0 + 16;
+    *y1 = *y0 + 16;
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 > W) *x1 = W;
+    if (*y1 > H) *y1 = H;
+}
+
+static bool8 RectsMeet(int ax0, int ay0, int ax1, int ay1, int bx0, int by0, int bx1, int by1)
+{
+    return ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1;
+}
+
+/* False, with nothing touched, where a whole redraw is needed after all. */
+static bool8 MoveMapCursor(const ViewState *from, const ViewState *to)
+{
+    const u8 *icon = sRes.playerIcon[to->gender];
+    int r[2][4];
+
+    if (sCache[CACHE_MAP] == NULL || icon == NULL || CtrVideo_BottomInUse() || CtrVideo_BottomWhole())
+        return FALSE;
+    MarkRect(from->cursorX, from->cursorY, &r[0][0], &r[0][1], &r[0][2], &r[0][3]);
+    MarkRect(to->cursorX, to->cursorY, &r[1][0], &r[1][1], &r[1][2], &r[1][3]);
+    /* An animated icon keeps what lies under it (DrawAnimIcons): over the
+     * mark it would put an old picture back. */
+    for (int i = 0; i < sAnimCount; ++i)
+    {
+        int x0, y0, x1, y1;
+
+        IconRect(&sAnim[i], &x0, &y0, &x1, &y1);
+        for (int k = 0; k < 2; ++k)
+            if (RectsMeet(x0, y0, x1, y1, r[k][0], r[k][1], r[k][2], r[k][3]))
+                return FALSE;
+    }
+    /* The old square as the map cache has it (the canvas is its layout). */
+    for (int x = r[0][0]; x < r[0][2]; ++x)
+        memcpy(sCanvas + x * H + (H - r[0][3]), sCache[CACHE_MAP] + x * H + (H - r[0][3]),
+               (size_t)(r[0][3] - r[0][1]) * sizeof(u16));
+    sDst = sCanvas;
+    sOX = 0;
+    DrawSprite(icon, 2, 2, MAP_ORIGIN_X + to->cursorX * 8 - 4, MAP_ORIGIN_Y + to->cursorY * 8 - 4,
+               sRes.playerIconPal[to->gender].c);
+    /* A picked cell's cursor is drawn over the mark, as Render does. */
+    if (to->pickMapsec != MAPSEC_NONE && sRes.cursorTiles)
+        DrawSprite(sRes.cursorTiles, 2, 2, MAP_ORIGIN_X + to->pickX * 8 - 4,
+                   MAP_ORIGIN_Y + to->pickY * 8 - 4, sRes.cursorPal.c);
+    for (int k = 0; k < 2; ++k)
+        CtrBottom_BlitRect(sCanvas, r[k][0], r[k][1], r[k][2], r[k][3]);
+    return TRUE;
+}
+
 void CtrBottom_Frame(void)
 {
     static u32 frames;
@@ -4261,6 +4339,11 @@ void CtrBottom_Frame(void)
         sForceRedraw = TRUE;
     }
 
+    if (!sForceRedraw && MapCursorOnlyMoved(&sState, &sShown) && MoveMapCursor(&sShown, &sState))
+    {
+        sShown = sState;
+        return;
+    }
     if (sForceRedraw || memcmp(&sState, &sShown, sizeof(sState)) != 0)
     {
         uint64_t start = CtrPlatform_Ticks();

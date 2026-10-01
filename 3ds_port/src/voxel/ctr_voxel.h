@@ -13,6 +13,14 @@ bool CtrVoxel_IsAvailable(void);
 /* Called after C3D_FrameBegin(), with the previous frame's GPU work finished:
  * everything it writes goes to linear memory that C3D_FrameEnd() then flushes. */
 bool CtrVoxel_Update(void);
+/*
+ * Called after C3D_FrameEnd() of a frame the voxel world was drawn in, with
+ * the tick C3D_FrameBegin() returned on: builds chunks and atlases while the
+ * GPU draws that frame, in what is left of it before the next VBlank once the
+ * game and the audio have had theirs. Nothing it does touches the GPU; what it
+ * finishes is uploaded by the next Update.
+ */
+void CtrVoxel_AfterSubmit(uint64_t frameBeginTick);
 /* Game VRAM animation transfer: tile numbers are relative to BG_VRAM. */
 void CtrVoxel_NotifyTilesetAnimWrite(unsigned firstTile, unsigned tileCount);
 
@@ -59,6 +67,9 @@ typedef struct
      * reset that follows a change to them (region layouts come off RomFS
      * there), the atlas job, and the billboards. */
     float worldMs, atlasMs, spritesMs;
+    /* Spent building after the last FrameEnd (CtrVoxel_AfterSubmit), and the
+     * budget it had. */
+    float afterMs, afterBudgetMs;
     /* Chunks built this frame, and still waiting for a later one. */
     unsigned frameBuilds, pendingBuilds;
     /* Bytes still free in the two pools this competes for. VRAM is here

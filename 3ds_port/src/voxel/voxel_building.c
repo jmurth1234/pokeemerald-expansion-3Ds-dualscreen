@@ -322,6 +322,39 @@ static const BuildingPlacement *LayoutPlacements(const VoxelMapInstance *inst, u
     return sLastCount ? &sPlacements[sLastFirst] : NULL;
 }
 
+/* A few layouts' answers kept: the lighting asks once per map on screen at
+ * every reset of its caches. */
+#define LAYOUT_TOPS 8u
+
+float VoxelBuildings_LayoutTop(const VoxelMapInstance *inst)
+{
+    static int sTopLayout[LAYOUT_TOPS]; /* layout + 1; 0 is empty */
+    static float sTop[LAYOUT_TOPS];
+    static unsigned sTopNext;
+    unsigned count;
+    const BuildingPlacement *p;
+    float top = 0.0f;
+
+    if (inst == NULL || sModels == NULL)
+        return 0.0f;
+    for (unsigned i = 0; i < LAYOUT_TOPS; ++i)
+        if (sTopLayout[i] == inst->layoutId + 1)
+            return sTop[i];
+    p = LayoutPlacements(inst, &count);
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
+
+        for (unsigned k = 0; k < (unsigned)m->w * m->h; ++k)
+            if (sHeights[m->heights + k] != 0xFF && sHeights[m->heights + k] / 16.0f > top)
+                top = sHeights[m->heights + k] / 16.0f;
+    }
+    sTopLayout[sTopNext] = inst->layoutId + 1;
+    sTop[sTopNext] = top;
+    sTopNext = (sTopNext + 1) % LAYOUT_TOPS;
+    return top;
+}
+
 int VoxelBuildings_PageOf(const VoxelMapInstance *inst)
 {
     unsigned count;

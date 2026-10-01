@@ -237,8 +237,95 @@ static void FillInstance(VoxelMapInstance *inst, const struct MapHeader *header,
                 || header->mapType == MAP_TYPE_SECRET_BASE;
 }
 
+/*
+ * Where the map across `conn` sits, from the map it leaves (at `from`'s
+ * origin, of `from`'s size). False for a connection that is not a side.
+ */
+static bool ConnectionOrigin(const struct MapConnection *conn, const struct MapHeader *neighbour,
+                             const VoxelMapInstance *from, int *originX, int *originY)
+{
+    switch (conn->direction)
+    {
+    case CONNECTION_NORTH:
+        *originX = from->originX + conn->offset;
+        *originY = from->originY - neighbour->mapLayout->height;
+        return true;
+    case CONNECTION_SOUTH:
+        *originX = from->originX + conn->offset;
+        *originY = from->originY + from->height;
+        return true;
+    case CONNECTION_WEST:
+        *originX = from->originX - neighbour->mapLayout->width;
+        *originY = from->originY + conn->offset;
+        return true;
+    case CONNECTION_EAST:
+        *originX = from->originX + from->width;
+        *originY = from->originY + conn->offset;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * The map across each side connection of `from`. The current map's own are
+ * taken as they are; one further away (`far`) only where it is not a map
+ * already placed and covers none of their ground - the connections of
+ * Hoenn's maps do not always agree with one another's.
+ */
+static void AddConnections(const VoxelMapInstance *from, bool far)
+{
+    const struct MapHeader *header = from->header;
+    const struct MapConnection *conn;
+
+    if (header == NULL || header->connections == NULL)
+        return;
+    conn = header->connections->connections;
+    for (s32 i = 0; i < header->connections->count; ++i, ++conn)
+    {
+        const struct MapHeader *neighbour;
+        int originX, originY;
+        bool clash = false;
+
+        if (sInstanceCount >= MAX_VOXEL_MAP_INSTANCES)
+            return;
+        if (conn->direction == CONNECTION_DIVE || conn->direction == CONNECTION_EMERGE)
+            continue;
+        neighbour = GetMapHeaderFromConnection(conn);
+        if (neighbour == NULL || neighbour->mapLayout == NULL
+         || !ConnectionOrigin(conn, neighbour, from, &originX, &originY))
+            continue;
+        for (unsigned k = 0; far && k < sInstanceCount && !clash; ++k)
+        {
+            const VoxelMapInstance *placed = &sInstances[k];
+
+            clash = (placed->mapGroup == conn->mapGroup && placed->mapNum == conn->mapNum)
+                 || (originX < placed->originX + placed->width
+                     && originX + neighbour->mapLayout->width > placed->originX
+                     && originY < placed->originY + placed->height
+                     && originY + neighbour->mapLayout->height > placed->originY);
+        }
+        if (!clash)
+            FillInstance(&sInstances[sInstanceCount++], neighbour,
+                         conn->mapGroup, conn->mapNum, originX, originY);
+    }
+}
+
+/*
+ * The current map, its connections, and theirs. The game loads only the first
+ * two, which is all its 15 x 10 tiles of screen can reach; the 3D view sees
+ * several times as far, and a map one crossing further away was missing from
+ * it - the belt of border trees stood in its place, and on the crossing that
+ * made it a neighbour it had to be built from nothing while the view showed
+ * black where it lies. Placed from the start, it is built ahead of time like
+ * any map in the ring, and the crossing only moves the coordinates. The set
+ * depends on the current map alone, never on the view: a change to it is a
+ * new epoch, and every chunk in view verified again.
+ */
 void VoxelWorld_BuildInstances(void)
 {
+    unsigned near;
+
     sInstanceCount = 0;
     if (gMapHeader.mapLayout == NULL)
         return;
@@ -248,50 +335,10 @@ void VoxelWorld_BuildInstances(void)
                  gSaveBlock1Ptr->location.mapGroup,
                  gSaveBlock1Ptr->location.mapNum, 0, 0);
     sInstanceCount = 1;
-
-    if (gMapHeader.connections != NULL)
-    {
-        const struct MapConnection *conn = gMapHeader.connections->connections;
-        s32 count = gMapHeader.connections->count;
-
-        for (s32 i = 0; i < count; ++i, ++conn)
-        {
-            const struct MapHeader *neighbour;
-            int originX = 0, originY = 0;
-
-            if (sInstanceCount >= MAX_VOXEL_MAP_INSTANCES)
-                break;
-            if (conn->direction == CONNECTION_DIVE || conn->direction == CONNECTION_EMERGE)
-                continue;
-            neighbour = GetMapHeaderFromConnection(conn);
-            if (neighbour == NULL || neighbour->mapLayout == NULL)
-                continue;
-
-            switch (conn->direction)
-            {
-            case CONNECTION_NORTH:
-                originX = conn->offset;
-                originY = -neighbour->mapLayout->height;
-                break;
-            case CONNECTION_SOUTH:
-                originX = conn->offset;
-                originY = gMapHeader.mapLayout->height;
-                break;
-            case CONNECTION_WEST:
-                originX = -neighbour->mapLayout->width;
-                originY = conn->offset;
-                break;
-            case CONNECTION_EAST:
-                originX = gMapHeader.mapLayout->width;
-                originY = conn->offset;
-                break;
-            default:
-                continue;
-            }
-            FillInstance(&sInstances[sInstanceCount++], neighbour,
-                         conn->mapGroup, conn->mapNum, originX, originY);
-        }
-    }
+    AddConnections(&sInstances[0], false);
+    near = sInstanceCount;
+    for (unsigned i = 1; i < near; ++i)
+        AddConnections(&sInstances[i], true);
 }
 
 unsigned VoxelWorld_InstanceCount(void)
@@ -877,8 +924,8 @@ int VoxelWorld_BorderMetatile(int worldX, int worldY)
 }
 
 /*
- * Layouts of the maps one crossing away: the connections of each connection.
- * They become maps on screen the moment the player crosses, and whatever is
+ * Layouts of the maps just past those placed: the connections of each
+ * connection. They are placed the moment the player crosses, and whatever is
  * read for them then is read in the middle of a frame.
  */
 unsigned VoxelWorld_NextLayouts(unsigned *layouts, unsigned max)
@@ -909,6 +956,99 @@ unsigned VoxelWorld_NextLayouts(unsigned *layouts, unsigned max)
                 known = (unsigned)sInstances[k].layoutId == next->mapLayoutId;
             if (!known)
                 layouts[count++] = next->mapLayoutId;
+        }
+    }
+    return count;
+}
+
+static unsigned AddPayload(const void **payloads, unsigned count, unsigned max, const void *ptr)
+{
+    if (ptr == NULL || count >= max)
+        return count;
+    for (unsigned i = 0; i < count; ++i)
+        if (payloads[i] == ptr)
+            return count;
+    payloads[count] = ptr;
+    return count + 1;
+}
+
+static unsigned AddMapPayloads(const void **payloads, unsigned count, unsigned max,
+                               const struct MapLayout *layout)
+{
+    const struct Tileset *tilesets[2];
+
+    if (layout == NULL)
+        return count;
+    tilesets[0] = layout->primaryTileset;
+    tilesets[1] = layout->secondaryTileset;
+    count = AddPayload(payloads, count, max, layout->border);
+    for (unsigned t = 0; t < 2; ++t)
+    {
+        if (tilesets[t] == NULL)
+            continue;
+        count = AddPayload(payloads, count, max, tilesets[t]->metatileAttributes);
+        count = AddPayload(payloads, count, max, tilesets[t]->metatiles);
+        count = AddPayload(payloads, count, max, tilesets[t]->palettes);
+        count = AddPayload(payloads, count, max, tilesets[t]->tiles);
+    }
+    return count;
+}
+
+/*
+ * The pictures of a map's people. The game spawns an object event as the
+ * camera comes within reach of it and reads its picture then: in a town full
+ * of them, walking was one read off the card after another, each a frame the
+ * CPU came back to too late. The first frame's picture holds them all.
+ */
+static unsigned AddObjectPayloads(const void **payloads, unsigned count, unsigned max,
+                                  const struct MapHeader *header)
+{
+    const struct MapEvents *events = header != NULL ? header->events : NULL;
+
+    if (events == NULL || events->objectEvents == NULL)
+        return count;
+    for (unsigned i = 0; i < events->objectEventCount && count < max; ++i)
+    {
+        const struct ObjectEventGraphicsInfo *info =
+            GetObjectEventGraphicsInfo(events->objectEvents[i].graphicsId);
+
+        if (info != NULL && info->images != NULL)
+            count = AddPayload(payloads, count, max, info->images[0].data);
+    }
+    return count;
+}
+
+unsigned VoxelWorld_NearbyPayloads(const void **payloads, unsigned max)
+{
+    unsigned count = 0;
+
+    /* The current map's, then its people, the maps around it, and theirs. */
+    if (sInstanceCount > 0)
+    {
+        count = AddMapPayloads(payloads, count, max, sInstances[0].layout);
+        count = AddObjectPayloads(payloads, count, max, sInstances[0].header);
+    }
+    for (unsigned i = 1; i < sInstanceCount; ++i)
+        count = AddMapPayloads(payloads, count, max, sInstances[i].layout);
+    for (unsigned i = 1; i < sInstanceCount; ++i)
+        count = AddObjectPayloads(payloads, count, max, sInstances[i].header);
+    for (unsigned i = 1; i < sInstanceCount; ++i)
+    {
+        const struct MapHeader *header = sInstances[i].header;
+        const struct MapConnection *conn;
+
+        if (header == NULL || header->connections == NULL)
+            continue;
+        conn = header->connections->connections;
+        for (s32 c = 0; c < header->connections->count; ++c, ++conn)
+        {
+            const struct MapHeader *next;
+
+            if (conn->direction == CONNECTION_DIVE || conn->direction == CONNECTION_EMERGE)
+                continue;
+            next = GetMapHeaderFromConnection(conn);
+            if (next != NULL)
+                count = AddMapPayloads(payloads, count, max, next->mapLayout);
         }
     }
     return count;

@@ -510,7 +510,12 @@ void CtrGame_WaitFrame(void)
     }
     CtrPlatform_Diagnostic(sFrames, 0, 0);
     /* Touch was just scanned and the game has not read its keys yet. */
-    CtrBottom_Frame();
+    {
+        uint64_t start = CtrPlatform_Ticks();
+
+        CtrBottom_Frame();
+        CtrPlatform_NoteBottom(CtrPlatform_TickMs(CtrPlatform_Ticks() - start));
+    }
 
     /* Which screen the game is on, and what the resource layer is doing for it.
      * A callback change is the only unambiguous marker of progress in the log. */

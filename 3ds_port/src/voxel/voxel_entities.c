@@ -58,6 +58,9 @@ typedef struct
      * ground (VisibleRows). Measured once per picture table (StandingFootPad). */
     int footPad;
     const struct SpriteFrameImage *footPadImages;
+    /* Measured on the standing pose itself; else, until that picture is in
+     * memory, on the frame the object first showed (StandingFootPad). */
+    bool footPadExact;
 } VoxelSpriteSlot;
 
 static VoxelSpriteSlot sSlots[VOXEL_SPRITE_SLOTS];
@@ -256,29 +259,56 @@ static void DecodeSlot(VoxelSpriteSlot *slot, unsigned index, uint16_t *atlas)
  * meets its shadow; every other frame keeps its offset from it, as on the
  * GBA (VisibleRows).
  */
-static int StandingFootPad(const struct ObjectEventGraphicsInfo *info)
+/* Object event pictures are 4bpp, tiles in rows (1D mapping). Bottom up,
+ * the first row with an opaque pixel is the feet. */
+static int FootPadOf(const u8 *tiles, int width, int height)
 {
-    const struct SpriteFrameImage *frame = &info->images[0];
-    int tilesX = info->width / 8, tilesY = info->height / 8;
-    u32 size = Port_GetSpriteFrameSize(frame->data, frame->size);
-    const u8 *tiles = Port_ResolveSpriteFramePointer(frame->data, size, frame->offset);
+    int tilesX = width / 8;
 
-    if (tiles == NULL || tilesX <= 0 || tilesY <= 0
-     || size < (u32)(tilesX * tilesY) * TILE_SIZE_4BPP)
-        return 0;
-    /* Object event pictures are 4bpp, tiles in rows (1D mapping). Bottom up,
-     * the first row with an opaque pixel is the feet. */
-    for (int y = info->height - 1; y >= 0; --y)
+    for (int y = height - 1; y >= 0; --y)
     {
         for (int tx = 0; tx < tilesX; ++tx)
         {
             const u8 *row = tiles + (u32)((y / 8) * tilesX + tx) * TILE_SIZE_4BPP + (y % 8) * 4;
 
             if (row[0] | row[1] | row[2] | row[3])
-                return info->height - 1 - y;
+                return height - 1 - y;
         }
     }
     return 0;
+}
+
+/*
+ * The standing pose is read only if it is in memory already. Its picture is
+ * an asset of its own, and resolving one that is not loaded reads it off the
+ * card - on the render thread, in the middle of the frame: every object that
+ * came into view with a picture the game had not shown yet cost 10-20 ms on
+ * hardware. Until it is, the pad is measured once on the frame the object
+ * first showed (in VRAM already, the slot's own copy): the standing pose,
+ * nearly always, and at worst a row off for as long as it takes the game to
+ * load the picture - it is looked for again every frame.
+ */
+static int StandingFootPad(const struct ObjectEventGraphicsInfo *info,
+                           const VoxelSpriteSlot *slot, bool *exact)
+{
+    const struct SpriteFrameImage *frame = &info->images[0];
+    int tilesX = info->width / 8, tilesY = info->height / 8;
+    u32 size = Port_GetSpriteFrameSize(frame->data, frame->size);
+    const u8 *tiles = Port_PeekSpriteFramePointer(frame->data, size, frame->offset);
+
+    *exact = tiles != NULL;
+    if (tilesX <= 0 || tilesY <= 0)
+        return 0;
+    if (tiles == NULL)
+    {
+        if (slot->color256 || slot->width != info->width || slot->height != info->height
+         || slot->sourceBytes < (u32)(tilesX * tilesY) * TILE_SIZE_4BPP)
+            return 0;
+        return FootPadOf(slot->source, info->width, info->height);
+    }
+    if (size < (u32)(tilesX * tilesY) * TILE_SIZE_4BPP)
+        return 0;
+    return FootPadOf(tiles, info->width, info->height);
 }
 
 /*
@@ -780,10 +810,19 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
         {
             const struct ObjectEventGraphicsInfo *info = GetObjectEventGraphicsInfo(obj->graphicsId);
 
-            if (sSlots[i].footPadImages != info->images)
+            bool changed = sSlots[i].footPadImages != info->images;
+
+            if (changed || !sSlots[i].footPadExact)
             {
+                bool exact = true;
+                int pad = info->images != NULL ? StandingFootPad(info, &sSlots[i], &exact) : 0;
+
                 sSlots[i].footPadImages = info->images;
-                sSlots[i].footPad = info->images != NULL ? StandingFootPad(info) : 0;
+                /* A provisional pad is taken once, never from each frame of a
+                 * walk: that would undo its bob. */
+                if (changed || exact)
+                    sSlots[i].footPad = pad;
+                sSlots[i].footPadExact = exact;
             }
         }
 #if CTR_VOXEL_LIGHTING

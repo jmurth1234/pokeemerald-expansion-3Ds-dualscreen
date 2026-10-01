@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "3ds_assets.h"
 #include "3ds_log.h"
 #include "3ds_platform.h"
 #include "3ds_video.h"
@@ -200,6 +201,8 @@ static bool sAtlasUploadPending;
  * memory; inactive atlases are rebased only when they become current again. */
 static uint16_t *sAnimShadow;
 static VoxelAtlasSlot *sAnimAtlas;
+/* The atlas the GPU is copying back into the shadow (QueueAnimReadback). */
+static VoxelAtlasSlot *sAnimReadback;
 static uint8_t sAnimDirty[128];
 static bool sAnimPending, sAnimEverDirty;
 
@@ -224,6 +227,16 @@ static uint32_t sFrame;
  */
 static const void *sFailedPrimary, *sFailedSecondary;
 static bool sHasFailed;
+
+static float MsSince(uint64_t start)
+{
+    return (float)((svcGetSystemTick() - start) * 1000.0 / SYSCLOCK_ARM11);
+}
+
+static float TicksMs(uint64_t ticks)
+{
+    return (float)(ticks * 1000.0 / SYSCLOCK_ARM11);
+}
 
 /* ── Packing ────────────────────────────────────────────────────────────── */
 
@@ -300,6 +313,184 @@ static void ReportPackErrors(const char *what, int a, int b, int c, int d)
     sPackAxis = 0;
 }
 
+/*
+ * The same packing without a floating-point comparison per value. On the Old
+ * 3DS's VFP every comparison stalls the pipeline to hand its flags over, and
+ * Quantise makes up to four per value: a dense chunk took 13 ms to pack on
+ * hardware. Here the conversion itself rounds towards minus infinity - the
+ * FPSCR's rounding mode, set for the loop - which is floor() in one
+ * instruction, and the range is checked on the integer it gives. What comes
+ * before the conversion is exact in any rounding mode (a float times a power
+ * of two, plus a half, far inside 24 bits), so every result is Quantise's;
+ * PackSelfTest checks that on the console itself before it is used.
+ *
+ * It also measures the chunk on the packed integers (min/max of each axis, in
+ * 1/512 tile): what the GPU draws, and no float comparison either.
+ */
+typedef struct
+{
+    int32_t lo[3], hi[3];
+} PackBounds;
+
+static void GrowBounds(PackBounds *bounds, const VoxelGpuVertex *out)
+{
+    int32_t q[3] = {out->x, out->y, out->z};
+
+    for (int a = 0; a < 3; ++a)
+    {
+        if (q[a] < bounds->lo[a]) bounds->lo[a] = q[a];
+        if (q[a] > bounds->hi[a]) bounds->hi[a] = q[a];
+    }
+}
+
+#if defined(__arm__)
+#define VOXEL_HAVE_FAST_PACK 1
+static bool sFastPack;
+
+static inline uint32_t FpscrFloor(void)
+{
+    uint32_t old, mode;
+
+    __asm__ volatile ("vmrs %0, fpscr" : "=r"(old));
+    mode = (old & ~(3u << 22)) | (2u << 22); /* RMode: towards minus infinity */
+    __asm__ volatile ("vmsr fpscr, %0" : : "r"(mode));
+    return old;
+}
+
+static inline void FpscrRestore(uint32_t old)
+{
+    __asm__ volatile ("vmsr fpscr, %0" : : "r"(old));
+}
+
+static inline int32_t ConvertFloor(float f)
+{
+    float r;
+    int32_t i;
+
+    __asm__ volatile ("vcvtr.s32.f32 %0, %1" : "=t"(r) : "t"(f));
+    __asm__ volatile ("vmov %0, %1" : "=r"(i) : "t"(r));
+    return i;
+}
+
+static inline int16_t Clamp16(int32_t i, float value, char axis)
+{
+    if (i > 32767 || i < -32768)
+    {
+        ++sPackErrors;
+        if (fabsf(value) > fabsf(sPackWorst))
+            sPackWorst = value;
+        if (sPackAxis == 0)
+            sPackAxis = axis;
+        return i > 0 ? 32767 : -32768;
+    }
+    return (int16_t)i;
+}
+
+/* Never inlined: nothing of the caller's arithmetic may land between the two
+ * changes of rounding mode. */
+static __attribute__((noinline)) void PackFloor(const VoxelVertex *src, unsigned count,
+                                                VoxelGpuVertex *dst, PackBounds *bounds)
+{
+    uint32_t fpscr = FpscrFloor();
+
+    for (unsigned i = 0; i < count; ++i)
+    {
+        VoxelVertex v;
+        VoxelGpuVertex out;
+
+        /* By memcpy both ways: the two formats may share the buffer. */
+        memcpy(&v, &src[i], sizeof(v));
+        out.u = v.u;
+        out.v = v.v;
+        out.x = Clamp16(ConvertFloor(v.x * VOXEL_POS_SCALE + 0.5f), v.x, 'p');
+        out.y = Clamp16(ConvertFloor(v.y * VOXEL_POS_SCALE + 0.5f), v.y, 'p');
+        out.z = Clamp16(ConvertFloor(v.z * VOXEL_POS_SCALE + 0.5f), v.z, 'p');
+        out.shade = Clamp16(ConvertFloor(v.shade * VOXEL_SHADE_SCALE + 0.5f), v.shade, 's');
+        memcpy(&dst[i], &out, sizeof(out));
+        if (bounds != NULL)
+            GrowBounds(bounds, &out);
+    }
+    FpscrRestore(fpscr);
+}
+
+/*
+ * Quantise against PackFloor on the console: exact halves and the values
+ * next to them, both signs, the range's ends and past them, and a spread.
+ * Any disagreement keeps the old packing.
+ */
+static void PackSelfTest(void)
+{
+    unsigned mismatches = 0, tested = 0;
+    uint32_t seed = 12345u;
+
+    sFastPack = false;
+    for (unsigned i = 0; i < 6144; ++i)
+    {
+        VoxelVertex v;
+        VoxelGpuVertex a, b;
+        float values[4];
+
+        for (int k = 0; k < 4; ++k)
+        {
+            int32_t step;
+
+            seed = seed * 1664525u + 1013904223u;
+            step = (int32_t)(seed >> 8) % 80000 - 40000; /* past both ends */
+            if (i % 3 == 0)
+                values[k] = ((float)step + 0.5f) / VOXEL_POS_SCALE;  /* a half */
+            else if (i % 3 == 1)
+                values[k] = nextafterf(((float)step + 0.5f) / VOXEL_POS_SCALE,
+                                       (seed & 1) ? 1000.0f : -1000.0f);
+            else
+                values[k] = (float)(int32_t)seed / 2147483648.0f * 70.0f;
+        }
+        v.x = values[0];
+        v.y = values[1];
+        v.z = values[2];
+        /* The shade's scale is 32 times the position's. */
+        v.shade = values[3] / 32.0f;
+        v.u = values[1];
+        v.v = values[2];
+        Pack(&v, 1, &a);
+        PackFloor(&v, 1, &b, NULL);
+        ++tested;
+        if (memcmp(&a, &b, sizeof(a)) != 0)
+            ++mismatches;
+    }
+    sPackErrors = 0;
+    sPackWorst = 0.0f;
+    sPackAxis = 0;
+    sFastPack = mismatches == 0;
+    CtrLog_Write(mismatches == 0 ? CTR_LOG_VIDEO : CTR_LOG_ERROR,
+                 "VOXEL pack self-test: %u of %u vertices differ; %s packing", mismatches, tested,
+                 sFastPack ? "fast" : "old");
+}
+#endif
+
+/* Packs [first, first + count) of the scratch in place, growing `bounds`. */
+static void PackRange(VoxelVertex *vertices, unsigned first, unsigned count, PackBounds *bounds)
+{
+    VoxelGpuVertex *packed = (VoxelGpuVertex *)(void *)vertices;
+
+#ifdef VOXEL_HAVE_FAST_PACK
+    if (sFastPack)
+    {
+        PackFloor(vertices + first, count, packed + first, bounds);
+        return;
+    }
+#endif
+    for (unsigned i = first; i < first + count; ++i)
+    {
+        VoxelVertex v;
+        VoxelGpuVertex out;
+
+        memcpy(&v, &vertices[i], sizeof(v));
+        Pack(&v, 1, &out);
+        memcpy(&packed[i], &out, sizeof(out));
+        GrowBounds(bounds, &out);
+    }
+}
+
 /* ── Static chunks ───────────────────────────────────────────────────────
  *
  * The map is cut into squares of VOXEL_CHUNK tiles and each square is meshed
@@ -335,7 +526,13 @@ typedef struct
 {
     bool used, border;
     int mapGroup, mapNum; /* a border chunk carries the current map's */
-    int cx, cy;           /* chunk coordinates, local to the map */
+    int cx, cy;           /* chunk coordinates, local to the map or the belt's grid */
+    uint32_t beltGrid;    /* a border chunk's grid (sBeltGrid) */
+    /* A border chunk's tiles outside every map when built, and whether that
+     * still held in epoch `openEpoch` (BeltCoverSame). */
+    unsigned openTiles;
+    uint32_t openEpoch;
+    bool openSame;
     uint32_t hash, epoch;
     /* Found stale in epoch `staleEpoch` with signature `staleHash`: not
      * hashed again every frame it waits for its rebuild. */
@@ -352,6 +549,9 @@ typedef struct
     /* Tiles its geometry covers, relative to the chunk corner: more than the
      * chunk's own square wherever a building or a crown reaches past it. */
     int gx0, gz0, gx1, gz1;
+    /* ... and the heights it spans, in the world: with the square above, the
+     * box the view is tested against (SiteVisible). */
+    float gy0, gy1;
     float buildMs;          /* what its last build cost */
     /* Built with ids its atlas lacked, against this extension of it. */
     bool uncovered;
@@ -359,6 +559,16 @@ typedef struct
 } VoxelChunk;
 
 static VoxelChunk sChunks[VOXEL_CHUNK_SLOTS];
+/*
+ * The belt's grid: where its square 0,0 lies in the world, and which grid it
+ * is. A crossing moves the world under the player, and the grid with it, so
+ * the belt squares on screen are the same squares after it, whichever map is
+ * current; cut on the new map's origin instead, every one of them was a new
+ * square at once and the edges of the view went black until the belt was
+ * built again. A cut starts a new grid.
+ */
+static int sBeltOriginX, sBeltOriginY;
+static uint32_t sBeltGrid;
 static void *sChunkBlock;
 static VoxelArena sChunkArena;
 /* One more than the slots: a rebuild takes its new block before it frees the
@@ -378,22 +588,165 @@ static VoxelChunkDraw sDraws[VOXEL_DRAW_MAX];
 static unsigned sDrawCount;
 
 /*
- * How far the camera reaches, in tiles, at a 40-degree pitch and a 35-degree
- * field of view. It looks north, so it sees more than twice as far ahead of
- * the player as behind. Getting these wrong northwards is the one visible
- * failure: the far end of the view turns black.
+ * What the camera sees is worked out from the camera itself, every frame: the
+ * four side planes of its frustum, and the rectangle of tiles they reach over
+ * the ground. It used to be a fixed window (14 tiles north, 6 south, 14 each
+ * side) measured for a 40-degree pitch at the default zoom; flatter or further
+ * out - the player's own options - the camera saw past it, and the far end of
+ * the picture was the clear colour until a step brought its chunks in. Every
+ * chunk is now drawn if and only if its box meets the frustum (the square
+ * corners behind the camera's trapezoid are no longer sent to the GPU), and
+ * built ahead of time if it lies within a chunk of what the camera reaches.
  */
-#define VOXEL_VIEW_NORTH 14
-#define VOXEL_VIEW_SOUTH 6
-#define VOXEL_VIEW_SIDE  14
-/* Tiles of view beyond what the camera reaches. */
+typedef struct
+{
+    float x, y, z, w;
+} VoxelPlane;
+
+static VoxelPlane sFrustum[4];
+static bool sFrustumValid;
+/* The tiles the frustum reaches over the ground this frame: x0, z0, x1, z1. */
+static int sViewRect[4];
+/* Tiles from the player to where they will be shortly (TrackMotion). */
+static float sLeadX, sLeadZ;
+
+/* Tiles of view beyond what the frustum reaches, for the camera's easing. */
 #define VOXEL_WINDOW_SLACK 1
+/* The rectangle never grows beyond this many tiles from the camera's target,
+ * whatever the camera: a bound on the chunks one frame visits. */
+#define VOXEL_VIEW_REACH_MAX 44
+/*
+ * The heights a square not yet built is assumed to span, over its map's base,
+ * when asking whether it is on screen: ground and trees. A taller model is
+ * found once its chunk is built (it is inside the prefetch ring anyway), and
+ * then drawn by its real box.
+ */
+#define VOXEL_UNBUILT_LOW (-1.0f)
+#define VOXEL_UNBUILT_HIGH 2.5f
 /*
  * Chunks this far outside the view are built ahead of time, with whatever the
  * frame has to spare, so that by the time a step brings them in they are
  * already there. One chunk: the player never outwalks it.
  */
 #define VOXEL_PREFETCH VOXEL_CHUNK
+
+/* The camera's matrices, as the draw uses them: `fit` folds in the logical
+ * surface (FitToLogicalSurface), which the frustum must not see. */
+static void FitToLogicalSurface(C3D_Mtx *mtx);
+
+static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit)
+{
+    Mtx_Persp(projection, C3D_AngleFromDegrees(sCamera.fov),
+              (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
+              VOXEL_NEAR, VOXEL_FAR, false);
+    if (fit)
+        FitToLogicalSurface(projection);
+    Mtx_LookAt(view,
+               FVec3_New(sCamera.x, sCamera.y, sCamera.z),
+               FVec3_New(sCamera.targetX, sCamera.targetY, sCamera.targetZ),
+               FVec3_New(0.0f, 1.0f, 0.0f), false);
+}
+
+static void GrowRect(float *rect, float x, float z)
+{
+    if (x < rect[0]) rect[0] = x;
+    if (z < rect[1]) rect[1] = z;
+    if (x > rect[2]) rect[2] = x;
+    if (z > rect[3]) rect[3] = z;
+}
+
+/*
+ * The frustum's side planes (clip-space w +- x and w +- y, which all pass
+ * through the eye: together they are the pyramid in front of it, so no near
+ * plane is needed), and the rectangle its four corner rays sweep between the
+ * lowest and the highest ground on screen.
+ */
+static void UpdateFrustum(void)
+{
+    C3D_Mtx projection, view, clip;
+    float tanY = tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f);
+    float tanX = tanY * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT;
+    float tallest = VoxelBuildings_MaxTop();
+    float heights[2];
+    float rect[4] = {sCamera.targetX, sCamera.targetZ, sCamera.targetX, sCamera.targetZ};
+    const C3D_FVec *r;
+
+    CameraMatrices(&projection, &view, false);
+    Mtx_Multiply(&clip, &projection, &view);
+    r = clip.r;
+    for (int i = 0; i < 2; ++i)
+    {
+        float s = i == 0 ? 1.0f : -1.0f;
+
+        sFrustum[i].x = r[3].x + s * r[0].x;
+        sFrustum[i].y = r[3].y + s * r[0].y;
+        sFrustum[i].z = r[3].z + s * r[0].z;
+        sFrustum[i].w = r[3].w + s * r[0].w;
+        sFrustum[2 + i].x = r[3].x + s * r[1].x;
+        sFrustum[2 + i].y = r[3].y + s * r[1].y;
+        sFrustum[2 + i].z = r[3].z + s * r[1].z;
+        sFrustum[2 + i].w = r[3].w + s * r[1].w;
+    }
+    sFrustumValid = true;
+
+    /* Ground a few tiles under the player's (a terrace below, the sea) up to
+     * the tallest model's roof: what stands high is seen from further. */
+    if (tallest < 3.0f)
+        tallest = 3.0f;
+    if (tallest > 6.0f)
+        tallest = 6.0f;
+    heights[0] = sCamera.ground - 2.0f;
+    heights[1] = sCamera.ground + tallest;
+    /* The view's rows: right, up, and back towards the eye. */
+    for (int sy = -1; sy <= 1; sy += 2)
+        for (int sx = -1; sx <= 1; sx += 2)
+        {
+            float dx = -view.r[2].x + sx * tanX * view.r[0].x + sy * tanY * view.r[1].x;
+            float dy = -view.r[2].y + sx * tanX * view.r[0].y + sy * tanY * view.r[1].y;
+            float dz = -view.r[2].z + sx * tanX * view.r[0].z + sy * tanY * view.r[1].z;
+
+            for (int h = 0; h < 2; ++h)
+            {
+                float t = dy < -0.001f ? (heights[h] - sCamera.y) / dy : -1.0f;
+
+                /* A ray that never comes down to that height (or does so
+                 * behind the eye) is followed out to the bound instead. */
+                if (t < 0.0f || t > 4.0f * VOXEL_VIEW_REACH_MAX)
+                    t = 4.0f * VOXEL_VIEW_REACH_MAX;
+                GrowRect(rect, sCamera.x + dx * t, sCamera.z + dz * t);
+            }
+        }
+    {
+        float lo[2] = {sCamera.targetX - VOXEL_VIEW_REACH_MAX, sCamera.targetZ - VOXEL_VIEW_REACH_MAX};
+        float hi[2] = {sCamera.targetX + VOXEL_VIEW_REACH_MAX, sCamera.targetZ + VOXEL_VIEW_REACH_MAX};
+
+        for (int k = 0; k < 2; ++k)
+        {
+            rect[k] = rect[k] < lo[k] ? lo[k] : rect[k];
+            rect[k + 2] = rect[k + 2] > hi[k] ? hi[k] : rect[k + 2];
+        }
+    }
+    sViewRect[0] = (int)floorf(rect[0]) - VOXEL_WINDOW_SLACK;
+    sViewRect[1] = (int)floorf(rect[1]) - VOXEL_WINDOW_SLACK;
+    sViewRect[2] = (int)ceilf(rect[2]) + VOXEL_WINDOW_SLACK;
+    sViewRect[3] = (int)ceilf(rect[3]) + VOXEL_WINDOW_SLACK;
+}
+
+/* Does the box meet the frustum? Outside only if wholly behind one plane. */
+static bool BoxVisible(float x0, float y0, float z0, float x1, float y1, float z1)
+{
+    if (!sFrustumValid)
+        return true;
+    for (int i = 0; i < 4; ++i)
+    {
+        const VoxelPlane *p = &sFrustum[i];
+        float x = p->x > 0.0f ? x1 : x0, y = p->y > 0.0f ? y1 : y0, z = p->z > 0.0f ? z1 : z0;
+
+        if (p->x * x + p->y * y + p->z * z + p->w < 0.0f)
+            return false;
+    }
+    return true;
+}
 
 /*
  * World epoch. Bumped when a live tile changes (the digest of the live grid
@@ -456,6 +809,7 @@ typedef struct
     unsigned loaded;    /* texels copied so far; w*h when ready */
     C3D_Tex tex;
     uint32_t used;      /* frame last needed */
+    uint64_t requested; /* tick it was asked for, for the log */
 } BuildingPageSlot;
 static BuildingPageSlot sPageSlots[VOXEL_BUILDING_PAGES];
 
@@ -473,6 +827,7 @@ static struct
     unsigned first, count;
     uint16_t *buffer;   /* linear, VOXEL_PAGE_SLICE texels */
     bool copyQueued;    /* the buffer is the source of this frame's copy */
+    bool systemCore;    /* the worker runs on the system core */
 } sStream;
 
 /* Pages that failed to read are not asked for again: retrying one every
@@ -492,6 +847,7 @@ static void *sPageBlock;
 static VoxelArena sPageArena;
 static VoxelArenaPiece sPagePieces[VOXEL_BUILDING_PAGES];
 static uint32_t sPageRetry[VOXEL_MAX_PAGES];
+static uint32_t sPageRingRetry[VOXEL_MAX_PAGES];
 static bool sPageNoRoomLogged[VOXEL_MAX_PAGES];
 
 /* A page texture over a piece of the arena. Never C3D_TexDelete'd: that
@@ -517,11 +873,12 @@ static void PageFree(BuildingPageSlot *slot)
     slot->loaded = 0;
 }
 
-/* Could this slot's page be dropped now? Not if drawn in the last two
- * frames (its draws may still be queued), nor while the stream uses it. */
-static bool PageDroppable(const BuildingPageSlot *slot)
+/* Could this slot's page be dropped now? Not if needed in the last `keep`
+ * frames - never fewer than two, its draws may still be queued - nor while
+ * the stream uses it. */
+static bool PageDroppable(const BuildingPageSlot *slot, uint32_t keep)
 {
-    return slot->tex.data != NULL && sFrame - slot->used >= 2
+    return slot->tex.data != NULL && sFrame - slot->used >= (keep > 2u ? keep : 2u)
         && !(sStream.state != STREAM_IDLE && sStream.slot == slot)
         && !(sStream.copyQueued && sStream.slot == slot);
 }
@@ -541,6 +898,17 @@ static struct
     unsigned failed;    /* the last layout that would not read: not asked again */
 } sAhead;
 
+/* And, one at a time too, an asset payload of a map near the view (see
+ * VoxelWorld_NearbyPayloads): its tilesets and border, read here instead of
+ * off the card in the middle of the frame that first draws from them. */
+static struct
+{
+    volatile int state;
+    CtrAssetPrefetch request;
+    void *result;
+    int32_t failed;     /* the last payload that would not read */
+} sAssetAhead;
+
 static void StreamWorker(void *arg)
 {
     (void)arg;
@@ -554,6 +922,10 @@ static void StreamWorker(void *arg)
             bool ok = VoxelBuildings_ReadPage((unsigned)sStream.page, sStream.first,
                                               sStream.count, sStream.buffer);
 
+            /* Written from this core's cache: out to memory for the GPU's
+             * copy before the render thread is told. */
+            if (ok)
+                GSPGPU_FlushDataCache(sStream.buffer, sStream.count * sizeof(uint16_t));
             __sync_synchronize();
             sStream.state = ok ? STREAM_DONE : STREAM_FAILED;
         }
@@ -563,17 +935,56 @@ static void StreamWorker(void *arg)
             __sync_synchronize();
             sAhead.state = AHEAD_DONE;
         }
+        if (sAssetAhead.state == AHEAD_READING)
+        {
+            sAssetAhead.result = CtrAssets_PrefetchRead(&sAssetAhead.request);
+            __sync_synchronize();
+            sAssetAhead.state = AHEAD_DONE;
+        }
     }
 }
 
-/* Installs what the worker read, and asks it for the next layout one
- * crossing away that is not held yet. */
+/* Installs what the worker read, and asks it for the next asset payload and
+ * the next region layout not held yet: of the maps on screen first (after a
+ * warp nothing of their connections has been read), then of those one
+ * crossing away. */
+#define VOXEL_AHEAD_PAYLOADS 192u
+
+static void ReadAssetsAhead(void)
+{
+    const void *payloads[VOXEL_AHEAD_PAYLOADS];
+    unsigned count;
+
+    if (sAssetAhead.state == AHEAD_DONE)
+    {
+        __sync_synchronize();
+        if (sAssetAhead.result == NULL)
+            sAssetAhead.failed = sAssetAhead.request.index;
+        CtrAssets_PrefetchAdopt(&sAssetAhead.request, sAssetAhead.result);
+        sAssetAhead.result = NULL;
+        sAssetAhead.state = AHEAD_IDLE;
+    }
+    if (sAssetAhead.state != AHEAD_IDLE)
+        return;
+    count = VoxelWorld_NearbyPayloads(payloads, VOXEL_AHEAD_PAYLOADS);
+    for (unsigned i = 0; i < count; ++i)
+        if (CtrAssets_PrefetchFind(payloads[i], &sAssetAhead.request)
+         && sAssetAhead.request.index != sAssetAhead.failed)
+        {
+            __sync_synchronize();
+            sAssetAhead.state = AHEAD_READING;
+            LightEvent_Signal(&sStream.wake);
+            return;
+        }
+}
+
 static void ReadAhead(void)
 {
-    unsigned layouts[16], count;
+    unsigned layouts[16 + MAX_VOXEL_MAP_INSTANCES], count = 0;
 
     if (sStream.thread == NULL)
         return;
+    ReadAssetsAhead();
     if (sAhead.state == AHEAD_DONE)
     {
         __sync_synchronize();
@@ -585,7 +996,9 @@ static void ReadAhead(void)
     }
     if (sAhead.state != AHEAD_IDLE)
         return;
-    count = VoxelWorld_NextLayouts(layouts, 16);
+    for (unsigned i = 0; i < VoxelWorld_InstanceCount() && i < MAX_VOXEL_MAP_INSTANCES; ++i)
+        layouts[count++] = (unsigned)VoxelWorld_Instance(i)->layoutId;
+    count += VoxelWorld_NextLayouts(layouts + count, 16);
     for (unsigned i = 0; i < count; ++i)
         if (layouts[i] != sAhead.failed && VoxelRegions_Wanted(layouts[i]))
         {
@@ -603,6 +1016,8 @@ static void StreamStart(void)
 
     memset(&sStream, 0, sizeof(sStream));
     memset(sBadPages, 0, sizeof(sBadPages));
+    memset(&sAssetAhead, 0, sizeof(sAssetAhead));
+    sAssetAhead.failed = -1;
     sStream.buffer = linearAlloc(VOXEL_PAGE_SLICE * sizeof(uint16_t));
     if (sStream.buffer == NULL)
     {
@@ -612,8 +1027,22 @@ static void StreamStart(void)
     }
     LightEvent_Init(&sStream.wake, RESET_ONESHOT);
     svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
-    sStream.thread = threadCreate(StreamWorker, NULL, 16 * 1024,
-                                  priority < 0x3F ? priority + 1 : 0x3F, -2, false);
+    /*
+     * On the system core when the console lets the application have some of
+     * it (an Old 3DS gives up to 30%): the reads, and the colour grade of each
+     * slice, then run beside the game instead of in the gaps it leaves. On
+     * the application core, below the game's priority, the worker only ran
+     * while the game waited for the display - and not at all through the
+     * long frames of a warm-up, which is exactly when a new map's pages are
+     * wanted. A slice is 128 KiB read and graded: far inside 30%.
+     */
+    if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)))
+        sStream.thread = threadCreate(StreamWorker, NULL, 16 * 1024, priority, 1, false);
+    if (sStream.thread != NULL)
+        sStream.systemCore = true;
+    else
+        sStream.thread = threadCreate(StreamWorker, NULL, 16 * 1024,
+                                      priority < 0x3F ? priority + 1 : 0x3F, -2, false);
     /* Without the worker the reads stay on this thread, one slice a frame:
      * slower to arrive, but still never more than a slice per frame. */
     if (sStream.thread == NULL)
@@ -634,6 +1063,10 @@ static void StreamStop(void)
     if (sAhead.state == AHEAD_DONE)
         VoxelRegions_Adopt(sAhead.result);
     memset(&sAhead, 0, sizeof(sAhead));
+    if (sAssetAhead.state == AHEAD_DONE)
+        CtrAssets_PrefetchAdopt(&sAssetAhead.request, sAssetAhead.result);
+    memset(&sAssetAhead, 0, sizeof(sAssetAhead));
+    sAssetAhead.failed = -1;
     linearFree(sStream.buffer);
     memset(&sStream, 0, sizeof(sStream));
 }
@@ -646,19 +1079,50 @@ static BuildingPageSlot *FindPage(int page)
     return NULL;
 }
 
-/* Claims a slot for a page some chunk needs; it is filled by StreamPages. */
-static void WantPage(int page)
+/*
+ * Claims a slot for a page a map on screen needs; it is filled by
+ * StreamPages. Asked for by the map, as soon as it is in view or in the
+ * prefetch ring, not by its first chunk with a building once built: the page
+ * streams in while the chunks are built, instead of after them - which is
+ * what left houses missing for a moment in a scene already drawn.
+ *
+ * `keep`: the pages needed in the last that many frames are not given up
+ * for this one - two for a map in view, a few seconds for one only in the
+ * ring, which must never push out a page on screen. `quiet`: asked for by a
+ * map rather than by the chunks being drawn - a page that finds no room then
+ * is asked for again soon and says nothing, and never holds back the request
+ * its chunks make once they are on screen.
+ */
+#define VOXEL_PAGE_KEEP_VIEW 2u
+#define VOXEL_PAGE_KEEP_RING 240u
+#define VOXEL_PAGE_QUIET_RETRY_FRAMES 30u
+
+/* A frame `age` frames ago, never before the first. */
+static uint32_t FramesAgo(uint32_t age)
+{
+    return sFrame > age ? sFrame - age : 0u;
+}
+
+static void WantPage(int page, uint32_t keep, bool quiet)
 {
     BuildingPageSlot *victim = NULL;
     unsigned w, h;
+    bool ring = keep > VOXEL_PAGE_KEEP_VIEW;
 
     if (page < 0 || page >= VOXEL_MAX_PAGES || sBadPages[page] || sFrame < sPageRetry[page])
         return;
     if ((victim = FindPage(page)) != NULL)
     {
-        victim->used = sFrame;
+        /* A ring map's page is not being drawn: it keeps its place only
+         * against other ring pages. */
+        if (!ring)
+            victim->used = sFrame;
+        else if (victim->used < FramesAgo(keep / 2u))
+            victim->used = FramesAgo(keep / 2u);
         return;
     }
+    if (quiet && sFrame < sPageRingRetry[page])
+        return;
     for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
     {
         BuildingPageSlot *slot = &sPageSlots[i];
@@ -668,7 +1132,7 @@ static void WantPage(int page)
             victim = slot;
             break;
         }
-        if (!PageDroppable(slot))
+        if (!PageDroppable(slot, keep))
             continue;
         if (victim == NULL || slot->used < victim->used)
             victim = slot;
@@ -701,8 +1165,14 @@ static void WantPage(int page)
         {
             BuildingPageSlot *slot = &sPageSlots[i];
 
-            if (slot != victim && PageDroppable(slot) && (drop == NULL || slot->used < drop->used))
+            if (slot != victim && PageDroppable(slot, keep) && (drop == NULL || slot->used < drop->used))
                 drop = slot;
+        }
+        if (drop == NULL && quiet)
+        {
+            victim->page = -1;
+            sPageRingRetry[page] = sFrame + VOXEL_PAGE_QUIET_RETRY_FRAMES;
+            return;
         }
         if (drop == NULL)
         {
@@ -735,7 +1205,8 @@ static void WantPage(int page)
     }
     victim->page = page;
     victim->loaded = 0;
-    victim->used = sFrame;
+    victim->used = ring ? FramesAgo(keep / 2u) : sFrame;
+    victim->requested = svcGetSystemTick();
 }
 
 static void MarkBadPage(int page)
@@ -777,8 +1248,8 @@ static void QueuePageCopy(BuildingPageSlot *slot, uint16_t *source, unsigned cou
                         count * sizeof(uint16_t), 8);
     slot->loaded += count;
     if (slot->loaded == slot->w * slot->h)
-        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL building page %d loaded (%ux%u)",
-                     slot->page, slot->w, slot->h);
+        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL building page %d loaded (%ux%u) in %.0f ms",
+                     slot->page, slot->w, slot->h, MsSince(slot->requested));
 }
 
 /* One step of the page stream per frame: hand a finished slice to the GPU,
@@ -880,8 +1351,10 @@ static VoxelChunk *FindChunk(bool border, int mapGroup, int mapNum, int cx, int 
     {
         const VoxelChunk *c = &sChunks[i];
 
+        /* A belt square is the grid's, whichever map's border it was built
+         * from (VisitSite). */
         if (c->used && c->cx == cx && c->cy == cy && c->border == border
-         && c->mapGroup == mapGroup && c->mapNum == mapNum)
+         && (border ? c->beltGrid == sBeltGrid : c->mapGroup == mapGroup && c->mapNum == mapNum))
             return &sChunks[i];
     }
     return NULL;
@@ -1023,6 +1496,7 @@ bool CtrVoxel_Init(void)
     VoxelArena_Init(&sPageArena, sPageBlock, sPageBlock != NULL ? VOXEL_PAGE_VRAM_BUDGET : 0,
                     128, sPagePieces, VOXEL_BUILDING_PAGES);
     memset(sPageRetry, 0, sizeof(sPageRetry));
+    memset(sPageRingRetry, 0, sizeof(sPageRingRetry));
     memset(sPageNoRoomLogged, 0, sizeof(sPageNoRoomLogged));
 
     step = "chunk build scratch";
@@ -1044,6 +1518,9 @@ bool CtrVoxel_Init(void)
     VoxelRelief_Init();
     VoxelSign_Init();
     VoxelCamera_Init(&sCamera);
+#ifdef VOXEL_HAVE_FAST_PACK
+    PackSelfTest();
+#endif
     /* Before any texture is made from the art. */
     VoxelGrade_Init();
 
@@ -1108,7 +1585,8 @@ bool CtrVoxel_Init(void)
                  VOXEL_ATLAS_SLOTS,
                  (unsigned long)(VOXEL_ATLAS_PIXELS * sizeof(uint16_t) >> 10),
                  VOXEL_ATLAS_W, VOXEL_ATLAS_H, VOXEL_ATLAS_MAX_SLOTS,
-                 sStream.thread != NULL ? "threaded" : "inline",
+                 sStream.thread == NULL ? "inline"
+                 : sStream.systemCore ? "on the system core" : "threaded",
                  (unsigned long)linearSpaceFree(), (unsigned long)vramSpaceFree());
     return true;
 
@@ -1130,6 +1608,7 @@ void CtrVoxel_Shutdown(void)
     linearFree(sAnimShadow);
     sAnimShadow = NULL;
     sAnimAtlas = NULL;
+    sAnimReadback = NULL;
     memset(sAnimDirty, 0, sizeof(sAnimDirty));
     sAnimPending = sAnimEverDirty = false;
     linearFree(sAtlasStaging);
@@ -1271,11 +1750,14 @@ static struct
     VoxelAtlasJob job;
     VoxelAtlasSlot *slot;
     bool forView;       /* a map on screen waits for it */
+    /* Composed - after a FrameEnd, as a rule - and waiting for the next
+     * frame to be uploaded in; the staging buffer is still the job's. */
+    bool ready;
 } sAtlasJob;
 
 static bool AtlasJobBusy(void)
 {
-    return sAtlasJob.job.active;
+    return sAtlasJob.job.active || sAtlasJob.ready;
 }
 
 static void AtlasJobCancel(void)
@@ -1283,6 +1765,52 @@ static void AtlasJobCancel(void)
     if (sAtlasJob.job.active)
         VoxelAtlas_JobCancel(&sAtlasJob.job);
     sAtlasJob.slot = NULL;
+    sAtlasJob.ready = false;
+}
+
+/*
+ * The animation shadow of an atlas that becomes current again: its CPU copy
+ * went to another tileset pair meanwhile. It used to be recomposed as an
+ * extension - the whole atlas, 8-38 ms of an Old 3DS, on every crossing into
+ * a map of another pair and every return from a building - while the atlas in
+ * VRAM already held every pixel of it. Now the GPU copies it back into the
+ * shadow instead: queued in one frame, read from the next (FrameBegin has
+ * waited for the copy by then). Tiles that animated while it was not current
+ * are brought up to date by their next animation write, as they were after
+ * the recomposition, which drew the tilesets' still frames.
+ *
+ * The frame of the copy counts as an atlas upload (sAtlasUploadPending):
+ * nothing composes into, uploads from or animates the shadow until it lands.
+ */
+static bool QueueAnimReadback(VoxelAtlasSlot *slot)
+{
+    if (sAnimShadow == NULL || slot->tex.data == NULL || sAnimReadback != NULL)
+        return false;
+    /* Nothing of the CPU's may be written back over what the GPU lands. */
+    GSPGPU_InvalidateDataCache(sAnimShadow, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
+    C3D_SyncTextureCopy((u32 *)slot->tex.data, 0, (u32 *)sAnimShadow, 0,
+                        VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
+    sAnimReadback = slot;
+    sAnimAtlas = NULL;
+    sAtlasUploadPending = true;
+    return true;
+}
+
+/* At the top of an update: the copy queued last frame has landed. */
+static void FinishAnimReadback(void)
+{
+    VoxelAtlasSlot *slot = sAnimReadback;
+    const VoxelMapInstance *current = VoxelWorld_Instance(0);
+
+    if (slot == NULL)
+        return;
+    sAnimReadback = NULL;
+    GSPGPU_InvalidateDataCache(sAnimShadow, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
+    /* Still that pair's atlas, and still the current map's. */
+    if (slot->valid && slot->tex.data != NULL && current != NULL
+     && slot->primaryTileset == current->primaryTileset
+     && slot->secondaryTileset == current->secondaryTileset)
+        sAnimAtlas = slot;
 }
 
 static void AtlasFailed(int mapGroup, int mapNum, const void *primary, const void *secondary)
@@ -1309,27 +1837,17 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
     {
         hit->stamp = ++sAtlasStamp;
         /* A cached atlas has no current CPU shadow after another tileset pair
-         * used it. Recompose it as an extension before applying live VRAM
-         * animations; existing slot numbers and chunk meshes remain valid. */
+         * used it: the GPU copies it back before live VRAM animations apply
+         * (QueueAnimReadback). Not while a job for this same pair is under
+         * way - its upload installs the shadow itself. */
         const VoxelMapInstance *current = VoxelWorld_Instance(0);
-        if (sAnimShadow != NULL && sAnimEverDirty && sAnimAtlas != hit
+        if (sAnimShadow != NULL && sAnimEverDirty && sAnimAtlas != hit && sAnimReadback == NULL
          && current != NULL && current->primaryTileset == inst->primaryTileset
          && current->secondaryTileset == inst->secondaryTileset
-         && !AtlasJobBusy() && !sAtlasUploadPending && sAtlasStaging != NULL)
-        {
-            if (VoxelAtlas_JobBegin(&sAtlasJob.job, inst, sAtlasStaging, &hit->map))
-            {
-                sAtlasJob.slot = hit;
-                sAtlasJob.forView = true;
-            }
-            else
-            {
-                CtrLog_Write(CTR_LOG_ERROR, "VOXEL: animation rebase lacks heap; disabling atlas animation");
-                linearFree(sAnimShadow);
-                sAnimShadow = NULL;
-                sAnimAtlas = NULL;
-            }
-        }
+         && !(AtlasJobBusy() && sAtlasJob.job.primary == inst->primaryTileset
+              && sAtlasJob.job.secondary == inst->secondaryTileset)
+         && !sAtlasUploadPending)
+            QueueAnimReadback(hit);
         /*
          * A chunk met ids this atlas was not built with - a neighbour that
          * came into view, a metatile a script placed. The atlas grows in place
@@ -1462,18 +1980,19 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 }
 
 /*
- * Advances the atlas job within `budget` ms of `started`, and uploads it when
- * it ends. A map on screen gets at least one step a frame, however the frame
- * is going, so that it always arrives.
+ * Advances the atlas job within `budget` ms of `started`; `inFrame`, uploads
+ * it once composed. Composing is CPU work into the staging buffer and runs
+ * after FrameEnd as a rule; the upload is a GPU copy and needs the frame. With
+ * a budget at all, a map on screen gets at least one step, so that it always
+ * arrives.
  */
-static void RunAtlasJob(uint64_t started, float budget)
+static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
 {
     VoxelAtlasJob *job = &sAtlasJob.job;
     VoxelAtlasSlot *slot = sAtlasJob.slot;
-    bool done = false;
     unsigned steps = 0;
 
-    if (!job->active)
+    if (!AtlasJobBusy())
         return;
     /* The slot must still be the one the job is for. */
     if (slot == NULL || slot->primaryTileset != job->primary
@@ -1482,16 +2001,18 @@ static void RunAtlasJob(uint64_t started, float budget)
         AtlasJobCancel();
         return;
     }
-    while (!done)
+    while (!sAtlasJob.ready)
     {
-        float elapsed = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
-
-        if (elapsed >= budget && !(sAtlasJob.forView && steps == 0))
+        if (MsSince(started) >= budget && !(sAtlasJob.forView && steps == 0 && budget > 0.0f))
             return;
-        done = VoxelAtlas_JobStep(job, 24);
+        sAtlasJob.ready = VoxelAtlas_JobStep(job, 24);
         ++steps;
     }
+    /* One upload a frame from the staging, and the frame's own. */
+    if (!inFrame || sAtlasUploadPending)
+        return;
 
+    sAtlasJob.ready = false;
     sAtlasJob.slot = NULL;
     if (!job->ok)
     {
@@ -1558,8 +2079,8 @@ static void SiteOf(ChunkSite *site, const VoxelMapInstance *inst, bool border, i
     site->border = border;
     site->cx = cx;
     site->cy = cy;
-    site->baseX = (border ? 0 : inst->originX) + cx * VOXEL_CHUNK;
-    site->baseY = (border ? 0 : inst->originY) + cy * VOXEL_CHUNK;
+    site->baseX = (border ? sBeltOriginX : inst->originX) + cx * VOXEL_CHUNK;
+    site->baseY = (border ? sBeltOriginY : inst->originY) + cy * VOXEL_CHUNK;
     site->x0 = site->baseX;
     site->y0 = site->baseY;
     site->x1 = site->x0 + VOXEL_CHUNK;
@@ -1571,6 +2092,8 @@ static void SiteOf(ChunkSite *site, const VoxelMapInstance *inst, bool border, i
         if (site->y1 > inst->originY + inst->height) site->y1 = inst->originY + inst->height;
     }
 }
+
+static unsigned OpenTiles(const ChunkSite *site);
 
 /*
  * Everything a chunk's geometry reads: its tiles, the margin columns and face
@@ -1612,6 +2135,7 @@ enum
 {
     JOB_GROUND, JOB_TREES, JOB_MODELS, /* map chunks */
     JOB_BORDER, JOB_BORDER_TREES,      /* belt chunks */
+    JOB_PACK,                          /* into the GPU's vertex format */
     JOB_DONE
 };
 
@@ -1620,18 +2144,29 @@ static struct
     bool active;
     ChunkSite site;
     VoxelAtlasSlot *atlas;
-    uint32_t atlasGeneration, epoch, hash;
+    uint32_t atlasGeneration, epoch, hash, beltGrid;
     /* The atlas's extension when the job started: its table may grow while
      * the job runs, and a chunk that missed ids in its early rows must still
      * count as built against the smaller one. */
     uint32_t atlasExtension;
     VoxelChunk *chunk;      /* the stale chunk being rebuilt, or NULL */
     bool forView;
-    int phase, row;
+    bool hole;              /* on screen with nothing drawn in its place */
+    int phase, row, col;
     unsigned terrainCount, buildingFirst;
     VoxelBuildingCursor models;
     uint64_t ticks;         /* spent on it, over every frame it took */
+    /* ... and by phase, for the slow chunk log: where a chunk's time goes on
+     * hardware is what says what to make cheaper next. */
+    uint64_t phaseTicks[JOB_DONE + 1];
+    unsigned rays;          /* shadow rays its build cast (VoxelLighting_Rays) */
     uint32_t firstFrame;
+    /* Measured by JOB_PACK, a slice of vertices at a time: the chunk's gx0..
+     * and gy0.. (VoxelChunk). */
+    unsigned packed;
+    PackBounds bounds;
+    int gx0, gz0, gx1, gz1;
+    float gy0, gy1;
 } sJob;
 
 static void JobCancel(void)
@@ -1640,7 +2175,7 @@ static void JobCancel(void)
 }
 
 static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash,
-                     VoxelChunk *chunk, bool forView)
+                     VoxelChunk *chunk, bool forView, bool hole)
 {
     const VoxelMapInstance *inst = site->inst;
 
@@ -1651,11 +2186,14 @@ static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash
     sJob.atlasGeneration = atlas->generation;
     sJob.atlasExtension = atlas->extension;
     sJob.epoch = sEpoch;
+    sJob.beltGrid = sBeltGrid;
     sJob.hash = hash;
     sJob.chunk = chunk;
     sJob.forView = forView;
+    sJob.hole = hole;
     sJob.phase = site->border ? JOB_BORDER : JOB_GROUND;
     sJob.row = site->y0;
+    sJob.col = site->x0;
     sJob.firstFrame = sFrame;
     VoxelBuilder_Init(&sBuilder, sScratch, VOXEL_CHUNK_SCRATCH);
     VoxelBuilder_SetAtlas(&sBuilder, &atlas->map);
@@ -1679,12 +2217,67 @@ static bool JobValid(void)
 {
     const VoxelAtlasSlot *atlas = sJob.atlas;
 
-    return sJob.epoch == sEpoch && atlas->valid && atlas->generation == sJob.atlasGeneration
+    return sJob.epoch == sEpoch && sJob.beltGrid == sBeltGrid
+        && atlas->valid && atlas->generation == sJob.atlasGeneration
         && atlas->primaryTileset == sJob.site.inst->primaryTileset
         && atlas->secondaryTileset == sJob.site.inst->secondaryTileset;
 }
 
 #define VOXEL_MODEL_SLICE_TRIANGLES 64u
+
+/*
+ * The finished geometry measured and packed, in place: a GPU vertex is
+ * smaller than the builder's and written no further along the buffer than
+ * the one it is read from. Its own slice of the job, after FrameEnd like the
+ * rest, rather than inside the frame at the upload - for a dense chunk it is
+ * a few milliseconds the GPU would have waited for.
+ */
+#define VOXEL_PACK_SLICE 1536u
+#define VOXEL_GROUND_SLICE_CELLS 2
+
+/* Floor and ceiling of a packed coordinate, in whole tiles. */
+static int PackedFloor(int32_t q) { return q >> 9; }
+static int PackedCeil(int32_t q) { return -((-q) >> 9); }
+
+/* A slice of the packing; true once the whole scratch is packed. */
+static bool JobPack(void)
+{
+    const ChunkSite *site = &sJob.site;
+    unsigned first = sJob.packed, count = sBuilder.count - first;
+
+    if (first == 0)
+        for (int a = 0; a < 3; ++a)
+        {
+            sJob.bounds.lo[a] = INT32_MAX;
+            sJob.bounds.hi[a] = INT32_MIN;
+        }
+    if (count > VOXEL_PACK_SLICE)
+        count = VOXEL_PACK_SLICE;
+    PackRange(sScratch, first, count, &sJob.bounds);
+    sJob.packed += count;
+    if (sJob.packed < sBuilder.count)
+        return false;
+
+    /* The chunk's own square always, and whatever reaches past it. */
+    sJob.gx0 = sJob.gz0 = 0;
+    sJob.gx1 = sJob.gz1 = VOXEL_CHUNK;
+    sJob.gy0 = sJob.gy1 = 0.0f;
+    if (sBuilder.count != 0)
+    {
+        int lx = PackedFloor(sJob.bounds.lo[0]), lz = PackedFloor(sJob.bounds.lo[2]);
+        int hx = PackedCeil(sJob.bounds.hi[0]), hz = PackedCeil(sJob.bounds.hi[2]);
+
+        if (lx < sJob.gx0) sJob.gx0 = lx;
+        if (lz < sJob.gz0) sJob.gz0 = lz;
+        if (hx > sJob.gx1) sJob.gx1 = hx;
+        if (hz > sJob.gz1) sJob.gz1 = hz;
+        sJob.gy0 = (float)sJob.bounds.lo[1] / VOXEL_POS_SCALE;
+        sJob.gy1 = (float)sJob.bounds.hi[1] / VOXEL_POS_SCALE;
+    }
+    ReportPackErrors(site->border ? "border chunk" : "chunk", site->cx, site->cy,
+                     site->inst->mapGroup, site->inst->mapNum);
+    return true;
+}
 
 /* One slice of the job: a row of one pass, or one of the small passes. */
 static void JobStep(void)
@@ -1695,8 +2288,20 @@ static void JobStep(void)
     switch (sJob.phase)
     {
     case JOB_GROUND:
-        VoxelMesh_EmitGroundRow(&sBuilder, inst, site->x0, site->x1, sJob.row);
+    {
+        /* A few cells at a time: over a drawn mountain one row of lit relief
+         * lattice was 6 ms on hardware, more than a frame's spare time. */
+        int x1 = sJob.col + VOXEL_GROUND_SLICE_CELLS;
+
+        if (x1 > site->x1)
+            x1 = site->x1;
+        VoxelMesh_EmitGroundRow(&sBuilder, inst, sJob.col, x1, sJob.row);
+        sJob.col = x1;
+        if (sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
         break;
+    }
     case JOB_TREES:
         if (sJob.row == site->y0)
             sJob.terrainCount = sBuilder.count;
@@ -1705,13 +2310,13 @@ static void JobStep(void)
             return;
         sJob.row = site->y0;
         sJob.buildingFirst = sBuilder.count;
-        sJob.phase = sHaveBuildings ? JOB_MODELS : JOB_DONE;
+        sJob.phase = sHaveBuildings ? JOB_MODELS : JOB_PACK;
         return;
     case JOB_MODELS:
         /* A few dozen lit triangles a slice: one large model is thousands. */
         if (VoxelBuildings_EmitSome(&sBuilder, inst, site->x0, site->y0, site->x1, site->y1,
                                     &sJob.models, VOXEL_MODEL_SLICE_TRIANGLES))
-            sJob.phase = JOB_DONE;
+            sJob.phase = JOB_PACK;
         return;
     case JOB_BORDER:
         VoxelMesh_EmitBorder(&sBuilder, site->x0, site->y0, site->x1, site->y1);
@@ -1719,9 +2324,17 @@ static void JobStep(void)
         sJob.phase = JOB_BORDER_TREES;
         return;
     case JOB_BORDER_TREES:
-        VoxelTree_EmitBorder(&sBuilder, site->x0, site->y0, site->x1, site->y1);
+        /* A row at a time: a belt of lit crowns is several milliseconds. */
+        VoxelTree_EmitBorder(&sBuilder, site->x0, sJob.row, site->x1, sJob.row + 1);
+        if (++sJob.row < site->y1)
+            return;
+        sJob.row = site->y0;
         sJob.buildingFirst = sBuilder.count;
-        sJob.phase = JOB_DONE;
+        sJob.phase = JOB_PACK;
+        return;
+    case JOB_PACK:
+        if (JobPack())
+            sJob.phase = JOB_DONE;
         return;
     default:
         return;
@@ -1788,9 +2401,7 @@ static BuildResult JobFinish(VoxelChunk *chunk)
          * the raw copy, with no format conversion.
          */
         staging = sStaging + sStagingUsed;
-        Pack(sScratch, sBuilder.count, staging);
-        ReportPackErrors(site->border ? "border chunk" : "chunk", site->cx, site->cy,
-                         inst->mapGroup, inst->mapNum);
+        memcpy(staging, sScratch, sBuilder.count * sizeof(VoxelGpuVertex));
         sStagingUsed += (bytes + sizeof(VoxelGpuVertex) - 1) / sizeof(VoxelGpuVertex);
         GSPGPU_FlushDataCache(staging, bytes);
         C3D_SyncTextureCopy((u32 *)staging, 0, (u32 *)chunk->vram, 0, bytes, 8);
@@ -1803,6 +2414,13 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     chunk->mapNum = inst->mapNum;
     chunk->cx = site->cx;
     chunk->cy = site->cy;
+    chunk->beltGrid = sBeltGrid;
+    if (site->border)
+    {
+        chunk->openTiles = OpenTiles(site);
+        chunk->openEpoch = sEpoch;
+        chunk->openSame = true;
+    }
     chunk->hash = sJob.hash;
     chunk->epoch = sEpoch;
     chunk->staleEpoch = 0;
@@ -1816,23 +2434,19 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     chunk->count = sBuilder.count;
     chunk->terrainCount = sJob.terrainCount;
     chunk->buildingFirst = sJob.buildingFirst;
-    chunk->gx0 = chunk->gz0 = 0;
-    chunk->gx1 = chunk->gz1 = VOXEL_CHUNK;
-    for (unsigned i = 0; i < sBuilder.count; ++i)
-    {
-        const VoxelVertex *v = &sScratch[i];
-
-        if (v->x < chunk->gx0) chunk->gx0 = (int)floorf(v->x);
-        if (v->z < chunk->gz0) chunk->gz0 = (int)floorf(v->z);
-        if (v->x > chunk->gx1) chunk->gx1 = (int)ceilf(v->x);
-        if (v->z > chunk->gz1) chunk->gz1 = (int)ceilf(v->z);
-    }
+    chunk->gx0 = sJob.gx0;
+    chunk->gz0 = sJob.gz0;
+    chunk->gx1 = sJob.gx1;
+    chunk->gz1 = sJob.gz1;
+    chunk->gy0 = sJob.gy0;
+    chunk->gy1 = sJob.gy1;
     chunk->buildingPage = sHaveBuildings && !site->border ? VoxelBuildings_PageOf(inst) : -1;
     chunk->stamp = sFrame;
     if (sJob.forView)
         chunk->viewStamp = sFrame;
     if (chunk->count > chunk->buildingFirst)
-        WantPage(chunk->buildingPage);
+        WantPage(chunk->buildingPage, sJob.forView ? VOXEL_PAGE_KEEP_VIEW : VOXEL_PAGE_KEEP_RING,
+                 !sJob.forView);
     /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
     if (sBuilder.uncovered != 0 && !atlas->uncoveredRetried)
         atlas->extendPending = true;
@@ -1879,13 +2493,35 @@ static unsigned sRequestCount;
 static bool IsChunkOf(const VoxelChunk *chunk, const ChunkSite *site)
 {
     return chunk->used && chunk->border == site->border
-        && chunk->mapGroup == site->inst->mapGroup && chunk->mapNum == site->inst->mapNum
+        && (site->border ? chunk->beltGrid == sBeltGrid
+                         : chunk->mapGroup == site->inst->mapGroup
+                           && chunk->mapNum == site->inst->mapNum)
         && chunk->cx == site->cx && chunk->cy == site->cy;
 }
 
 static bool Overlaps(int ax0, int ay0, int ax1, int ay1, int bx0, int by0, int bx1, int by1)
 {
     return ax0 < bx1 && ax1 > bx0 && ay0 < by1 && ay1 > by0;
+}
+
+/*
+ * On screen? Once built, by the box its geometry really fills: a building is
+ * emitted by the chunk of its top-left cell and stands south of it, and a
+ * roof is seen from further than the ground under it. Not built yet, by its
+ * tiles at the heights of ground and trees over its map's base.
+ */
+static bool SiteVisible(const ChunkSite *site, const VoxelChunk *chunk)
+{
+    float base;
+
+    if (chunk != NULL && chunk->count != 0)
+        return BoxVisible((float)(site->baseX + chunk->gx0), chunk->gy0 - 0.05f,
+                          (float)(site->baseY + chunk->gz0),
+                          (float)(site->baseX + chunk->gx1), chunk->gy1 + 0.05f,
+                          (float)(site->baseY + chunk->gz1));
+    base = VoxelRelief_Base(site->inst);
+    return BoxVisible((float)site->x0, base + VOXEL_UNBUILT_LOW, (float)site->y0,
+                      (float)site->x1, base + VOXEL_UNBUILT_HIGH, (float)site->y1);
 }
 
 static void Draw(const VoxelChunk *chunk, int worldX, int worldZ)
@@ -1918,11 +2554,34 @@ static void Request(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *ch
     r->key = need * 100000u + (unsigned)(dx * dx + dz * dz);
 }
 
+/* The tiles of a belt square that no map covers. */
+static unsigned OpenTiles(const ChunkSite *site)
+{
+    unsigned open = 0;
+
+    for (int y = site->y0; y < site->y1; ++y)
+        for (int x = site->x0; x < site->x1; ++x)
+            open += VoxelWorld_GetInstanceAt(x, y) == NULL;
+    return open;
+}
+
+/* Does the belt square still lie where no map is, as it did when built?
+ * Asked again only when the world has changed. */
+static bool BeltCoverSame(VoxelChunk *chunk, const ChunkSite *site)
+{
+    if (chunk->openEpoch != sEpoch)
+    {
+        chunk->openSame = OpenTiles(site) == chunk->openTiles;
+        chunk->openEpoch = sEpoch;
+    }
+    return chunk->openSame;
+}
+
 /*
  * One square of the view or of the ring around it: drawn if it can be, asked
  * for if it has to be built.
  */
-static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int view[4],
+static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas,
                       float playerX, float playerZ, unsigned *missing)
 {
     const VoxelMapInstance *inst = site->inst;
@@ -1930,18 +2589,7 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int vi
                                   site->cx, site->cy);
     bool drawable, stale = false, hashKnown = false;
     uint32_t hash = 0;
-    /*
-     * On screen if its tiles are, or - once built - if anything it drew is:
-     * a building is emitted by the chunk of its top-left cell and stands
-     * south of it, so a house whose anchor is past the north edge of the view
-     * still has its front in it.
-     */
-    bool inView = Overlaps(site->x0, site->y0, site->x1, site->y1,
-                           view[0], view[1], view[2], view[3])
-               || (chunk != NULL && chunk->count != 0
-                   && Overlaps(site->baseX + chunk->gx0, site->baseY + chunk->gz0,
-                               site->baseX + chunk->gx1, site->baseY + chunk->gz1,
-                               view[0], view[1], view[2], view[3]));
+    bool inView = SiteVisible(site, chunk);
 
     if (chunk == NULL)
     {
@@ -1957,18 +2605,32 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int vi
     if (inView)
         chunk->viewStamp = sFrame;
     /* An old UV range cannot be drawn with recycled atlas pixels: keep old
-     * geometry only while its material is still the one it was built for. */
-    drawable = atlas != NULL && chunk->atlas == atlas
-            && chunk->atlasGeneration == atlas->generation;
+     * geometry only while its material is still the one it was built for.
+     * A belt square is drawn with its own atlas: after a crossing it holds
+     * the last map's border until it is built from the new one's, which is
+     * what the view shows meanwhile - unless maps have come to cover part
+     * of it, whose ground it would stand on. */
+    if (site->border)
+        drawable = chunk->atlas->valid && chunk->atlasGeneration == chunk->atlas->generation
+                && BeltCoverSame(chunk, site);
+    else
+        drawable = atlas != NULL && chunk->atlas == atlas
+                && chunk->atlasGeneration == atlas->generation;
     if (atlas == NULL)
     {
-        if (inView)
+        if (!inView)
+            return;
+        if (drawable)
+            Draw(chunk, site->baseX, site->baseY);
+        else
             ++*missing;
         return;
     }
     if (!drawable || chunk->layout != inst->layout
      || chunk->primary != inst->primaryTileset || chunk->secondary != inst->secondaryTileset)
         stale = true;
+    else if (chunk->atlas != atlas)
+        stale = true; /* a belt square drawn from another pair's atlas */
     else if (chunk->uncovered && chunk->atlasExtension != atlas->extension)
         stale = true; /* the atlas grew the ids it was missing; still drawable */
     else if (chunk->staleEpoch == sEpoch)
@@ -2020,12 +2682,14 @@ static bool InsideOneMap(const ChunkSite *site)
 }
 
 /* Walks every chunk of every map, and of the belt, that reaches into the ring. */
-static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float playerZ,
-                      unsigned *missing, bool atlasAhead)
+static void VisitView(float playerX, float playerZ, unsigned *missing, bool atlasAhead)
 {
-    int px0 = vx0 - VOXEL_PREFETCH, py0 = vy0 - VOXEL_PREFETCH;
-    int px1 = vx1 + VOXEL_PREFETCH, py1 = vy1 + VOXEL_PREFETCH;
-    const int view[4] = { vx0, vy0, vx1, vy1 };
+    int vx0 = sViewRect[0], vy0 = sViewRect[1], vx1 = sViewRect[2], vy1 = sViewRect[3];
+    /* A chunk all round, and as far again as the player is heading. */
+    int px0 = vx0 - VOXEL_PREFETCH + (sLeadX < 0.0f ? (int)sLeadX : 0);
+    int py0 = vy0 - VOXEL_PREFETCH + (sLeadZ < 0.0f ? (int)sLeadZ : 0);
+    int px1 = vx1 + VOXEL_PREFETCH + (sLeadX > 0.0f ? (int)sLeadX : 0);
+    int py1 = vy1 + VOXEL_PREFETCH + (sLeadZ > 0.0f ? (int)sLeadZ : 0);
     unsigned instances = VoxelWorld_InstanceCount();
     const VoxelMapInstance *current = VoxelWorld_Instance(0);
     VoxelAtlasSlot *atlases[MAX_VOXEL_MAP_INSTANCES];
@@ -2082,7 +2746,7 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
                 ChunkSite site;
 
                 SiteOf(&site, inst, false, cx, cy);
-                VisitSite(&site, atlas, view,
+                VisitSite(&site, atlas,
                           playerX, playerZ, missing);
             }
     }
@@ -2093,8 +2757,10 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
         return;
     {
         VoxelAtlasSlot *atlas = FindAtlas(current);
-        int cy0 = (int)floorf(py0 / (float)VOXEL_CHUNK), cy1 = (int)floorf((py1 - 1) / (float)VOXEL_CHUNK);
-        int cx0 = (int)floorf(px0 / (float)VOXEL_CHUNK), cx1 = (int)floorf((px1 - 1) / (float)VOXEL_CHUNK);
+        int oy0 = py0 - sBeltOriginY, oy1 = py1 - 1 - sBeltOriginY;
+        int ox0 = px0 - sBeltOriginX, ox1 = px1 - 1 - sBeltOriginX;
+        int cy0 = (int)floorf(oy0 / (float)VOXEL_CHUNK), cy1 = (int)floorf(oy1 / (float)VOXEL_CHUNK);
+        int cx0 = (int)floorf(ox0 / (float)VOXEL_CHUNK), cx1 = (int)floorf(ox1 / (float)VOXEL_CHUNK);
 
         for (int cy = cy0; cy <= cy1; ++cy)
             for (int cx = cx0; cx <= cx1; ++cx)
@@ -2110,7 +2776,7 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
                         open = VoxelWorld_GetInstanceAt(x, y) == NULL;
                 if (!open)
                     continue;
-                VisitSite(&site, atlas, view,
+                VisitSite(&site, atlas,
                           playerX, playerZ, missing);
             }
     }
@@ -2124,29 +2790,60 @@ static int CompareRequests(const void *a, const void *b)
 }
 
 /*
- * How long this frame may spend building. The game's own share of the frame
- * is read off the last one (its work minus what this module built in it); a
- * hole in the view may take what is left up to a ceiling, and always gets at
- * least one slice. Work ahead of time only takes what would otherwise idle.
+ * When to build: the one decision that sets the frame rate.
  *
- * The target leaves room for what the frame's work does not count - the
- * command list's submission, the display transfer, a late VBlank - which on
- * an Old 3DS is two to three milliseconds: at 14 ms, frames whose work
- * measured 16.5 ms kept missing their VBlank.
+ * A frame is FrameBegin on a VBlank, this module's Update and the draws, then
+ * FrameEnd - which is when the command list reaches the GPU - and then the
+ * game's next frame and the audio, while the GPU draws. A town takes the GPU
+ * 6-8 ms on an Old 3DS, and it cannot start before FrameEnd: every millisecond
+ * built inside the frame pushed the picture that much closer to missing the
+ * next VBlank. On hardware a frame that built 8-10 ms of chunks was a dropped
+ * frame, however much of it the CPU still had - it was waiting for the GPU.
+ *
+ * So the building runs after FrameEnd (CtrVoxel_AfterSubmit), in the time the
+ * CPU used to spend waiting for the VBlank while the GPU drew, against what
+ * is left of the frame once the game and the audio have had their share.
+ * Inside the frame there is only what cannot move out of it: the uploads of
+ * what was finished (a GPU copy is queued in an open frame), a little after a
+ * crossing, and - behind the fade after a cut - the warm-up.
  */
+#define VOXEL_FRAME_MS (1000.0f / 60.0f)
+/* Inside the frame, for the ring while warming up only (see SpareMs). */
 #define VOXEL_WORK_TARGET_MS 13.0f
-#define VOXEL_HOLE_MIN_MS 2.0f
-#define VOXEL_HOLE_MAX_MS 9.0f
 #define VOXEL_AHEAD_MAX_MS 8.0f
 #define VOXEL_AHEAD_MARGIN_MS 1.5f
 /*
- * A map change turns every belt square in view into a hole at once, and gets
- * a little more than the usual hole budget to fill them. Not much more: the
- * game spends 30-60 ms of that same frame loading the map it crossed into, so
- * the frame is late already, and every millisecond added here is a further
- * frame lost.
+ * After FrameEnd: the most one frame builds, and what is left untouched before
+ * the VBlank for whatever the estimate of the game and the audio misses (the
+ * FrameBegin that returns on it, a late event).
  */
-#define VOXEL_CROSSING_MS 8.0f
+#define VOXEL_AFTER_MAX_MS 9.0f
+#define VOXEL_AFTER_MARGIN_MS 1.8f
+/* The game's and the audio's share counts at most this much in the estimate:
+ * a frame whose game ran longer (a map load) was lost anyway, and a peak held
+ * at that height would starve the builds for a second after it. */
+#define VOXEL_OTHERS_CAP_MS 9.0f
+/*
+ * The game frame that crosses into the next map loads it - its data, its
+ * tilesets, its people - and on an Old 3DS that is about 7 ms more than any
+ * other. Building after the FrameEnd before it, as much as the estimate of an
+ * ordinary frame allowed, the CPU came back to the VBlank late: a dropped
+ * frame on every crossing. While the player heads for an edge of the map
+ * that close (VOXEL_CROSSING_NEAR tiles), the builds leave that much free.
+ */
+#define VOXEL_CROSSING_RESERVE_MS 8.0f
+#define VOXEL_CROSSING_NEAR 1.5f
+static bool sCrossingSoon;
+/*
+ * Inside any other frame, for a hole on screen (see sHolesOnly): what the
+ * last frame left between the end of its GPU work and the VBlank - its
+ * present without this module's builds, plus the GPU's drawing, against
+ * VOXEL_INFRAME_TARGET_MS - and never more than VOXEL_INFRAME_MAX_MS.
+ */
+#define VOXEL_INFRAME_TARGET_MS 14.0f
+#define VOXEL_INFRAME_MAX_MS 4.0f
+/* What this module built inside the last frame (not the visit). */
+static float sInFrameBuildMs;
 #define VOXEL_AHEAD_BACKOFF_FRAMES 30u
 
 static uint32_t sAheadBackoff;
@@ -2165,10 +2862,31 @@ static uint32_t sWarmupUntil;
 /* Set when atlases were given back to the 2D compositor: the overworld warms
  * up again when it returns, as after a cut. */
 static bool sResumeWarmup;
+/* The view Update visited this frame, which is what AfterSubmit works from. */
+static bool sViewReady;
 
 static float Clamp(float value, float lo, float hi)
 {
     return value < lo ? lo : value > hi ? hi : value;
+}
+
+static float InFrameBudget(void)
+{
+    const CtrVideoStats *video = CtrVideo_GetStats();
+    float fixed = video->cpuMs - sInFrameBuildMs;
+
+    if (fixed < 0.0f)
+        fixed = 0.0f;
+    return Clamp(VOXEL_INFRAME_TARGET_MS - fixed - video->gpuMs, 0.0f, VOXEL_INFRAME_MAX_MS);
+}
+
+static unsigned LightRays(void)
+{
+#if CTR_VOXEL_LIGHTING
+    return VoxelLighting_Rays();
+#else
+    return 0;
+#endif
 }
 
 static void NoteBuildCost(VoxelChunk *chunk, const ChunkSite *site, float ms, uint32_t frames)
@@ -2180,9 +2898,15 @@ static void NoteBuildCost(VoxelChunk *chunk, const ChunkSite *site, float ms, ui
     if (ms >= 8.0f && sSlowLogged < 64)
     {
         ++sSlowLogged;
-        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slow chunk %d,%d of %d:%d%s: %.1f ms over %lu frames, %u verts",
+        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slow chunk %d,%d of %d:%d%s: %.1f ms over %lu frames, "
+                     "%u verts, %u rays (ground %.1f trees %.1f models %.1f pack+upload %.1f)",
                      site->cx, site->cy, site->inst->mapGroup, site->inst->mapNum,
-                     site->border ? " border" : "", ms, (unsigned long)frames, chunk->count);
+                     site->border ? " border" : "", ms, (unsigned long)frames, chunk->count,
+                     sJob.rays,
+                     TicksMs(sJob.phaseTicks[JOB_GROUND] + sJob.phaseTicks[JOB_BORDER]),
+                     TicksMs(sJob.phaseTicks[JOB_TREES] + sJob.phaseTicks[JOB_BORDER_TREES]),
+                     TicksMs(sJob.phaseTicks[JOB_MODELS]),
+                     TicksMs(sJob.phaseTicks[JOB_PACK] + sJob.phaseTicks[JOB_DONE]));
     }
 }
 
@@ -2231,6 +2955,14 @@ static bool IsDrawn(const VoxelChunk *chunk)
     return false;
 }
 
+/*
+ * Inside a frame that is neither warming up nor crossing, only a hole on
+ * screen may be built, and only in the time the GPU left free (InFrameBudget):
+ * a square missing from the picture is worth a millisecond of the GPU's
+ * frame; a stale one, drawn as it was, or one ahead of time is not.
+ */
+static bool sHolesOnly;
+
 /* Takes the most urgent request the frame can afford as the next job. */
 static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
 {
@@ -2243,6 +2975,8 @@ static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
 
         if (r->done)
             continue;
+        if (sHolesOnly && need != NEED_HOLE)
+            return false; /* sorted: holes come first */
         if (elapsed >= (forView ? holeMs : aheadMs))
             return false; /* sorted: nothing after it is more urgent */
         /* The slot may have been recycled for another tileset this update. */
@@ -2252,100 +2986,58 @@ static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
         if (!r->hashKnown)
             r->hash = SiteHash(&r->site);
         r->done = true;
-        JobStart(&r->site, r->atlas, r->hash, r->chunk, forView);
+        JobStart(&r->site, r->atlas, r->hash, r->chunk, forView, need == NEED_HOLE);
         return true;
     }
     return false;
 }
 
-static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
+/*
+ * Slices of the running job and of the next ones, most urgent first, until
+ * the budgets run out: `holeMs` for what the view is missing or has stale,
+ * `aheadMs` for the prefetch ring. A finished job is uploaded only `inFrame`
+ * (its GPU copy needs the open frame); after FrameEnd it waits, its geometry
+ * in the scratch, for the next Update. With `forceHole` a hole on screen
+ * gets one slice however the frame is going. Returns the chunks uploaded.
+ */
+static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFrame,
+                        bool forceHole, unsigned *missing)
 {
-    int px = (int)floorf(playerX), pz = (int)floorf(playerZ);
-    int vx0 = px - VOXEL_VIEW_SIDE - VOXEL_WINDOW_SLACK;
-    int vy0 = pz - VOXEL_VIEW_NORTH - VOXEL_WINDOW_SLACK;
-    int vx1 = px + VOXEL_VIEW_SIDE + VOXEL_WINDOW_SLACK + 1;
-    int vy1 = pz + VOXEL_VIEW_SOUTH + VOXEL_WINDOW_SLACK + 1;
-    uint64_t started = svcGetSystemTick();
-    float spare = SpareMs();
-    float aheadMs = sFrame < sAheadBackoff ? 0.0f
-                  : Clamp(spare - VOXEL_AHEAD_MARGIN_MS, 0.0f, VOXEL_AHEAD_MAX_MS);
-    float holeMs = Clamp(spare, VOXEL_HOLE_MIN_MS, VOXEL_HOLE_MAX_MS);
-    unsigned missing = 0, built = 0, slices = 0;
-    bool holes = false;
-    bool warmup;
-
-    /* A crossing changes which map the belt belongs to: see VOXEL_CROSSING_MS. */
-    if (crossed && holeMs < VOXEL_CROSSING_MS)
-        holeMs = VOXEL_CROSSING_MS;
-    if (cut || sResumeWarmup)
-        sWarmupUntil = sFrame + VOXEL_WARMUP_FRAMES;
-    sResumeWarmup = false;
-    warmup = sFrame < sWarmupUntil;
-    if (warmup)
-        holeMs = VOXEL_WARMUP_MS;
-    /* The atlas being composed goes first: no chunk of its map can be built
-     * before it, and a map on screen without one is a hole of its own. */
-    RunAtlasJob(started, sAtlasJob.forView ? holeMs : aheadMs);
-    for (unsigned pass = 0;; ++pass)
-    {
-        sRebuildStamp = sAtlasStamp;
-        sDrawCount = 0;
-        sRequestCount = 0;
-        sStats.vertices = 0;
-        missing = 0;
-        VisitView(vx0, vy0, vx1, vy1, playerX, playerZ, &missing, aheadMs > 0.0f);
-        /* Warming up, an atlas the visit has just asked for is composed now,
-         * and the view visited again with it - one per pass, one job at a
-         * time, for each tileset pair on screen. */
-        if (!warmup || !AtlasJobBusy() || !sAtlasJob.forView || pass >= 4)
-            break;
-        RunAtlasJob(started, 1000.0f);
-    }
-    sStats.atlasMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
-    if (sRequestCount > 1)
-        qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
-    for (unsigned i = 0; i < sRequestCount; ++i)
-    {
-        holes = holes || sRequests[i].key / 100000u == NEED_HOLE;
-        /* The square the running job is building is not asked for again. */
-        if (sJob.active && SameSite(&sRequests[i].site, &sJob.site))
-            sRequests[i].done = true;
-    }
-
-    /* A job that no longer matches the world is dropped; one working ahead
-     * of time gives way the moment the view has a hole. */
-    if (sJob.active && (!JobValid() || (!sJob.forView && holes)))
-        sJob.active = false;
+    unsigned built = 0, slices = 0;
 
     for (;;)
     {
-        float elapsed = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
+        float elapsed = MsSince(started);
         float budget;
-        uint64_t sliceStart;
 
         if (!sJob.active && !StartNextJob(elapsed, holeMs, aheadMs))
             break;
-        budget = sJob.forView ? holeMs : aheadMs;
-        /*
-         * A slice starts only if it should also end inside the budget. The
-         * exception is a hole on screen, which gets one slice a frame however
-         * the frame is going, so that it is always filled in the end.
-         */
-        if (!(sJob.forView && slices == 0) && elapsed + sPhaseMs[sJob.phase] > budget)
-            break;
+        budget = sHolesOnly && !sJob.hole ? 0.0f : sJob.forView ? holeMs : aheadMs;
         if (sJob.phase != JOB_DONE)
         {
             int phase = sJob.phase;
-            uint64_t ticks;
+            uint64_t sliceStart, ticks;
+            unsigned rays;
 
+            /*
+             * A slice starts only if it should also end inside the budget,
+             * save for the one a hole may be owed.
+             */
+            if (!(forceHole && sJob.forView && slices == 0) && elapsed + sPhaseMs[phase] > budget)
+                break;
             sliceStart = svcGetSystemTick();
+            rays = LightRays();
             JobStep();
             ticks = svcGetSystemTick() - sliceStart;
+            sJob.rays += LightRays() - rays;
             sJob.ticks += ticks;
-            NotePhaseCost(phase, (float)(ticks * 1000.0 / SYSCLOCK_ARM11));
+            sJob.phaseTicks[phase] += ticks;
+            NotePhaseCost(phase, TicksMs(ticks));
             ++slices;
             continue;
         }
+        if (!inFrame)
+            break;
 
         /* Finished: upload it into its chunk. */
         {
@@ -2377,7 +3069,8 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
                 if (result == BUILD_OK)
                 {
                     sJob.ticks += ticks;
-                    NotePhaseCost(JOB_DONE, (float)(ticks * 1000.0 / SYSCLOCK_ARM11));
+                    sJob.phaseTicks[JOB_DONE] += ticks;
+                    NotePhaseCost(JOB_DONE, TicksMs(ticks));
                 }
             }
             if (result == BUILD_NO_STAGING)
@@ -2394,27 +3087,126 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
             }
             sJob.active = false;
             ++built;
-            NoteBuildCost(chunk, &sJob.site, (float)(sJob.ticks * 1000.0 / SYSCLOCK_ARM11),
-                          sFrame - sJob.firstFrame + 1);
+            NoteBuildCost(chunk, &sJob.site, TicksMs(sJob.ticks), sFrame - sJob.firstFrame + 1);
             /* A stale chunk is already on the draw list, which points at its
              * slot; a hole joins it now, if it is on screen. */
-            if (!IsDrawn(chunk)
-             && (Overlaps(sJob.site.x0, sJob.site.y0, sJob.site.x1, sJob.site.y1,
-                          vx0, vy0, vx1, vy1)
-                 || Overlaps(sJob.site.baseX + chunk->gx0, sJob.site.baseY + chunk->gz0,
-                             sJob.site.baseX + chunk->gx1, sJob.site.baseY + chunk->gz1,
-                             vx0, vy0, vx1, vy1)))
+            if (!IsDrawn(chunk) && SiteVisible(&sJob.site, chunk))
             {
                 Draw(chunk, sJob.site.baseX, sJob.site.baseY);
-                if (missing > 0)
-                    --missing;
+                if (missing != NULL && *missing > 0)
+                    --*missing;
             }
         }
     }
+    return built;
+}
+
+/*
+ * Where the player is heading. The prefetch ring reaches this much further
+ * that way, and its squares are built nearest to the point the player will
+ * be at in VOXEL_LEAD_FRAMES rather than to where they stand: on a bike the
+ * ring one chunk deep was outrun, and chunks were built in its trail as
+ * readily as ahead of it.
+ */
+#define VOXEL_LEAD_FRAMES 45.0f
+#define VOXEL_LEAD_MAX 16.0f
+static float sVelocityX, sVelocityZ;
+/* Where the player stood last frame; moved with the coordinates on a crossing
+ * (HandleMapChange), so that the heading carries across it. */
+static float sLastX, sLastZ;
+
+static void TrackMotion(float x, float z, bool reset)
+{
+    if (reset)
+        sVelocityX = sVelocityZ = 0.0f;
+    else
+    {
+        float dx = Clamp(x - sLastX, -1.0f, 1.0f), dz = Clamp(z - sLastZ, -1.0f, 1.0f);
+
+        sVelocityX += (dx - sVelocityX) * 0.2f;
+        sVelocityZ += (dz - sVelocityZ) * 0.2f;
+    }
+    sLastX = x;
+    sLastZ = z;
+    sLeadX = Clamp(sVelocityX * VOXEL_LEAD_FRAMES, -VOXEL_LEAD_MAX, VOXEL_LEAD_MAX);
+    sLeadZ = Clamp(sVelocityZ * VOXEL_LEAD_FRAMES, -VOXEL_LEAD_MAX, VOXEL_LEAD_MAX);
+}
+
+static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
+{
+    uint64_t started = svcGetSystemTick();
+    float spare = SpareMs();
+    float holeMs = 0.0f, aheadMs = 0.0f;
+    unsigned missing = 0, built;
+    bool holes = false;
+    bool warmup;
+
+    if (cut || sResumeWarmup)
+        sWarmupUntil = sFrame + VOXEL_WARMUP_FRAMES;
+    sResumeWarmup = false;
+    warmup = sFrame < sWarmupUntil;
+    if (warmup)
+    {
+        holeMs = VOXEL_WARMUP_MS;
+        aheadMs = sFrame < sAheadBackoff ? 0.0f
+                : Clamp(spare - VOXEL_AHEAD_MARGIN_MS, 0.0f, VOXEL_AHEAD_MAX_MS);
+    }
+    UpdateFrustum();
+    /* The atlas: what was composed after the last FrameEnd is uploaded now;
+     * composing inside the frame is for the warm-up alone. No chunk of its
+     * map can be built before it, and a map on screen without one is a hole
+     * of its own. */
+    RunAtlasJob(started, warmup ? holeMs : 0.0f, true);
+    for (unsigned pass = 0;; ++pass)
+    {
+        sRebuildStamp = sAtlasStamp;
+        sDrawCount = 0;
+        sRequestCount = 0;
+        sStats.vertices = 0;
+        missing = 0;
+        /* A ring map's atlas is begun ahead of time into an empty slot; it is
+         * composed after FrameEnd, like the chunks. */
+        VisitView(playerX + sLeadX, playerZ + sLeadZ, &missing,
+                  warmup ? aheadMs > 0.0f : sFrame >= sAheadBackoff);
+        /* Warming up, an atlas the visit has just asked for is composed now,
+         * and the view visited again with it - one per pass, one job at a
+         * time, for each tileset pair on screen. */
+        if (!warmup || !AtlasJobBusy() || !sAtlasJob.forView || pass >= 4)
+            break;
+        RunAtlasJob(started, 1000.0f, true);
+    }
+    sStats.atlasMs = MsSince(started);
+    if (sRequestCount > 1)
+        qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
+    for (unsigned i = 0; i < sRequestCount; ++i)
+    {
+        holes = holes || sRequests[i].key / 100000u == NEED_HOLE;
+        /* The square the running job is building is not asked for again. */
+        if (sJob.active && SameSite(&sRequests[i].site, &sJob.site))
+            sRequests[i].done = true;
+    }
+
+    /* A job that no longer matches the world is dropped; one working ahead
+     * of time gives way the moment the view has a hole. */
+    if (sJob.active && (!JobValid() || (!sJob.forView && holes)))
+        sJob.active = false;
+
+    /* A crossing is a frame like any other since the belt and the next maps
+     * stand ready before it (VoxelWorld_BuildInstances, sBeltGrid). */
+    sHolesOnly = !warmup;
+    if (sHolesOnly && holes)
+        holeMs = InFrameBudget();
+    {
+        uint64_t buildStart = svcGetSystemTick();
+
+        built = RunJobs(buildStart, holeMs, aheadMs, true, warmup || crossed, &missing);
+        sInFrameBuildMs = MsSince(buildStart);
+    }
+    sHolesOnly = false;
 
     if (warmup && missing == 0 && !AtlasJobBusy())
         sWarmupUntil = 0;
-    sLastBuildMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
+    sLastBuildMs = MsSince(started);
     sStats.meshMs = sLastBuildMs;
     if (sStats.meshMs > sStats.meshPeakMs)
         sStats.meshPeakMs = sStats.meshMs;
@@ -2422,6 +3214,44 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
     sStats.visibleChunks = sDrawCount;
     sStats.frameBuilds = built;
     sStats.pendingBuilds = sRequestCount;
+    sViewReady = true;
+}
+
+void CtrVoxel_AfterSubmit(uint64_t frameBeginTick)
+{
+    static float sOthersMs;
+    const CtrTiming *timing = CtrPlatform_GetTiming();
+    float others = timing->gameMs + timing->vblankMs;
+    float budget, aheadMs;
+    uint64_t started;
+
+    sStats.afterMs = sStats.afterBudgetMs = 0.0f;
+    if (!sReady || !sViewReady)
+        return;
+    sViewReady = false;
+    /* The game's and the audio's share of the frame to come, read off the
+     * last ones: taken at once when it rises, let go slowly. */
+    if (others > VOXEL_OTHERS_CAP_MS)
+        others = VOXEL_OTHERS_CAP_MS;
+    sOthersMs = others > sOthersMs ? others : sOthersMs * 0.85f + others * 0.15f;
+    started = svcGetSystemTick();
+    budget = VOXEL_FRAME_MS - TicksMs(started - frameBeginTick) - sOthersMs - VOXEL_AFTER_MARGIN_MS;
+    if (sCrossingSoon)
+        budget -= VOXEL_CROSSING_RESERVE_MS;
+    budget = Clamp(budget, 0.0f, VOXEL_AFTER_MAX_MS);
+    sStats.afterBudgetMs = budget;
+    if (budget < 0.5f)
+        return;
+    aheadMs = sFrame < sAheadBackoff ? 0.0f : budget;
+    /* The asset payloads the builds resolve are the ones the frame's own
+     * update resolved: nothing has run in between that retires one. */
+    VoxelWorld_BeginBatch();
+    RunAtlasJob(started, sAtlasJob.forView ? budget : aheadMs, false);
+    if (sJob.active && !JobValid())
+        sJob.active = false;
+    RunJobs(started, budget, aheadMs, false, false, NULL);
+    sStats.afterMs = MsSince(started);
+    sLastBuildMs += sStats.afterMs;
 }
 
 /* ── Map changes ────────────────────────────────────────────────────────── */
@@ -2462,6 +3292,9 @@ static void RememberInstanceOrigins(void)
  * all. Anything else - a warp, a door, a new game - is a genuine cut, and
  * there the camera snaps.
  */
+/* How far, in tiles, the player may seem to move on a crossing. */
+#define VOXEL_CROSSING_STEP 3.0f
+
 /* True for a crossing, false for a cut. */
 static bool HandleMapChange(int mapGroup, int mapNum, float playerX, float playerZ)
 {
@@ -2471,17 +3304,29 @@ static bool HandleMapChange(int mapGroup, int mapNum, float playerX, float playe
             continue;
         if (sPreviousOrigins[i].originX == 0 && sPreviousOrigins[i].originY == 0)
             break; /* already the origin: nothing moved */
+        /* A map placed further away is reached by a warp as readily as on
+         * foot: a crossing leaves the player where they were. */
+        if (fabsf(playerX - (sLastX - sPreviousOrigins[i].originX)) > VOXEL_CROSSING_STEP
+         || fabsf(playerZ - (sLastZ - sPreviousOrigins[i].originY)) > VOXEL_CROSSING_STEP)
+            break;
         VoxelCamera_Shift(&sCamera, (float)-sPreviousOrigins[i].originX,
                           (float)-sPreviousOrigins[i].originY);
         sDappleAnchorX += sPreviousOrigins[i].originX;
         sDappleAnchorZ += sPreviousOrigins[i].originY;
+        sBeltOriginX -= sPreviousOrigins[i].originX;
+        sBeltOriginY -= sPreviousOrigins[i].originY;
+        sLastX -= (float)sPreviousOrigins[i].originX;
+        sLastZ -= (float)sPreviousOrigins[i].originY;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL: crossed into %d:%d, camera shifted by %d,%d",
                      mapGroup, mapNum, -sPreviousOrigins[i].originX,
                      -sPreviousOrigins[i].originY);
         return true;
     }
-    /* A cut shows a new scene: the pattern may start afresh. */
+    /* A cut shows a new scene: the pattern may start afresh, and the belt is
+     * cut on a grid of its own, of which nothing built so far is part. */
     sDappleAnchorX = sDappleAnchorZ = 0;
+    sBeltOriginX = sBeltOriginY = 0;
+    ++sBeltGrid;
     VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(playerX + 0.5f, playerZ + 0.5f), 1);
     VoxelCamera_Snap(&sCamera, playerX, playerZ);
     return false;
@@ -2537,6 +3382,7 @@ bool CtrVoxel_Update(void)
     sStagingUsed = 0;
     sChunkUploads = 0;
     sAtlasUploadPending = false;
+    sViewReady = false;
     /* Nothing retires an asset payload between here and the end of the
      * update, so resolved pointers may be reused throughout. */
     VoxelWorld_BeginBatch();
@@ -2549,6 +3395,7 @@ bool CtrVoxel_Update(void)
         sStatus = "nomap";
         return false;
     }
+    FinishAnimReadback();
 
     {
         uint32_t digest = VoxelWorld_LiveDigest(), signature = InstanceSignature();
@@ -2585,6 +3432,22 @@ bool CtrVoxel_Update(void)
         VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(smoothX + 0.5f, smoothZ + 0.5f), 0);
         VoxelCamera_Update(&sCamera, smoothX, smoothZ);
     }
+    /* A cut moves the player; a crossing only the coordinates, and
+     * HandleMapChange has moved the last position with them. */
+    TrackMotion(smoothX, smoothZ, cut);
+    /* Heading off the current map into the one beside it (see
+     * VOXEL_CROSSING_RESERVE_MS)? */
+    {
+        const VoxelMapInstance *here = VoxelWorld_Instance(0);
+        int dx = sVelocityX > 0.02f ? 1 : sVelocityX < -0.02f ? -1 : 0;
+        int dz = sVelocityZ > 0.02f ? 1 : sVelocityZ < -0.02f ? -1 : 0;
+        float aheadX = playerX + dx * (VOXEL_CROSSING_NEAR + 1.0f);
+        float aheadZ = playerZ + dz * (VOXEL_CROSSING_NEAR + 1.0f);
+        const VoxelMapInstance *next = (dx || dz)
+            ? VoxelWorld_GetInstanceAt((int)floorf(aheadX), (int)floorf(aheadZ)) : NULL;
+
+        sCrossingSoon = next != NULL && next != here;
+    }
     /* Recorded after the shift, for the next crossing. */
     RememberInstanceOrigins();
     sMeshMapGroup = mapGroup;
@@ -2592,9 +3455,30 @@ bool CtrVoxel_Update(void)
 
     sStats.worldMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
     UpdateView(playerX, playerZ, mapChanged && !cut, cut);
+    /* The pages drawn from first, then those of every map in view - built
+     * or not yet - and last, if there is room, of the maps in the ring. */
     for (unsigned d = 0; d < sDrawCount; ++d)
         if (sDraws[d].chunk->count > sDraws[d].chunk->buildingFirst)
-            WantPage(sDraws[d].chunk->buildingPage);
+            WantPage(sDraws[d].chunk->buildingPage, VOXEL_PAGE_KEEP_VIEW, false);
+    if (sHaveBuildings)
+        for (unsigned ring = 0; ring < 2; ++ring)
+            for (unsigned i = 0; i < VoxelWorld_InstanceCount(); ++i)
+            {
+                const VoxelMapInstance *map = VoxelWorld_Instance(i);
+                int margin = ring ? VOXEL_PREFETCH : 0;
+                bool near = Overlaps(map->originX, map->originY, map->originX + map->width,
+                                     map->originY + map->height,
+                                     sViewRect[0] - margin, sViewRect[1] - margin,
+                                     sViewRect[2] + margin, sViewRect[3] + margin);
+                bool inView = Overlaps(map->originX, map->originY, map->originX + map->width,
+                                       map->originY + map->height,
+                                       sViewRect[0], sViewRect[1], sViewRect[2], sViewRect[3]);
+
+                if (!near || (ring != 0) == inView)
+                    continue;
+                WantPage(VoxelBuildings_PageOf(map), ring ? VOXEL_PAGE_KEEP_RING : VOXEL_PAGE_KEEP_VIEW,
+                         true);
+            }
     StreamPages();
     /* Animation writes arrived during the game's VBlank. Recompose only the
      * metatiles that reference those 8x8 tiles and upload once, never per tile. */
@@ -2726,6 +3610,7 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
             continue;
         C3D_TexDelete(&slot->tex);
         if (sAnimAtlas == slot) sAnimAtlas = NULL;
+        if (sAnimReadback == slot) sAnimReadback = NULL;
         memset(&slot->tex, 0, sizeof(slot->tex));
         slot->valid = false;
         freed += VOXEL_ATLAS_PIXELS * sizeof(uint16_t);
@@ -3607,10 +4492,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     sBloomStrength = light.bloom;
     C3D_FrameDrawOn(target);
 
-    Mtx_Persp(&projection, C3D_AngleFromDegrees(sCamera.fov),
-              (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
-              VOXEL_NEAR, VOXEL_FAR, false);
-    FitToLogicalSurface(&projection);
+    /* The camera the frustum was cut from in the update (UpdateFrustum). */
+    CameraMatrices(&projection, &view, true);
     /* The camera's right vector, and the sidestep this eye takes along it. */
     yawRad = C3D_AngleFromDegrees(sCamera.yaw);
     offX = cosf(yawRad) * eyeOffset * VOXEL_STEREO_FRACTION * sCamera.distance;
