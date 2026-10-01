@@ -2677,6 +2677,17 @@ const char *CtrVoxel_Status(void)
 /* ── Draw ───────────────────────────────────────────────────────────────── */
 
 /*
+ * Stereoscopic eye separation, as a share of the camera's distance to the
+ * player. Each eye is the camera slid sideways along its own right vector -
+ * eye and look-at point together, so the two views stay parallel and the
+ * scene gains parallax with distance instead of toeing in. Scaling the
+ * separation with the distance keeps the depth reading the same when the
+ * camera pulls back to frame a wider map. At the 3D slider's far end an eye
+ * sits this fraction off centre; the slider scales it from there.
+ */
+#define VOXEL_STEREO_FRACTION 0.006f
+
+/*
  * Folds "render into the top-left 400x240 of a 512x256 surface" into the
  * projection: a clip-space scale and bias, applied before the perspective
  * divide so it costs nothing at run time.
@@ -2970,9 +2981,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     C3D_TexEnv *env;
     const VoxelMapInstance *current = VoxelWorld_Instance(0);
     bool indoor;
+    float yawRad, offX, offZ;
 
-    /* Stereoscopy is V8; the first milestone renders one eye. */
-    (void)eyeOffset;
     if (!sReady || sDrawCount == 0)
         return;
 
@@ -2982,9 +2992,13 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
               (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
               VOXEL_NEAR, VOXEL_FAR, false);
     FitToLogicalSurface(&projection);
+    /* The camera's right vector, and the sidestep this eye takes along it. */
+    yawRad = C3D_AngleFromDegrees(sCamera.yaw);
+    offX = cosf(yawRad) * eyeOffset * VOXEL_STEREO_FRACTION * sCamera.distance;
+    offZ = -sinf(yawRad) * eyeOffset * VOXEL_STEREO_FRACTION * sCamera.distance;
     Mtx_LookAt(&view,
-               FVec3_New(sCamera.x, sCamera.y, sCamera.z),
-               FVec3_New(sCamera.targetX, sCamera.targetY, sCamera.targetZ),
+               FVec3_New(sCamera.x + offX, sCamera.y, sCamera.z + offZ),
+               FVec3_New(sCamera.targetX + offX, sCamera.targetY, sCamera.targetZ + offZ),
                FVec3_New(0.0f, 1.0f, 0.0f), false);
 
     C3D_BindProgram(&sProgram);

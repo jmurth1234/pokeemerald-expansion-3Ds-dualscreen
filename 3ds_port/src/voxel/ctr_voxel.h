@@ -16,7 +16,9 @@ bool CtrVoxel_Update(void);
 /* Game VRAM animation transfer: tile numbers are relative to BG_VRAM. */
 void CtrVoxel_NotifyTilesetAnimWrite(unsigned firstTile, unsigned tileCount);
 
-/* Draws into the given target. Never opens or closes a frame. */
+/* Draws into the given target. Never opens or closes a frame.
+ * `eyeOffset` is the signed eye for stereoscopy: 0 centres it, +1 is the right
+ * eye and -1 the left at the widest 3D slider setting. */
 void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset);
 /* The GBA brightness effect (BLDY) of the frame about to be drawn, as the
  * compositor reads it: on the backgrounds and on the sprites, towards white

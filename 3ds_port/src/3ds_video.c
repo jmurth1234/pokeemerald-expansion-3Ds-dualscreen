@@ -2617,6 +2617,19 @@ static const NavBand *NavObjectBand(unsigned tile, int y)
     return sNavBands == sNavSubmenu ? &sNavBands[1] : &sNavBands[0];
 }
 
+/*
+ * Battle depth. The GBA lays the battle out as a stage seen from the player's
+ * side: the enemy and its healthbox are the upper part of the screen, near the
+ * horizon, and the player's are the lower part, near the camera. Priority
+ * alone does not say that - both battlers are priority 2 and both healthboxes
+ * priority 1 - so depth is tilted down the screen instead: sprites above the
+ * ground line recede behind the screen plane and those below come forward. The
+ * displacement is horizontal, along the eye separation; only its size follows
+ * the sprite's height. Battle only.
+ */
+#define BATTLE_DEPTH_GROUND 80.0f
+#define BATTLE_DEPTH_TILT 0.08f
+
 static void DrawObjects(unsigned priority, bool effects)
 {
     static const uint8_t dimensions[3][4][2] = {
@@ -2675,6 +2688,10 @@ static void DrawObjects(unsigned priority, bool effects)
         if (x >= sClipX1 || x + (int)boxW <= sClipX0
          || y >= sClipY1 || y + (int)boxH <= sClipY0) continue;
         ++sStats.sprites;
+        float shift = sLayerShift;
+        if (sBattle)
+            shift += sParallax * BATTLE_DEPTH_TILT
+                     * ((y + boxH * 0.5f) - BATTLE_DEPTH_GROUND) / sShiftZoom;
         Blend(4, effects, mode == 1);
         ViewBase();
         if (affine)
@@ -2688,7 +2705,7 @@ static void DrawObjects(unsigned priority, bool effects)
             if (fabsf(det) < 0.00001f) { Error(9, "singular OBJ affine matrix"); continue; }
             C3D_Mtx matrix;
             Mtx_Identity(&matrix);
-            matrix.r[0] = FVec4_New(d / det, -b / det, 0, x + CTR_VIEW_X + sLayerShift + boxW / 2.0f - (d * width - b * height) / (2 * det));
+            matrix.r[0] = FVec4_New(d / det, -b / det, 0, x + CTR_VIEW_X + shift + boxW / 2.0f - (d * width - b * height) / (2 * det));
             matrix.r[1] = FVec4_New(-c / det, a / det, 0, y + CTR_VIEW_Y + boxH / 2.0f - (a * height - c * width) / (2 * det));
             ViewAffine(&matrix);
         }
@@ -2700,7 +2717,7 @@ static void DrawObjects(unsigned priority, bool effects)
                 unsigned sy = flipY ? height / 8 - 1 - ty : ty;
                 unsigned tile = CtrVideo_ObjTile(attr2 & 1023, sx, sy, width, color256, Reg(0) & 0x40);
                 DrawTile(0x10000 + tile * 32, 16 + (attr2 >> 12), color256,
-                         (affine ? 0 : x + CTR_VIEW_X + sLayerShift) + (int)tx * 8,
+                         (affine ? 0 : x + CTR_VIEW_X + shift) + (int)tx * 8,
                          (affine ? 0 : y + CTR_VIEW_Y) + (int)ty * 8, flipX, flipY);
             }
     }
@@ -3525,24 +3542,18 @@ static void ComposeVoxelOverlay(void)
 }
 
 /*
- * The voxel path of the single Citro3D frame opened by CtrVideo_Present.
- * Same shape as RenderEye: compose the logical surface, split, blit it to the
- * screen. What changes is who composes it.
+ * One eye of the voxel path of the single Citro3D frame opened by
+ * CtrVideo_Present: compose the logical surface, split, blit it to the eye.
+ * Same shape as RenderEye: what changes is who composes it.
  */
-static void RenderVoxel(uint32_t clear)
+static void RenderVoxelEye(C3D_RenderTarget *target, uint32_t clear, float eyeOffset)
 {
     const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
 
-    /* The brightness effect (BLDY) on the field's backgrounds and sprites. */
-    unsigned control = Reg(0x50), effect = (control >> 6) & 3;
-    float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
-
-    CtrVoxel_SetBrightness((control & 0x0e) ? bright : 0.0f, (control & 0x10) ? bright : 0.0f,
-                           effect == 2);
     /* C2D_TargetClear clears colour and depth, which the 3D pass needs. */
     C2D_TargetClear(sLogical, clear);
-    CtrVoxel_Draw(sLogical, 0.0f);
+    CtrVoxel_Draw(sLogical, eyeOffset);
 
     /* Finish the world before sampling it. UI is drawn on top after blur. */
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -3552,8 +3563,8 @@ static void RenderVoxel(uint32_t clear)
     C2D_Prepare();
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     BlendForget();
-    C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
-    C2D_SceneBegin(sTop);
+    C2D_TargetClear(target, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(target);
     C2D_ViewReset();
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
@@ -3562,6 +3573,25 @@ static void RenderVoxel(uint32_t clear)
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     C3D_FrameSplit(0);
+}
+
+static void RenderVoxel(uint32_t clear, bool stereo, float slider)
+{
+    /* The brightness effect (BLDY) on the field's backgrounds and sprites. */
+    unsigned control = Reg(0x50), effect = (control >> 6) & 3;
+    float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
+
+    CtrVoxel_SetBrightness((control & 0x0e) ? bright : 0.0f, (control & 0x10) ? bright : 0.0f,
+                           effect == 2);
+    if (stereo)
+    {
+        RenderVoxelEye(sTop, clear, -slider);
+        RenderVoxelEye(sTopRight, clear, slider);
+    }
+    else
+    {
+        RenderVoxelEye(sTop, clear, 0.0f);
+    }
 }
 #endif
 
@@ -4695,10 +4725,11 @@ void CtrVideo_Present(void)
     /* The 2D field centres its text windows as the voxel overlay does. */
     sFieldUi = field && !voxel;
     float slider = osGet3DSliderState();
-    /* Real stereoscopy for the voxel world is V8; the layer parallax of the
-     * 2D path means nothing for a 3D scene, so it stays off there. */
-    bool stereo = !voxel && !blank && !sTransition && sTopRight && slider > 0.0f
-                  && roundf(slider * CTR_STEREO_PIXELS) > 0.0f;
+    /* The voxel world is a real 3D scene, so its stereo is the camera's and it
+     * takes the slider as it stands; the 2D path displaces whole pixels and so
+     * stays flat below the first one. */
+    bool stereo = !blank && !sTransition && sTopRight && slider > 0.0f
+                  && (voxel || roundf(slider * CTR_STEREO_PIXELS) > 0.0f);
     /* A 2D screen composed per eye walks every layer twice, which on an Old
      * 3DS is 30 fps in a menu. Without its planes it stays flat until they
      * can be made (before the next frame, see sBandsWanted). */
@@ -4729,7 +4760,7 @@ void CtrVideo_Present(void)
     {
 #if CTR_VOXEL_ENABLED
         sPlanes = 0;
-        RenderVoxel(clear);
+        RenderVoxel(clear, stereo, slider);
 #endif
     }
     else if (blank)
