@@ -12309,6 +12309,21 @@ index 6e29f721..76ff5c58 100644
 +#endif /* PORT_BRIDGE */
 +
  #endif // GUARD_GLOBAL_H
+diff --git c/include/item_menu.h w/include/item_menu.h
+index c4fa1a56..e4516dc4 100644
+--- c/include/item_menu.h
++++ w/include/item_menu.h
+@@ -123,5 +123,10 @@ void DisplayItemMessageOnField(u8 taskId, const u8 *string, TaskFunc callback);
+ void CloseItemMessage(u8 taskId);
+ void CB2_ChooseBall(void);
+ void SortItemsInBag(struct BagPocket *pocket, enum BagSortOptions type);
++#ifdef PLATFORM_3DS
++void CtrBag_Touch(u8 phase, s16 x, s16 y);
++bool8 CtrBag_Close(void);
++bool8 CtrBag_IsOpen(void);
++#endif
+ 
+ #endif //GUARD_ITEM_MENU_H
 diff --git c/include/landmark.h w/include/landmark.h
 index f5feb407..39590503 100644
 --- c/include/landmark.h
@@ -18174,7 +18189,7 @@ index 0187d4d2..0b47f97c 100644
 diff --git c/src/item_menu.c w/src/item_menu.c
 old mode 100755
 new mode 100644
-index d5acdfd9..2fa3d537
+index d5acdfd9..6141b48c
 --- c/src/item_menu.c
 +++ w/src/item_menu.c
 @@ -24,6 +24,7 @@
@@ -18185,7 +18200,61 @@ index d5acdfd9..2fa3d537
  #include "malloc.h"
  #include "map_name_popup.h"
  #include "menu.h"
-@@ -1216,10 +1217,18 @@ u8 GetItemListPosition(u8 pocketId)
+@@ -50,6 +51,11 @@
+ #include "constants/items.h"
+ #include "constants/rgb.h"
+ #include "constants/songs.h"
++#ifdef PLATFORM_3DS
++#include "port_platform.h"
++#include "3ds_assets.h"
++#include "item_icon.h"
++#endif
+ 
+ #define TAG_POCKET_SCROLL_ARROW 110
+ #define TAG_BAG_SCROLL_ARROW    111
+@@ -214,6 +220,31 @@ static void ConfirmToss(u8);
+ static void CancelToss(u8);
+ static void ConfirmSell(u8);
+ static void CancelSell(u8);
++#ifdef PLATFORM_3DS
++// Touch on the 3DS bottom screen, where the bag is shown (3ds_bottom_ui.c,
++// CtrBag_Touch). A tap is taken by whatever waits for input next and acts
++// there directly: a pocket switched, a row of the list chosen, a menu entry,
++// YES or NO, a message gone on. Dragging the list scrolls it, dragging over
++// a quantity changes it, holding a row still moves the item (SELECT). The
++// buttons work as ever.
++enum {
++    CTR_QUANTITY_NONE,
++    CTR_QUANTITY_CHANGED,
++    CTR_QUANTITY_OK,
++    CTR_QUANTITY_CANCEL,
++};
++static bool8 CtrBag_ListTouch(u8 taskId, s32 *listPosition);
++static bool8 CtrBag_SwapTouch(u8 taskId);
++static bool8 CtrBag_ContextTouch(s8 *selection);
++static u8 CtrBag_QuantityTouch(s16 *count, u16 max, u8 windowType);
++static void CtrBag_Prefetch(void);
++bool8 CtrMenu_TakeAck(void);
++#define BAG_ACK(keys) (JOY_NEW(keys) || CtrMenu_TakeAck())
++#define BAG_TOUCHED(what) (ctrTouch == CTR_QUANTITY_##what)
++#else
++#define BAG_ACK(keys) JOY_NEW(keys)
++#define BAG_TOUCHED(what) FALSE
++#endif
+ static void Task_FadeAndCloseBagMenuIfMulch(u8 taskId);
+ 
+ static const u8 sText_Var1CantBeHeldHere[] = _("The {STR_VAR_1} can't be held\nhere.");
+@@ -688,6 +719,9 @@ void GoToBagMenu(u8 location, u8 pocket, MainCallback exitCallback)
+ 
+ void CB2_BagMenuRun(void)
+ {
++#ifdef PLATFORM_3DS
++    CtrBag_Prefetch();
++#endif
+     RunTasks();
+     AnimateSprites();
+     BuildOamBuffer();
+@@ -1216,10 +1250,18 @@ u8 GetItemListPosition(u8 pocketId)
      return gBagPosition.scrollPosition[pocketId] + gBagPosition.cursorPosition[pocketId];
  }
  
@@ -18204,7 +18273,190 @@ index d5acdfd9..2fa3d537
      tMsgWindowId = AddItemMessageWindow(ITEMWIN_MESSAGE);
      FillWindowPixelBuffer(tMsgWindowId, PIXEL_FILL(1));
      DisplayMessageAndContinueTask(taskId, tMsgWindowId, 10, 13, fontId, GetPlayerTextSpeedDelay(), str, callback);
-@@ -3041,3 +3050,37 @@ static s32 CompareItemsByIndex(enum Pocket pocketId, struct ItemSlot item1, stru
+@@ -1325,6 +1367,10 @@ static void Task_BagMenu_HandleInput(u8 taskId)
+         }
+ 
+         listPosition = ListMenu_ProcessInput(tListTaskId);
++#ifdef PLATFORM_3DS
++        if (listPosition == LIST_NOTHING_CHOSEN && CtrBag_ListTouch(taskId, &listPosition))
++            return;
++#endif
+         ListMenuGetScrollAndRow(tListTaskId, scrollPos, cursorPos);
+         switch (listPosition)
+         {
+@@ -1546,6 +1592,11 @@ static void Task_HandleSwappingItemsInput(u8 taskId)
+             ListMenuGetScrollAndRow(tListTaskId, &gBagPosition.scrollPosition[gBagPosition.pocket], &gBagPosition.cursorPosition[gBagPosition.pocket]);
+             DoItemSwap(taskId);
+         }
++#ifdef PLATFORM_3DS
++        else if (CtrBag_SwapTouch(taskId))
++        {
++        }
++#endif
+         else
+         {
+             s32 input = ListMenu_ProcessInput(tListTaskId);
+@@ -1786,6 +1837,10 @@ static void Task_ItemContext_SingleRow(u8 taskId)
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
+         s8 selection = Menu_ProcessInputNoWrap();
++#ifdef PLATFORM_3DS
++        if (selection == MENU_NOTHING_CHOSEN)
++            CtrBag_ContextTouch(&selection);
++#endif
+         switch (selection)
+         {
+         case MENU_NOTHING_CHOSEN:
+@@ -1807,6 +1862,19 @@ static void Task_ItemContext_MultipleRows(u8 taskId)
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
+         s8 cursorPos = Menu_GetCursorPos();
++#ifdef PLATFORM_3DS
++        s8 tapped = MENU_NOTHING_CHOSEN;
++
++        if (CtrBag_ContextTouch(&tapped) && tapped != MENU_NOTHING_CHOSEN)
++        {
++            PlaySE(SE_SELECT);
++            if (tapped == MENU_B_PRESSED)
++                sItemMenuActions[ACTION_CANCEL].func.void_u8(taskId);
++            else
++                sItemMenuActions[gBagMenu->contextMenuItemsPtr[tapped]].func.void_u8(taskId);
++            return;
++        }
++#endif
+         if (JOY_NEW(DPAD_UP))
+         {
+             if (cursorPos > 0 && IsValidContextMenuPos(cursorPos - 2))
+@@ -1943,18 +2011,21 @@ static void CancelToss(u8 taskId)
+ static void Task_ChooseHowManyToToss(u8 taskId)
+ {
+     s16 *data = gTasks[taskId].data;
++#ifdef PLATFORM_3DS
++    u8 ctrTouch = CtrBag_QuantityTouch(&tItemCount, tQuantity, ITEMWIN_QUANTITY);
++#endif
+ 
+-    if (AdjustQuantityAccordingToDPadInput(&tItemCount, tQuantity) == TRUE)
++    if (AdjustQuantityAccordingToDPadInput(&tItemCount, tQuantity) == TRUE || BAG_TOUCHED(CHANGED))
+     {
+         PrintItemQuantity(gBagMenu->windowIds[ITEMWIN_QUANTITY], tItemCount);
+     }
+-    else if (JOY_NEW(A_BUTTON))
++    else if (JOY_NEW(A_BUTTON) || BAG_TOUCHED(OK))
+     {
+         PlaySE(SE_SELECT);
+         BagMenu_RemoveWindow(ITEMWIN_QUANTITY);
+         AskTossItems(taskId);
+     }
+-    else if (JOY_NEW(B_BUTTON))
++    else if (JOY_NEW(B_BUTTON) || BAG_TOUCHED(CANCEL))
+     {
+         PlaySE(SE_SELECT);
+         BagMenu_RemoveWindow(ITEMWIN_QUANTITY);
+@@ -1984,7 +2055,7 @@ static void Task_TossItemFromBag(u8 taskId)
+     u16 *scrollPos = &gBagPosition.scrollPosition[gBagPosition.pocket];
+     u16 *cursorPos = &gBagPosition.cursorPosition[gBagPosition.pocket];
+ 
+-    if (JOY_NEW(A_BUTTON | B_BUTTON))
++    if (BAG_ACK(A_BUTTON | B_BUTTON))
+     {
+         PlaySE(SE_SELECT);
+         RemoveBagItemFromSlot(&gBagPockets[gBagPosition.pocket], *scrollPos + *cursorPos, tItemCount);
+@@ -2006,7 +2077,7 @@ static void Task_RemoveItemFromBag(u8 taskId)
+     u16 *scrollPos = &gBagPosition.scrollPosition[gBagPosition.pocket];
+     u16 *cursorPos = &gBagPosition.cursorPosition[gBagPosition.pocket];
+ 
+-    if (JOY_NEW(A_BUTTON | B_BUTTON))
++    if (BAG_ACK(A_BUTTON | B_BUTTON))
+     {
+         PlaySE(SE_SELECT);
+         RemoveBagItem(gSpecialVar_ItemId, tItemCount);
+@@ -2076,7 +2147,7 @@ static void PrintItemCantBeHeld(u8 taskId)
+ 
+ static void HandleErrorMessage(u8 taskId)
+ {
+-    if (JOY_NEW(A_BUTTON))
++    if (BAG_ACK(A_BUTTON))
+     {
+         PlaySE(SE_SELECT);
+         CloseItemMessage(taskId);
+@@ -2258,18 +2329,21 @@ static void InitSellHowManyInput(u8 taskId)
+ static void Task_ChooseHowManyToSell(u8 taskId)
+ {
+     s16 *data = gTasks[taskId].data;
++#ifdef PLATFORM_3DS
++    u8 ctrTouch = CtrBag_QuantityTouch(&tItemCount, tQuantity, ITEMWIN_QUANTITY_WIDE);
++#endif
+ 
+-    if (AdjustQuantityAccordingToDPadInput(&tItemCount, tQuantity) == TRUE)
++    if (AdjustQuantityAccordingToDPadInput(&tItemCount, tQuantity) == TRUE || BAG_TOUCHED(CHANGED))
+     {
+         PrintItemSoldAmount(gBagMenu->windowIds[ITEMWIN_QUANTITY_WIDE], tItemCount, GetItemSellPrice(gSpecialVar_ItemId) * tItemCount);
+     }
+-    else if (JOY_NEW(A_BUTTON))
++    else if (JOY_NEW(A_BUTTON) || BAG_TOUCHED(OK))
+     {
+         PlaySE(SE_SELECT);
+         BagMenu_RemoveWindow(ITEMWIN_QUANTITY_WIDE);
+         DisplaySellItemPriceAndConfirm(taskId);
+     }
+-    else if (JOY_NEW(B_BUTTON))
++    else if (JOY_NEW(B_BUTTON) || BAG_TOUCHED(CANCEL))
+     {
+         PlaySE(SE_SELECT);
+         BagMenu_PrintCursor(tListTaskId, COLORID_NORMAL);
+@@ -2311,7 +2385,7 @@ static void SellItem(u8 taskId)
+ 
+ static void WaitAfterItemSell(u8 taskId)
+ {
+-    if (JOY_NEW(A_BUTTON | B_BUTTON))
++    if (BAG_ACK(A_BUTTON | B_BUTTON))
+     {
+         PlaySE(SE_SELECT);
+         RemoveMoneyWindow();
+@@ -2343,18 +2417,21 @@ static void Task_ItemContext_Deposit(u8 taskId)
+ static void Task_ChooseHowManyToDeposit(u8 taskId)
+ {
+     s16 *data = gTasks[taskId].data;
++#ifdef PLATFORM_3DS
++    u8 ctrTouch = CtrBag_QuantityTouch(&tItemCount, tQuantity, ITEMWIN_QUANTITY);
++#endif
+ 
+-    if (AdjustQuantityAccordingToDPadInput(&tItemCount, tQuantity) == TRUE)
++    if (AdjustQuantityAccordingToDPadInput(&tItemCount, tQuantity) == TRUE || BAG_TOUCHED(CHANGED))
+     {
+         PrintItemQuantity(gBagMenu->windowIds[ITEMWIN_QUANTITY], tItemCount);
+     }
+-    else if (JOY_NEW(A_BUTTON))
++    else if (JOY_NEW(A_BUTTON) || BAG_TOUCHED(OK))
+     {
+         PlaySE(SE_SELECT);
+         BagMenu_RemoveWindow(ITEMWIN_QUANTITY);
+         TryDepositItem(taskId);
+     }
+-    else if (JOY_NEW(B_BUTTON))
++    else if (JOY_NEW(B_BUTTON) || BAG_TOUCHED(CANCEL))
+     {
+         PlaySE(SE_SELECT);
+         PrintItemDescription(tListPosition);
+@@ -2397,7 +2474,7 @@ static void WaitDepositErrorMessage(u8 taskId)
+ {
+     s16 *data = gTasks[taskId].data;
+ 
+-    if (JOY_NEW(A_BUTTON | B_BUTTON))
++    if (BAG_ACK(A_BUTTON | B_BUTTON))
+     {
+         PlaySE(SE_SELECT);
+         PrintItemDescription(tListPosition);
+@@ -2879,7 +2956,7 @@ static void SortBagItems(u8 taskId)
+ 
+ static void Task_SortFinish(u8 taskId)
+ {
+-    if (gMain.newKeys & (A_BUTTON | B_BUTTON))
++    if (BAG_ACK(A_BUTTON | B_BUTTON))
+     {
+         RemoveItemMessageWindow(4);
+         ReturnToItemList(taskId);
+@@ -3041,3 +3118,364 @@ static s32 CompareItemsByIndex(enum Pocket pocketId, struct ItemSlot item1, stru
  
      return 0; // Cannot have multiple stacks of indexed items
  }
@@ -18240,6 +18492,333 @@ index d5acdfd9..2fa3d537
 +    if (gBagMenu == NULL || gBagMenu->windowIds[ITEMWIN_MESSAGE] == WINDOW_NONE)
 +        return NULL;
 +    return sCtrMessage;
++}
++#endif
++
++#ifdef PLATFORM_3DS
++//------------------------------------------------------------------------------
++//  Touch. 3ds_bottom_ui.c hands the bag its touches in pixels of the bag's
++//  own picture; a tap ends up in menu.c's tap (CtrMenu_PostTap), where the
++//  bag's tasks, its yes/no box and its messages take it. What a tap does is
++//  what the bag does for its button, called here directly.
++//------------------------------------------------------------------------------
++
++enum {
++    CTR_BAG_TOUCH_DOWN,
++    CTR_BAG_TOUCH_MOVE,
++    CTR_BAG_TOUCH_UP,
++    CTR_BAG_TOUCH_CANCEL, // the touch went to another screen
++};
++
++// The pocket name and its arrows, above the bag.
++#define CTR_POCKET_BOTTOM 36
++#define CTR_POCKET_RIGHT  112
++#define CTR_POCKET_SPLIT  64
++// The item list's window, its scroll arrows just above and below it.
++#define CTR_LIST_LEFT   112
++#define CTR_LIST_RIGHT  232
++#define CTR_LIST_TOP    16
++#define CTR_LIST_BOTTOM 144
++// A row held this long without moving is picked up to be moved.
++#define CTR_HOLD_FRAMES 30
++
++static struct {
++    bool8 held, dragged, used;
++    s16 x0, y0, x, y;
++    s16 applied; // steps of the drag already acted on
++    u16 frames;  // held without moving
++} sCtrTouch;
++
++void CtrMenu_PostTap(s16 x, s16 y);
++bool8 CtrMenu_TakeTap(s16 *x, s16 *y);
++s8 CtrMenu_EntryAt(s16 x, s16 y);
++s8 CtrMenu_Choose(s8 entry, bool8 sound);
++s16 CtrListMenu_RowAt(u8 listTaskId, s16 x, s16 y);
++void CtrListMenu_Select(u8 listTaskId, u16 row);
++s16 CtrListMenu_Scroll(u8 listTaskId, s16 rows);
++
++bool8 CtrBag_IsOpen(void)
++{
++    return gBagMenu != NULL && gMain.callback2 == CB2_BagMenuRun;
++}
++
++void CtrBag_Touch(u8 phase, s16 x, s16 y)
++{
++    switch (phase)
++    {
++    case CTR_BAG_TOUCH_DOWN:
++        memset(&sCtrTouch, 0, sizeof(sCtrTouch));
++        sCtrTouch.held = TRUE;
++        sCtrTouch.x0 = sCtrTouch.x = x;
++        sCtrTouch.y0 = sCtrTouch.y = y;
++        break;
++    case CTR_BAG_TOUCH_MOVE:
++        if (!sCtrTouch.held)
++            break;
++        sCtrTouch.x = x;
++        sCtrTouch.y = y;
++        if (x - sCtrTouch.x0 > 8 || sCtrTouch.x0 - x > 8 || y - sCtrTouch.y0 > 8 || sCtrTouch.y0 - y > 8)
++            sCtrTouch.dragged = TRUE;
++        break;
++    case CTR_BAG_TOUCH_UP:
++        if (!sCtrTouch.held)
++            break;
++        sCtrTouch.held = FALSE;
++        if (!sCtrTouch.dragged && !sCtrTouch.used)
++            CtrMenu_PostTap(sCtrTouch.x, sCtrTouch.y);
++        break;
++    case CTR_BAG_TOUCH_CANCEL:
++        sCtrTouch.held = FALSE;
++        break;
++    }
++}
++
++// The column's BAG button, while the list takes input: the bag closes, as B
++// or CLOSE BAG closes it.
++bool8 CtrBag_Close(void)
++{
++    u8 taskId = FindTaskIdByFunc(Task_BagMenu_HandleInput);
++
++    if (!CtrBag_IsOpen() || taskId == TASK_NONE || gPaletteFade.active || MenuHelpers_ShouldWaitForLinkRecv() == TRUE)
++        return FALSE;
++    if (gBagPosition.location == ITEMMENULOCATION_BERRY_BLENDER_CRUSH
++     || gBagPosition.location == ITEMMENULOCATION_WALLY
++     || gBagPosition.location == ITEMMENULOCATION_RAIDEND
++     || gBagPosition.location == ITEMMENULOCATION_BERRY_TREE_MULCH)
++    {
++        PlaySE(SE_FAILURE);
++        return FALSE;
++    }
++    PlaySE(SE_SELECT);
++    gSpecialVar_ItemId = ITEM_NONE;
++    gTasks[taskId].func = Task_FadeAndCloseBagMenu;
++    return TRUE;
++}
++
++// How many steps of step pixels the finger has gone up since it was last
++// asked (down: fewer than 0).
++static s16 CtrBag_DragSteps(s16 step)
++{
++    s16 total = (sCtrTouch.y0 - sCtrTouch.y) / step;
++    s16 steps = total - sCtrTouch.applied;
++
++    sCtrTouch.applied = total;
++    return steps;
++}
++
++static bool8 CtrBag_InList(s16 x, s16 y)
++{
++    return x >= CTR_LIST_LEFT && x < CTR_LIST_RIGHT && y >= CTR_LIST_TOP - 8 && y < CTR_LIST_BOTTOM + 8;
++}
++
++// Dragging the list scrolls it, a row a row's height. TRUE while it does.
++static bool8 CtrBag_DragList(u8 listTaskId)
++{
++    s16 steps;
++
++    if (!sCtrTouch.held || !sCtrTouch.dragged || !CtrBag_InList(sCtrTouch.x0, sCtrTouch.y0))
++        return FALSE;
++    steps = CtrBag_DragSteps(GetFontAttribute(FONT_NARROW, FONTATTR_MAX_LETTER_HEIGHT));
++    if (steps != 0)
++        CtrListMenu_Scroll(listTaskId, steps);
++    return TRUE;
++}
++
++// The item list. TRUE when the task must return, having switched the pocket
++// or started moving an item; otherwise *listPosition is what A would have
++// chosen, or LIST_NOTHING_CHOSEN.
++static bool8 CtrBag_ListTouch(u8 taskId, s32 *listPosition)
++{
++    s16 *data = gTasks[taskId].data;
++    u16 *scrollPos = &gBagPosition.scrollPosition[gBagPosition.pocket];
++    u16 *cursorPos = &gBagPosition.cursorPosition[gBagPosition.pocket];
++    s16 x, y, row;
++
++    if (CtrBag_DragList(tListTaskId))
++        return FALSE;
++    // Held still on a row: that item is picked up to move, as SELECT does.
++    if (sCtrTouch.held)
++    {
++        if (!sCtrTouch.dragged && !sCtrTouch.used && ++sCtrTouch.frames >= CTR_HOLD_FRAMES
++         && (row = CtrListMenu_RowAt(tListTaskId, sCtrTouch.x0, sCtrTouch.y0)) >= 0)
++        {
++            sCtrTouch.used = TRUE;
++            if (CanSwapItems() == TRUE)
++            {
++                CtrListMenu_Select(tListTaskId, row);
++                ListMenuGetScrollAndRow(tListTaskId, scrollPos, cursorPos);
++                if ((*scrollPos + *cursorPos) != gBagMenu->numItemStacks[gBagPosition.pocket] - 1)
++                {
++                    PlaySE(SE_SELECT);
++                    StartItemSwap(taskId);
++                    return TRUE;
++                }
++            }
++        }
++        return FALSE;
++    }
++    if (!CtrMenu_TakeTap(&x, &y))
++        return FALSE;
++    // The pocket name: its left half is the previous pocket, its right the next.
++    if (y < CTR_POCKET_BOTTOM && x < CTR_POCKET_RIGHT)
++    {
++        if (gBagMenu->pocketSwitchDisabled)
++            return FALSE;
++        PlaySE(SE_SELECT);
++        SwitchBagPocket(taskId, x < CTR_POCKET_SPLIT ? MENU_CURSOR_DELTA_LEFT : MENU_CURSOR_DELTA_RIGHT, FALSE);
++        return TRUE;
++    }
++    // The scroll arrows: a page up or down.
++    if (x >= CTR_LIST_LEFT && x < CTR_LIST_RIGHT && (y < CTR_LIST_TOP || y >= CTR_LIST_BOTTOM))
++    {
++        s16 page = gBagMenu->numShownItems[gBagPosition.pocket];
++
++        CtrListMenu_Scroll(tListTaskId, y < CTR_LIST_TOP ? -page : page);
++        return FALSE;
++    }
++    // A row: the cursor goes to it; on the cursor's row, it is chosen.
++    row = CtrListMenu_RowAt(tListTaskId, x, y);
++    if (row < 0)
++        return FALSE;
++    ListMenuGetScrollAndRow(tListTaskId, scrollPos, cursorPos);
++    if (row != *cursorPos)
++        CtrListMenu_Select(tListTaskId, row);
++    else
++        *listPosition = sListBuffer1->subBuffers[*scrollPos + row].id;
++    return FALSE;
++}
++
++// Moving an item: a tap on a row puts it there, anywhere else leaves it.
++static bool8 CtrBag_SwapTouch(u8 taskId)
++{
++    s16 *data = gTasks[taskId].data;
++    u16 *scrollPos = &gBagPosition.scrollPosition[gBagPosition.pocket];
++    u16 *cursorPos = &gBagPosition.cursorPosition[gBagPosition.pocket];
++    s16 x, y, row;
++
++    if (CtrBag_DragList(tListTaskId))
++    {
++        ListMenuGetScrollAndRow(tListTaskId, scrollPos, cursorPos);
++        SetItemMenuSwapLineInvisibility(FALSE);
++        UpdateItemMenuSwapLinePos(*cursorPos);
++        return TRUE;
++    }
++    if (sCtrTouch.held || !CtrMenu_TakeTap(&x, &y))
++        return FALSE;
++    row = CtrListMenu_RowAt(tListTaskId, x, y);
++    PlaySE(SE_SELECT);
++    if (row < 0)
++    {
++        ListMenuGetScrollAndRow(tListTaskId, scrollPos, cursorPos);
++        CancelItemSwap(taskId);
++        return TRUE;
++    }
++    CtrListMenu_Select(tListTaskId, row);
++    ListMenuGetScrollAndRow(tListTaskId, scrollPos, cursorPos);
++    DoItemSwap(taskId);
++    return TRUE;
++}
++
++// The item's menu (USE, GIVE, TOSS...): the entry tapped, as A chooses it;
++// away from the menu, B. TRUE when a tap was taken.
++static bool8 CtrBag_ContextTouch(s8 *selection)
++{
++    s16 x, y;
++    s8 entry;
++
++    if (!CtrMenu_TakeTap(&x, &y))
++        return FALSE;
++    entry = CtrMenu_EntryAt(x, y);
++    if (entry < 0)
++        *selection = MENU_B_PRESSED;
++    else if (IsValidContextMenuPos(entry))
++        *selection = CtrMenu_Choose(entry, FALSE);
++    return TRUE;
++}
++
++// How many: dragging up or down counts up or down, one every 8 pixels; a
++// tap on the number is A, anywhere else B.
++static u8 CtrBag_QuantityTouch(s16 *count, u16 max, u8 windowType)
++{
++    u8 windowId = gBagMenu->windowIds[windowType];
++    s16 x, y, left, top, steps, value;
++
++    if (sCtrTouch.held)
++    {
++        if (!sCtrTouch.dragged || (steps = CtrBag_DragSteps(8)) == 0)
++            return CTR_QUANTITY_NONE;
++        value = *count + steps;
++        if (value > (s16)max)
++            value = max;
++        if (value < 1)
++            value = 1;
++        if (value == *count)
++            return CTR_QUANTITY_NONE;
++        *count = value;
++        PlaySE(SE_SELECT);
++        return CTR_QUANTITY_CHANGED;
++    }
++    if (windowId == WINDOW_NONE || !CtrMenu_TakeTap(&x, &y))
++        return CTR_QUANTITY_NONE;
++    // The window with its frame.
++    left = GetWindowAttribute(windowId, WINDOW_TILEMAP_LEFT) * 8 - 8;
++    top = GetWindowAttribute(windowId, WINDOW_TILEMAP_TOP) * 8 - 8;
++    if (x >= left && x < left + (s16)GetWindowAttribute(windowId, WINDOW_WIDTH) * 8 + 16
++     && y >= top && y < top + (s16)GetWindowAttribute(windowId, WINDOW_HEIGHT) * 8 + 16)
++        return CTR_QUANTITY_OK;
++    return CTR_QUANTITY_CANCEL;
++}
++
++//------------------------------------------------------------------------------
++//  Reading ahead. An item's icon is read off the SD card the first time the
++//  cursor reaches it, milliseconds on a console. While the bag waits for
++//  input the icons of every pocket, the one on show first, are read ahead
++//  into the asset cache, one read a frame.
++//------------------------------------------------------------------------------
++
++static struct {
++    u8 pocket, fromPocket;
++    u16 slot;
++} sCtrPrefetch = {0, 0xFF, 0};
++
++static bool8 CtrBag_Read(const void *ptr)
++{
++    u32 misses = CtrAssets_GetStats()->misses;
++
++    if (ptr != NULL)
++        Port_ResolveAssetPointer(ptr);
++    return CtrAssets_GetStats()->misses != misses;
++}
++
++static void CtrBag_Prefetch(void)
++{
++    if (gBagMenu == NULL || FindTaskIdByFunc(Task_BagMenu_HandleInput) == TASK_NONE || gPaletteFade.active)
++        return;
++    if (sCtrPrefetch.fromPocket != gBagPosition.pocket)
++    {
++        sCtrPrefetch.fromPocket = gBagPosition.pocket;
++        sCtrPrefetch.pocket = 0;
++        sCtrPrefetch.slot = 0;
++    }
++    while (sCtrPrefetch.pocket < POCKETS_COUNT)
++    {
++        u8 pocketId = (gBagPosition.pocket + sCtrPrefetch.pocket) % POCKETS_COUNT;
++        struct BagPocket *pocket = &gBagPockets[pocketId];
++        enum Item itemId;
++        bool8 read;
++
++        if (sCtrPrefetch.slot >= pocket->capacity || GetBagItemId(pocketId, sCtrPrefetch.slot) == ITEM_NONE)
++        {
++            sCtrPrefetch.pocket++;
++            sCtrPrefetch.slot = 0;
++            continue;
++        }
++        itemId = GetBagItemId(pocketId, sCtrPrefetch.slot++);
++        read = CtrBag_Read(GetItemIconPic(itemId));
++        read |= CtrBag_Read(GetItemIconPalette(itemId));
++        if (read)
++            return;
++    }
 +}
 +#endif
 diff --git c/src/item_use.c w/src/item_use.c
@@ -18440,7 +19019,7 @@ index facfdfab..d54e1fa2 100644
  static void Task_ParentSearchForChildren(u8 taskId)
  {
 diff --git c/src/list_menu.c w/src/list_menu.c
-index 91ef21fd..3d8713af 100644
+index 91ef21fd..0e15ca93 100644
 --- c/src/list_menu.c
 +++ w/src/list_menu.c
 @@ -13,10 +13,6 @@
@@ -18454,6 +19033,76 @@ index 91ef21fd..3d8713af 100644
  // Cursors after this point are created using a sprite with their own task.
  // This allows them to have idle animations. Cursors prior to this are simply printed text.
  #define CURSOR_OBJECT_START CURSOR_RED_OUTLINE
+@@ -1355,3 +1351,69 @@ static void ListMenuRemoveRedArrowCursorObject(u8 taskId)
+     DestroySprite(&gSprites[data->spriteId]);
+     DestroyTask(taskId);
+ }
++
++#ifdef PLATFORM_3DS
++// Taps on a list shown on the 3DS bottom screen (the bag), which act on the
++// list directly: its row under a point, the selection put on a row, the list
++// scrolled by rows. What each does on screen is what the D-pad's moves do.
++
++// The row shown under (x, y), in pixels of the screen the list's window is
++// on; -1 when the point is not on a row.
++s16 CtrListMenu_RowAt(u8 listTaskId, s16 x, s16 y)
++{
++    struct ListMenu *list = (void *) gTasks[listTaskId].data;
++    u8 yMultiplier = GetFontAttribute(list->template.fontId, FONTATTR_MAX_LETTER_HEIGHT) + list->template.itemVerticalPadding;
++    s16 left = GetWindowAttribute(list->template.windowId, WINDOW_TILEMAP_LEFT) * 8;
++    s16 top = GetWindowAttribute(list->template.windowId, WINDOW_TILEMAP_TOP) * 8 + list->template.upText_Y;
++    s16 width = GetWindowAttribute(list->template.windowId, WINDOW_WIDTH) * 8;
++    s16 row;
++
++    if (x < left || x >= left + width || y < top || yMultiplier == 0)
++        return -1;
++    row = (y - top) / yMultiplier;
++    if (row >= list->template.maxShowed || list->scrollOffset + row >= list->template.totalItems)
++        return -1;
++    return row;
++}
++
++// The selection on the row shown at row, as if the cursor had moved there.
++void CtrListMenu_Select(u8 listTaskId, u16 row)
++{
++    struct ListMenu *list = (void *) gTasks[listTaskId].data;
++    u16 oldRow = list->selectedRow;
++
++    if (row == oldRow || row >= list->template.maxShowed || list->template.items[list->scrollOffset + row].id == LIST_HEADER)
++        return;
++    list->selectedRow = row;
++    ListMenuErasePrintedCursor(list, oldRow);
++    ListMenuDrawCursor(list);
++    ListMenuCallSelectionChangedCallback(list, FALSE);
++    CopyWindowToVram(list->template.windowId, COPYWIN_GFX);
++}
++
++// The list scrolled by rows (down for more than 0), the selection staying on
++// the row it is on. Returns the rows it moved, fewer at either end.
++s16 CtrListMenu_Scroll(u8 listTaskId, s16 rows)
++{
++    struct ListMenu *list = (void *) gTasks[listTaskId].data;
++    s32 maxScroll = list->template.totalItems - list->template.maxShowed;
++    s32 scroll = list->scrollOffset + rows;
++
++    if (scroll > maxScroll)
++        scroll = maxScroll;
++    if (scroll < 0)
++        scroll = 0;
++    rows = scroll - list->scrollOffset;
++    if (rows == 0)
++        return 0;
++    ListMenuErasePrintedCursor(list, list->selectedRow);
++    list->scrollOffset = scroll;
++    if (list->template.items[list->scrollOffset + list->selectedRow].id == LIST_HEADER)
++        list->selectedRow = rows > 0 ? list->selectedRow + 1 : list->selectedRow - 1;
++    ListMenuScroll(list, rows > 0 ? rows : -rows, rows > 0);
++    ListMenuDrawCursor(list);
++    ListMenuCallSelectionChangedCallback(list, FALSE);
++    CopyWindowToVram(list->template.windowId, COPYWIN_GFX);
++    return rows;
++}
++#endif
 diff --git c/src/load_save.c w/src/load_save.c
 index 12c0d902..350148df 100644
 --- c/src/load_save.c
@@ -20449,7 +21098,7 @@ index 801690ca..c6c2e424 100644
      if (y == 0)
      {
 diff --git c/src/menu.c w/src/menu.c
-index 2a2963d8..2a60370c 100644
+index 2a2963d8..b927fbb4 100644
 --- c/src/menu.c
 +++ w/src/menu.c
 @@ -27,6 +27,12 @@
@@ -20695,7 +21344,7 @@ index 2a2963d8..2a60370c 100644
  }
  
  void BufferSaveMenuText(u8 textId, u8 *dest, u8 color)
-@@ -1971,3 +2106,11 @@ static void Task_SmoothBlendLayers(u8 taskId)
+@@ -1971,3 +2106,115 @@ static void Task_SmoothBlendLayers(u8 taskId)
  #undef tEvBDelta
  #undef tEvWhich
  #undef tEvStepCount
@@ -20706,9 +21355,136 @@ index 2a2963d8..2a60370c 100644
 +{
 +    return sCtrYesNoOpen;
 +}
++
++// The entry of the open menu under (x, y), in pixels of the screen its window
++// is on; -1 when the point is not on one of its entries. A grid's entries go
++// row by row, as its cursor counts them.
++s8 CtrMenu_EntryAt(s16 x, s16 y)
++{
++    s16 left = GetWindowAttribute(sMenu.windowId, WINDOW_TILEMAP_LEFT) * 8;
++    s16 top = GetWindowAttribute(sMenu.windowId, WINDOW_TILEMAP_TOP) * 8 + sMenu.top;
++    s16 width = GetWindowAttribute(sMenu.windowId, WINDOW_WIDTH) * 8;
++    s16 row, column = 0;
++
++    if (sMenu.optionHeight == 0 || x < left || x >= left + width || y < top)
++        return -1;
++    row = (y - top) / sMenu.optionHeight;
++    if (sMenu.columns > 1)
++    {
++        if (sMenu.optionWidth == 0 || row >= sMenu.rows)
++            return -1;
++        column = (x - left - sMenu.left) / sMenu.optionWidth;
++        if (column < 0)
++            column = 0;
++        if (column >= sMenu.columns)
++            column = sMenu.columns - 1;
++        row = row * sMenu.columns + column;
++    }
++    if (row < sMenu.minCursorPos || row > sMenu.maxCursorPos)
++        return -1;
++    return row;
++}
++
++// A tap on an entry: the cursor goes to it and the entry is chosen, as A
++// chooses it (with its sound where the menu makes one).
++s8 CtrMenu_Choose(s8 entry, bool8 sound)
++{
++    if (sMenu.columns > 1)
++    {
++        u8 old = sMenu.cursorPos;
++
++        sMenu.cursorPos = entry;
++        MoveMenuGridCursor(old, entry);
++    }
++    else
++    {
++        Menu_MoveCursorNoWrapAround(entry - sMenu.cursorPos);
++    }
++    if (sound && !sMenu.APressMuted)
++        PlaySE(SE_SELECT);
++    return sMenu.cursorPos;
++}
++
++// A tap on a game screen shown on the 3DS bottom screen (the bag), in pixels
++// of that screen, for whatever waits for input there to take: a menu, a
++// yes/no box, a message waiting to go on. A tap nothing took for half a
++// second is dropped, so it does not act later on something else.
++static struct {
++    bool8 pending;
++    s16 x, y;
++    u32 frame;
++} sCtrTap;
++
++void CtrMenu_PostTap(s16 x, s16 y)
++{
++    sCtrTap.pending = TRUE;
++    sCtrTap.x = x;
++    sCtrTap.y = y;
++    sCtrTap.frame = gMain.vblankCounter1;
++}
++
++bool8 CtrMenu_TakeTap(s16 *x, s16 *y)
++{
++    if (!sCtrTap.pending)
++        return FALSE;
++    sCtrTap.pending = FALSE;
++    if (gMain.vblankCounter1 - sCtrTap.frame > 30)
++        return FALSE;
++    *x = sCtrTap.x;
++    *y = sCtrTap.y;
++    return TRUE;
++}
++
++// A message waiting for A or B: any tap goes on.
++bool8 CtrMenu_TakeAck(void)
++{
++    s16 x, y;
++
++    return CtrMenu_TakeTap(&x, &y);
++}
++
++// A yes/no box: YES or NO tapped is chosen, a tap away from it is B.
++s8 CtrMenu_YesNoInput(void)
++{
++    s16 x, y;
++    s8 entry;
++
++    if (!CtrMenu_TakeTap(&x, &y))
++        return Menu_ProcessInputNoWrapClearOnChoose();
++    entry = CtrMenu_EntryAt(x, y);
++    if (entry >= 0)
++        CtrMenu_Choose(entry, TRUE);
++    else
++        entry = MENU_B_PRESSED;
++    EraseYesNoWindow();
++    return entry;
++}
 +#endif
+diff --git c/src/menu_helpers.c w/src/menu_helpers.c
+index baf14d9e..18d773ef 100644
+--- c/src/menu_helpers.c
++++ w/src/menu_helpers.c
+@@ -157,9 +157,18 @@ void CreateYesNoMenuWithCallbacks(u8 taskId, const struct WindowTemplate *templa
+     gTasks[taskId].func = Task_CallYesOrNoCallback;
+ }
+ 
++#ifdef PLATFORM_3DS
++// menu.c: YES or NO tapped on the 3DS bottom screen, where the bag is shown.
++s8 CtrMenu_YesNoInput(void);
++#endif
++
+ static void Task_CallYesOrNoCallback(u8 taskId)
+ {
++#ifdef PLATFORM_3DS
++    switch (CtrMenu_YesNoInput())
++#else
+     switch (Menu_ProcessInputNoWrapClearOnChoose())
++#endif
+     {
+     case 0:
+         PlaySE(SE_SELECT);
 diff --git c/src/mon_markings.c w/src/mon_markings.c
-index e2317c36..548b19be 100644
+index e2317c36..130147b8 100644
 --- c/src/mon_markings.c
 +++ w/src/mon_markings.c
 @@ -9,6 +9,9 @@
@@ -20735,7 +21511,64 @@ index e2317c36..548b19be 100644
      sMenu->framePalette = frame->pal;
      sMenu->tileLoadState = 0;
      CpuFill16(0, sMenu->windowSpriteTiles, sizeof(sMenu->windowSpriteTiles));
-@@ -610,5 +619,32 @@ static struct Sprite *CreateMarkingComboSprite(u16 tileTag, u16 paletteTag, cons
+@@ -390,10 +399,30 @@ void FreeMonMarkingsMenu(void)
+     }
+ }
+ 
+-bool8 HandleMonMarkingsMenuInput(void)
++// A on the row under the cursor: a marking toggles, OK and CANCEL close the menu.
++static bool8 ChooseMonMarking(void)
+ {
+     u16 i;
+ 
++    PlaySE(SE_SELECT);
++
++    switch (sMenu->cursorPos)
++    {
++    case SELECTION_OK:
++        sMenu->markings = 0;
++        for (i = 0; i < NUM_MON_MARKINGS; i++)
++            sMenu->markings |= sMenu->markingsArray[i] << i;
++        return FALSE;
++    case SELECTION_CANCEL:
++        return FALSE;
++    }
++
++    sMenu->markingsArray[sMenu->cursorPos] = !sMenu->markingsArray[sMenu->cursorPos];
++    return TRUE;
++}
++
++bool8 HandleMonMarkingsMenuInput(void)
++{
+     if (JOY_NEW(DPAD_UP))
+     {
+         PlaySE(SE_SELECT);
+@@ -411,23 +440,7 @@ bool8 HandleMonMarkingsMenuInput(void)
+     }
+ 
+     if (JOY_NEW(A_BUTTON))
+-    {
+-        PlaySE(SE_SELECT);
+-
+-        switch (sMenu->cursorPos)
+-        {
+-        case SELECTION_OK:
+-            sMenu->markings = 0;
+-            for (i = 0; i < NUM_MON_MARKINGS; i++)
+-                sMenu->markings |= sMenu->markingsArray[i] << i;
+-            return FALSE;
+-        case SELECTION_CANCEL:
+-            return FALSE;
+-        }
+-
+-        sMenu->markingsArray[sMenu->cursorPos] = !sMenu->markingsArray[sMenu->cursorPos];
+-        return TRUE;
+-    }
++        return ChooseMonMarking();
+ 
+     if (JOY_NEW(B_BUTTON))
+     {
+@@ -610,5 +623,42 @@ static struct Sprite *CreateMarkingComboSprite(u16 tileTag, u16 paletteTag, cons
  // Update what combination is shown, used for sprites created with CreateMonMarkingComboSprite
  void UpdateMonMarkingTiles(u8 markings, void *dest)
  {
@@ -20766,6 +21599,16 @@ index e2317c36..548b19be 100644
 +{
 +    if (sMenu != NULL && cursor >= 0 && cursor <= SELECTION_CANCEL)
 +        sMenu->cursorPos = cursor;
++}
++
++// A tap on a row: the cursor goes there and it is chosen, as with A. Returns
++// what HandleMonMarkingsMenuInput does: FALSE once the menu is to close.
++bool8 CtrMonMarkings_Choose(u8 cursor)
++{
++    if (sMenu == NULL || cursor > SELECTION_CANCEL)
++        return TRUE;
++    sMenu->cursorPos = cursor;
++    return ChooseMonMarking();
 +}
 +#endif
 diff --git c/src/multiboot.c w/src/multiboot.c
@@ -27108,10 +27951,177 @@ index 2ab8f37b..7bb60ae5 100644
      u16 scrollOffset;
  };
 diff --git c/src/pokedex.c w/src/pokedex.c
-index d36708ff..d7e9b5b9 100644
+index d36708ff..4e3f01c1 100644
 --- c/src/pokedex.c
 +++ w/src/pokedex.c
-@@ -2030,11 +2030,11 @@ void LoadPokedexBgPalette(bool8 isSearchResults)
+@@ -161,6 +161,36 @@ static void PrintSelectorArrow(u32);
+ static void PrintSearchParameterTitle(u32, const u8 *);
+ static void ClearSearchParameterBoxText(void);
+ 
++#ifdef PLATFORM_3DS
++// 3DS: what a touch on the Pokedex does, taken by the input task of the
++// screen on show in place of its button (see the end of the file).
++enum {
++    CTR_DEX_NONE,
++    CTR_DEX_CHOOSE,  // A
++    CTR_DEX_BACK,    // B
++    CTR_DEX_MENU,    // START
++    CTR_DEX_SEARCH,  // SELECT
++    CTR_DEX_TO_AREA, // a tab of the select bar
++    CTR_DEX_TO_CRY,
++    CTR_DEX_TO_SIZE,
++    CTR_DEX_TIMEOFDAY, // the area screen's time-of-day label (data[1] = 3)
++};
++static void CtrDex_Reset(void);
++static u8 CtrDex_ListAction(void);
++static u8 CtrDex_MenuAction(u8 count);
++static bool8 CtrDex_DragStep(s8 dir);
++static bool8 CtrDex_Swipe(s8 dir);
++static u8 CtrDex_InfoAction(void);
++static u8 CtrDex_SubmenuAction(u8 screen);
++static u8 CtrDex_SearchTopBarAction(u8 taskId);
++static u8 CtrDex_SearchMenuAction(u8 taskId);
++static u8 CtrDex_SearchParamAction(u8 taskId);
++static u8 CtrDex_AnyTapAction(void);
++#define CTR_DEX_IS(act, what) ((act) == (what))
++#else
++#define CTR_DEX_IS(act, what) FALSE
++#endif
++
+ // const rom data
+ #include "data/pokemon/pokedex_orders.h"
+ 
+@@ -1466,6 +1496,9 @@ void CB2_OpenPokedex(void)
+     case 2:
+         sPokedexView = AllocZeroed(sizeof(struct PokedexView));
+         ResetPokedexView(sPokedexView);
++#ifdef PLATFORM_3DS
++        CtrDex_Reset();
++#endif
+         CreateTask(Task_OpenPokedexMainPage, 0);
+         sPokedexView->dexMode = gSaveBlock2Ptr->pokedex.mode;
+         if (!IsNationalPokedexEnabled())
+@@ -1531,7 +1564,10 @@ void Task_HandlePokedexInput(u8 taskId)
+     }
+     else
+     {
+-        if (JOY_NEW(A_BUTTON) && sPokedexView->pokedexList[sPokedexView->selectedPokemon].seen)
++#ifdef PLATFORM_3DS
++        u8 ctrAct = CtrDex_ListAction();
++#endif
++        if ((JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE)) && sPokedexView->pokedexList[sPokedexView->selectedPokemon].seen)
+         {
+             HandleDestroyStatBars_HGSS();
+             UpdateSelectedMonSpriteId();
+@@ -1541,7 +1577,7 @@ void Task_HandlePokedexInput(u8 taskId)
+             PlaySE(SE_PIN);
+             FreeWindowAndBgBuffers();
+         }
+-        else if (JOY_NEW(START_BUTTON))
++        else if (JOY_NEW(START_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_MENU))
+         {
+             HandleDestroyStatBars_HGSS();
+             HandleDestroyStatBarsBg_HGSS();
+@@ -1551,7 +1587,7 @@ void Task_HandlePokedexInput(u8 taskId)
+             gTasks[taskId].func = Task_HandlePokedexStartMenuInput;
+             PlaySE(SE_SELECT);
+         }
+-        else if (JOY_NEW(SELECT_BUTTON))
++        else if (JOY_NEW(SELECT_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_SEARCH))
+         {
+             PlaySE(SE_SELECT);
+             BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
+@@ -1565,7 +1601,7 @@ void Task_HandlePokedexInput(u8 taskId)
+             PlaySE(SE_PC_LOGIN);
+             FreeWindowAndBgBuffers();
+         }
+-        else if (JOY_NEW(B_BUTTON))
++        else if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+         {
+             HandleDestroyStatBars_HGSS();
+             BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
+@@ -1601,7 +1637,10 @@ static void Task_HandlePokedexStartMenuInput(u8 taskId)
+     }
+     else
+     {
+-        if (JOY_NEW(A_BUTTON))
++#ifdef PLATFORM_3DS
++        u8 ctrAct = CtrDex_MenuAction(4);
++#endif
++        if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+         {
+             switch (sPokedexView->menuCursorPos)
+             {
+@@ -1632,7 +1671,7 @@ static void Task_HandlePokedexStartMenuInput(u8 taskId)
+         }
+ 
+         //Exit menu when Start or B is pressed
+-        if (JOY_NEW(START_BUTTON | B_BUTTON))
++        if (JOY_NEW(START_BUTTON | B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+         {
+             sPokedexView->menuIsOpen = FALSE;
+             gTasks[taskId].func = Task_HandlePokedexInput;
+@@ -1749,7 +1788,10 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+     }
+     else
+     {
+-        if (JOY_NEW(A_BUTTON) && sPokedexView->pokedexList[sPokedexView->selectedPokemon].seen)
++#ifdef PLATFORM_3DS
++        u8 ctrAct = CtrDex_ListAction();
++#endif
++        if ((JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE)) && sPokedexView->pokedexList[sPokedexView->selectedPokemon].seen)
+         {
+             u32 a;
+ 
+@@ -1762,7 +1804,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+             PlaySE(SE_PIN);
+             FreeWindowAndBgBuffers();
+         }
+-        else if (JOY_NEW(START_BUTTON))
++        else if (JOY_NEW(START_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_MENU))
+         {
+             HandleDestroyStatBars_HGSS();
+             HandleDestroyStatBarsBg_HGSS();
+@@ -1772,7 +1814,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+             gTasks[taskId].func = Task_HandleSearchResultsStartMenuInput;
+             PlaySE(SE_SELECT);
+         }
+-        else if (JOY_NEW(SELECT_BUTTON))
++        else if (JOY_NEW(SELECT_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_SEARCH))
+         {
+             BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
+             gTasks[taskId].tLoadScreenTaskId = LoadSearchMenu();
+@@ -1781,7 +1823,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+             PlaySE(SE_PC_LOGIN);
+             FreeWindowAndBgBuffers();
+         }
+-        else if (JOY_NEW(B_BUTTON))
++        else if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+         {
+             HandleDestroyStatBars_HGSS();
+             BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
+@@ -1816,7 +1858,10 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
+     }
+     else
+     {
+-        if (JOY_NEW(A_BUTTON))
++#ifdef PLATFORM_3DS
++        u8 ctrAct = CtrDex_MenuAction(5);
++#endif
++        if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+         {
+             switch (sPokedexView->menuCursorPos)
+             {
+@@ -1852,7 +1897,7 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
+         }
+ 
+         //Exit menu when Start or B is pressed
+-        if (JOY_NEW(START_BUTTON | B_BUTTON))
++        if (JOY_NEW(START_BUTTON | B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+         {
+             sPokedexView->menuIsOpen = FALSE;
+             gTasks[taskId].func = Task_HandleSearchResultsInput;
+@@ -2030,11 +2075,11 @@ void LoadPokedexBgPalette(bool8 isSearchResults)
          return;
  
      if (isSearchResults == TRUE)
@@ -27126,7 +28136,31 @@ index d36708ff..d7e9b5b9 100644
      LoadPalette(GetOverworldTextboxPalettePtr(), BG_PLTT_ID(15), PLTT_SIZE_4BPP);
  }
  
-@@ -2605,7 +2605,11 @@ static void UpdateSelectedMonSpriteId(void)
+@@ -2535,7 +2580,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
+     u16 startingPos;
+     u8 scrollDir = 0;
+ 
++#ifdef PLATFORM_3DS
++    if ((JOY_HELD(DPAD_UP) || CtrDex_DragStep(-1)) && (selectedMon > 0))
++#else
+     if (JOY_HELD(DPAD_UP) && (selectedMon > 0))
++#endif
+     {
+         scrollDir = 1;
+         selectedMon = GetNextPosition(1, selectedMon, 0, sPokedexView->pokemonListCount - 1);
+@@ -2544,7 +2593,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
+         sPokedexView->justScrolled = TRUE;
+         PlaySE(SE_DEX_SCROLL);
+     }
++#ifdef PLATFORM_3DS
++    else if ((JOY_HELD(DPAD_DOWN) || CtrDex_DragStep(1)) && (selectedMon < sPokedexView->pokemonListCount - 1))
++#else
+     else if (JOY_HELD(DPAD_DOWN) && (selectedMon < sPokedexView->pokemonListCount - 1))
++#endif
+     {
+         scrollDir = 2;
+         selectedMon = GetNextPosition(0, selectedMon, 0, sPokedexView->pokemonListCount - 1);
+@@ -2605,7 +2658,11 @@ static void UpdateSelectedMonSpriteId(void)
      {
          u16 spriteId = sPokedexView->monSpriteIds[i];
  
@@ -27138,7 +28172,31 @@ index d36708ff..d7e9b5b9 100644
              sPokedexView->selectedMonSpriteId = spriteId;
      }
  }
-@@ -3053,7 +3057,7 @@ static void SpriteCB_Scrollbar(struct Sprite *sprite)
+@@ -2618,7 +2675,11 @@ static bool8 TryDoInfoScreenScroll(void)
+     if (sPokedexView->sEvoScreenData.fromEvoPage)
+         return FALSE;
+ 
++#ifdef PLATFORM_3DS
++    if ((JOY_NEW(DPAD_UP) || CtrDex_Swipe(-1)) && selectedPokemon)
++#else
+     if (JOY_NEW(DPAD_UP) && selectedPokemon)
++#endif
+     {
+         nextPokemon = selectedPokemon;
+         while (nextPokemon != 0)
+@@ -2643,7 +2704,11 @@ static bool8 TryDoInfoScreenScroll(void)
+             return TRUE;
+         }
+     }
++#ifdef PLATFORM_3DS
++    else if ((JOY_NEW(DPAD_DOWN) || CtrDex_Swipe(1)) && selectedPokemon < sPokedexView->pokemonListCount - 1)
++#else
+     else if (JOY_NEW(DPAD_DOWN) && selectedPokemon < sPokedexView->pokemonListCount - 1)
++#endif
+     {
+         nextPokemon = selectedPokemon;
+         while (nextPokemon < sPokedexView->pokemonListCount - 1)
+@@ -3053,7 +3118,7 @@ static void SpriteCB_Scrollbar(struct Sprite *sprite)
      if (sPokedexView->currentPage != PAGE_MAIN && sPokedexView->currentPage != PAGE_SEARCH_RESULTS)
          DestroySprite(sprite);
      else
@@ -27147,7 +28205,115 @@ index d36708ff..d7e9b5b9 100644
  }
  
  static void SpriteCB_ScrollArrow(struct Sprite *sprite)
-@@ -4096,11 +4100,11 @@ void Task_HandleCaughtMonPageInput(u8 taskId)
+@@ -3352,7 +3417,10 @@ void Task_HandleInfoScreenInput(u8 taskId)
+         PlaySE(SE_DEX_SCROLL);
+         return;
+     }
+-    if (JOY_NEW(B_BUTTON))
++#ifdef PLATFORM_3DS
++    u8 ctrAct = CtrDex_InfoAction();
++#endif
++    if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+     {
+         BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 16, RGB_BLACK);
+         gTasks[taskId].func = Task_ExitInfoScreen;
+@@ -3363,7 +3431,7 @@ void Task_HandleInfoScreenInput(u8 taskId)
+     if (TryHandleInfoScreenInput_HGSS(taskId))
+         return;
+ 
+-    if (JOY_NEW(A_BUTTON))
++    if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+     {
+         switch (sPokedexView->selectedScreen)
+         {
+@@ -3664,7 +3732,10 @@ void Task_HandleCryScreenInput(u8 taskId)
+     else
+         LoadPlayArrowPalette(FALSE);
+ 
+-    if (JOY_NEW(A_BUTTON))
++#ifdef PLATFORM_3DS
++    u8 ctrAct = CtrDex_SubmenuAction(CRY_SCREEN);
++#endif
++    if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+     {
+         LoadPlayArrowPalette(TRUE);
+         CryScreenPlayButton(NationalPokedexNumToSpeciesForm(sPokedexListItem->dexNum));
+@@ -3672,7 +3743,7 @@ void Task_HandleCryScreenInput(u8 taskId)
+     }
+     else if (!gPaletteFade.active)
+     {
+-        if (JOY_NEW(B_BUTTON))
++        if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+         {
+             BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
+             m4aMPlayContinue(&gMPlayInfo_BGM);
+@@ -3681,7 +3752,7 @@ void Task_HandleCryScreenInput(u8 taskId)
+             PlaySE(SE_PC_OFF);
+             return;
+         }
+-        if (JOY_NEW(DPAD_LEFT)
++        if (JOY_NEW(DPAD_LEFT) || CTR_DEX_IS(ctrAct, CTR_DEX_TO_AREA)
+          || (JOY_NEW(L_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
+         {
+             BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
+@@ -3691,7 +3762,7 @@ void Task_HandleCryScreenInput(u8 taskId)
+             PlaySE(SE_DEX_PAGE);
+             return;
+         }
+-        if (JOY_NEW(DPAD_RIGHT)
++        if (JOY_NEW(DPAD_RIGHT) || CTR_DEX_IS(ctrAct, CTR_DEX_TO_SIZE)
+          || (JOY_NEW(R_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
+         {
+             if (!sPokedexListItem->owned)
+@@ -3854,14 +3925,17 @@ void Task_LoadSizeScreen(u8 taskId)
+ 
+ void Task_HandleSizeScreenInput(u8 taskId)
+ {
+-    if (JOY_NEW(B_BUTTON))
++#ifdef PLATFORM_3DS
++    u8 ctrAct = CtrDex_SubmenuAction(SIZE_SCREEN);
++#endif
++    if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+     {
+         BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
+         sPokedexView->screenSwitchState = 1;
+         gTasks[taskId].func = Task_SwitchScreensFromSizeScreen;
+         PlaySE(SE_PC_OFF);
+     }
+-    else if (JOY_NEW(DPAD_LEFT)
++    else if (JOY_NEW(DPAD_LEFT) || CTR_DEX_IS(ctrAct, CTR_DEX_TO_CRY)
+      || (JOY_NEW(L_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
+     {
+         BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
+@@ -3869,6 +3943,15 @@ void Task_HandleSizeScreenInput(u8 taskId)
+         gTasks[taskId].func = Task_SwitchScreensFromSizeScreen;
+         PlaySE(SE_DEX_PAGE);
+     }
++#ifdef PLATFORM_3DS
++    else if (ctrAct == CTR_DEX_TO_AREA)
++    {
++        BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
++        sPokedexView->screenSwitchState = 3;
++        gTasks[taskId].func = Task_SwitchScreensFromSizeScreen;
++        PlaySE(SE_DEX_PAGE);
++    }
++#endif
+ }
+ 
+ static void Task_SwitchScreensFromSizeScreen(u8 taskId)
+@@ -3886,6 +3969,11 @@ static void Task_SwitchScreensFromSizeScreen(u8 taskId)
+         case 2:
+             gTasks[taskId].func = Task_LoadCryScreen;
+             break;
++#ifdef PLATFORM_3DS
++        case 3:
++            gTasks[taskId].func = Task_LoadAreaScreen;
++            break;
++#endif
+         }
+     }
+ }
+@@ -4096,11 +4184,11 @@ void Task_HandleCaughtMonPageInput(u8 taskId)
      // Flicker caught screen color
      else if (++gTasks[taskId].tPalTimer & 16)
      {
@@ -27161,7 +28327,7 @@ index d36708ff..d7e9b5b9 100644
      }
  }
  
-@@ -5097,7 +5101,7 @@ static void Task_LoadSearchMenu(u8 taskId)
+@@ -5097,7 +5185,7 @@ static void Task_LoadSearchMenu(u8 taskId)
                  CopyToBgTilemapBuffer(3, gPokedexSearchMenuHoenn_Tilemap, 0, 0);
              else
                  CopyToBgTilemapBuffer(3, gPokedexSearchMenuNational_Tilemap, 0, 0);
@@ -27170,6 +28336,746 @@ index d36708ff..d7e9b5b9 100644
              gMain.state = 1;
          }
          break;
+@@ -5171,13 +5259,16 @@ void Task_SwitchToSearchMenuTopBar(u8 taskId)
+ 
+ static void Task_HandleSearchTopBarInput(u8 taskId)
+ {
+-    if (JOY_NEW(B_BUTTON))
++#ifdef PLATFORM_3DS
++    u8 ctrAct = CtrDex_SearchTopBarAction(taskId);
++#endif
++    if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+     {
+         PlaySE(SE_PC_OFF);
+         gTasks[taskId].func = Task_ExitSearch;
+         return;
+     }
+-    if (JOY_NEW(A_BUTTON))
++    if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+     {
+         switch (gTasks[taskId].tTopBarItem)
+         {
+@@ -5230,6 +5321,9 @@ static void Task_HandleSearchMenuInput(u8 taskId)
+ {
+     const u8 (*movementMap)[4];
+ 
++#ifdef PLATFORM_3DS
++    u8 ctrAct = CtrDex_SearchMenuAction(taskId);
++#endif
+     if (gTasks[taskId].tTopBarItem != SEARCH_TOPBAR_SEARCH)
+     {
+         if (!IsNationalPokedexEnabled())
+@@ -5245,14 +5339,14 @@ static void Task_HandleSearchMenuInput(u8 taskId)
+             movementMap = sSearchMovementMap_SearchNatDex;
+     }
+ 
+-    if (JOY_NEW(B_BUTTON))
++    if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+     {
+         PlaySE(SE_BALL);
+         SetDefaultSearchModeAndOrder(taskId);
+         gTasks[taskId].func = Task_SwitchToSearchMenuTopBar;
+         return;
+     }
+-    if (JOY_NEW(A_BUTTON))
++    if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+     {
+         if (gTasks[taskId].tMenuItem == SEARCH_OK)
+         {
+@@ -5355,7 +5449,10 @@ static void Task_WaitAndCompleteSearch(u8 taskId)
+ 
+ static void Task_SearchCompleteWaitForInput(u8 taskId)
+ {
+-    if (JOY_NEW(A_BUTTON))
++#ifdef PLATFORM_3DS
++    u8 ctrAct = CtrDex_AnyTapAction();
++#endif
++    if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+     {
+         if (sPokedexView->pokemonListCount != 0)
+         {
+@@ -5402,13 +5499,19 @@ static void Task_HandleSearchParameterInput(u8 taskId)
+     s16 *scrollOffset;
+     u16 maxOption;
+     bool8 moved;
++#ifdef PLATFORM_3DS
++    u8 ctrAct;
++#endif
+ 
+     menuItem = gTasks[taskId].tMenuItem;
+     texts = sSearchOptions[menuItem].texts;
+     cursorPos = &gTasks[taskId].data[sSearchOptions[menuItem].taskDataCursorPos];
+     scrollOffset = &gTasks[taskId].data[sSearchOptions[menuItem].taskDataScrollOffset];
+     maxOption = sSearchOptions[menuItem].numOptions - 1;
+-    if (JOY_NEW(A_BUTTON))
++#ifdef PLATFORM_3DS
++    ctrAct = CtrDex_SearchParamAction(taskId);
++#endif
++    if (JOY_NEW(A_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_CHOOSE))
+     {
+         PlaySE(SE_PIN);
+         ClearSearchParameterBoxText();
+@@ -5418,7 +5521,7 @@ static void Task_HandleSearchParameterInput(u8 taskId)
+         CopyBgTilemapBufferToVram(3);
+         return;
+     }
+-    if (JOY_NEW(B_BUTTON))
++    if (JOY_NEW(B_BUTTON) || CTR_DEX_IS(ctrAct, CTR_DEX_BACK))
+     {
+         PlaySE(SE_BALL);
+         ClearSearchParameterBoxText();
+@@ -5913,3 +6016,620 @@ void LoadSpriteSilhouettePalette(u32 spriteId)
+ {
+     LoadPalette(sSizeScreenSilhouette_Pal, OBJ_PLTT_ID2(gSprites[spriteId].oam.paletteNum), PLTT_SIZE_4BPP);
+ }
++
++#ifdef PLATFORM_3DS
++//----------------------------------------------------------------------------
++// 3DS: the Pokedex is shown on the bottom screen, left of the button column.
++// 3ds_bottom_ui.c hands it its touches in pixels of its own picture; what a
++// tap does is what the Pokedex does for its button, done here directly.
++// Adapted to this dex's HGSS-style pages (PAGE_MAIN/INFO/SEARCH/
++// SEARCH_RESULTS/AREA/CRY/SIZE, INFO_SCREEN subscreens, NATIONAL_DEX_COUNT
++// list) and its select-bar/list art (see below).
++//----------------------------------------------------------------------------
++
++// The callback the compositor knows the Pokedex by (3ds_game_full.c).
++IntrCallback CtrPokedex_VBlankCallback(void)
++{
++    return VBlankCB_Pokedex;
++}
++
++bool8 CtrPokedex_IsOpen(void)
++{
++    return sPokedexView != NULL && (gMain.callback2 == CB2_Pokedex || gMain.callback2 == CB2_OpenPokedex);
++}
++
++// The tile the screen on show carries out past its edges on the bottom
++// screen (3ds_video.c, CentredFillOf), as bg << 16 | column << 8 | row (or
++// 1 << 20 | bg << 16 | a tilemap entry), or -1 to carry on the backmost
++// layer itself. Recomputed per page from this dex's templates and tilemaps:
++// the list underlay (bg3 of sPokedex_BgTemplate) on the lists, its body
++// fill below the select-bar rows on the entry screens, the search menu's
++// plain fill (bg3, tile 0x4F, also what the parameter box erases to) on the
++// search, and the area map itself on the area screen.
++int CtrPokedex_Backdrop(void)
++{
++    if (sPokedexView == NULL || gMain.callback2 != CB2_Pokedex)
++        return -1;
++    switch (sPokedexView->currentPage)
++    {
++    case PAGE_MAIN:
++    case PAGE_SEARCH_RESULTS:
++        return 3 << 16 | 0 << 8 | 0;
++    case PAGE_INFO:
++    case PAGE_CRY:
++    case PAGE_SIZE:
++        return 3 << 16 | 2 << 8 | 2;
++    case PAGE_SEARCH:
++        return 1 << 20 | 3 << 16 | 0x04F;
++    case PAGE_AREA:
++    default:
++        return -1;
++    }
++}
++
++enum {
++    CTR_DEX_TOUCH_DOWN,
++    CTR_DEX_TOUCH_MOVE,
++    CTR_DEX_TOUCH_UP,
++    CTR_DEX_TOUCH_CANCEL, // the touch went to another screen
++};
++
++// What a drag moves: the list, a search parameter's list.
++enum { CTR_DRAG_NONE, CTR_DRAG_LIST, CTR_DRAG_PARAM };
++
++// The select bar of an entry and its screens: four tabs across the top two
++// tile rows. The bar art (screen_select_bar_main/submenu.bin, and the HGSS
++// SelectBar.bin with the same four-across top-strip arrangement) groups
++// four 7-tile tabs starting at tile column 1: 56 px tabs at x = 8.
++#define CTR_TAB_LEFT   8
++#define CTR_TAB_WIDTH  56
++#define CTR_TAB_BOTTOM 16
++// The list: the chosen mon's row in the middle, a row every 16 pixels, the
++// scroll bar right of it, the arrows above and below it. The entries are
++// written at tile column 17 (CreateMonListEntry), the scroll bar sprite sits
++// at x = 230 and the arrows at x = 184 (CreateInterfaceSprites); the middle
++// of the 11 rows lands at y = 72 with the list BG scrolled by 8.
++#define CTR_LIST_LEFT   128
++#define CTR_LIST_RIGHT  224
++#define CTR_LIST_TOP    16
++#define CTR_LIST_BOTTOM 144
++#define CTR_LIST_MIDDLE 72
++#define CTR_ROW_HEIGHT  16
++// The cry screen's play spot: on the mon's right half (MON_PAGE_X/Y).
++#define CTR_CRY_PLAY_LEFT   88
++#define CTR_CRY_PLAY_RIGHT  136
++#define CTR_CRY_PLAY_TOP    64
++#define CTR_CRY_PLAY_BOTTOM  96
++// The area screen's time-of-day label, bottom right (window at tile 22,18).
++#define CTR_AREA_TIME_LEFT 176
++#define CTR_AREA_TIME_TOP  144
++// A search parameter's list, right of the menu (box at tile 0x11, rows 0-13;
++// titles at x = 152, every 16 px from y = 9).
++#define CTR_PARAM_LEFT  136
++#define CTR_PARAM_TOP   8
++// A tap is taken within this many frames or dropped.
++#define CTR_TAP_FRAMES 30
++// A drag this long across an entry is a swipe to the next one.
++#define CTR_SWIPE 24
++
++static struct {
++    bool8 held, dragged, tapped;
++    bool8 leave;     // B on every screen until the Pokedex closes
++    u8 queued;       // an action the next input task takes
++    u8 drag;         // CTR_DRAG_*
++    s8 swipe;
++    s16 x0, y0, x, y, tapX, tapY;
++    s16 steps;       // rows of the drag not yet taken
++    s16 applied;     // rows of the drag counted so far
++    u32 tapTime;
++} sCtrDex;
++
++static void CtrDex_Reset(void)
++{
++    memset(&sCtrDex, 0, sizeof(sCtrDex));
++}
++
++void CtrPokedex_Touch(u8 phase, s16 x, s16 y)
++{
++    s16 dx, dy, total;
++
++    if (!CtrPokedex_IsOpen())
++        return;
++    switch (phase)
++    {
++    case CTR_DEX_TOUCH_DOWN:
++        sCtrDex.held = TRUE;
++        sCtrDex.dragged = FALSE;
++        sCtrDex.x0 = sCtrDex.x = x;
++        sCtrDex.y0 = sCtrDex.y = y;
++        sCtrDex.steps = sCtrDex.applied = 0;
++        sCtrDex.swipe = 0;
++        sCtrDex.drag = CTR_DRAG_NONE;
++        if ((sPokedexView->currentPage == PAGE_MAIN || sPokedexView->currentPage == PAGE_SEARCH_RESULTS)
++         && x >= CTR_LIST_LEFT && x < CTR_LIST_RIGHT && y >= CTR_LIST_TOP && y < CTR_LIST_BOTTOM)
++            sCtrDex.drag = CTR_DRAG_LIST;
++        else if (sPokedexView->currentPage == PAGE_SEARCH && x >= CTR_PARAM_LEFT
++              && y >= CTR_PARAM_TOP && y < CTR_PARAM_TOP + MAX_SEARCH_PARAM_ON_SCREEN * 16)
++            sCtrDex.drag = CTR_DRAG_PARAM;
++        break;
++    case CTR_DEX_TOUCH_MOVE:
++        if (!sCtrDex.held)
++            break;
++        sCtrDex.x = x;
++        sCtrDex.y = y;
++        if (x - sCtrDex.x0 > 8 || sCtrDex.x0 - x > 8 || y - sCtrDex.y0 > 8 || sCtrDex.y0 - y > 8)
++            sCtrDex.dragged = TRUE;
++        if (sCtrDex.dragged && sCtrDex.drag != CTR_DRAG_NONE)
++        {
++            // Up is on down the list. Few rows are kept waiting, so that the
++            // list stops soon after the finger does.
++            total = (sCtrDex.y0 - y) / CTR_ROW_HEIGHT;
++            sCtrDex.steps += total - sCtrDex.applied;
++            sCtrDex.applied = total;
++            if (sCtrDex.steps > 2)
++                sCtrDex.steps = 2;
++            if (sCtrDex.steps < -2)
++                sCtrDex.steps = -2;
++        }
++        break;
++    case CTR_DEX_TOUCH_UP:
++        if (!sCtrDex.held)
++            break;
++        sCtrDex.held = FALSE;
++        dx = sCtrDex.x - sCtrDex.x0;
++        dy = sCtrDex.y - sCtrDex.y0;
++        if (!sCtrDex.dragged)
++        {
++            sCtrDex.tapped = TRUE;
++            sCtrDex.tapX = sCtrDex.x;
++            sCtrDex.tapY = sCtrDex.y;
++            sCtrDex.tapTime = gMain.vblankCounter1;
++        }
++        else if (sPokedexView->currentPage == PAGE_INFO && (dy >= CTR_SWIPE || dy <= -CTR_SWIPE)
++              && (dy < 0 ? -dy : dy) > (dx < 0 ? -dx : dx))
++        {
++            sCtrDex.swipe = dy < 0 ? 1 : -1;
++        }
++        break;
++    case CTR_DEX_TOUCH_CANCEL:
++        sCtrDex.held = FALSE;
++        sCtrDex.steps = 0;
++        break;
++    }
++}
++
++// The column's POKeDEX button is B; any other button of it leaves the
++// Pokedex, B after B until it closes (leave). TRUE when it will close.
++bool8 CtrPokedex_Close(bool8 leave)
++{
++    if (!CtrPokedex_IsOpen())
++        return FALSE;
++    if (leave)
++        sCtrDex.leave = TRUE;
++    else
++        sCtrDex.queued = CTR_DEX_BACK;
++    return leave || sPokedexView->currentPage == PAGE_MAIN;
++}
++
++static bool8 CtrDex_TakeTap(s16 *x, s16 *y)
++{
++    if (!sCtrDex.tapped)
++        return FALSE;
++    sCtrDex.tapped = FALSE;
++    if (gMain.vblankCounter1 - sCtrDex.tapTime > CTR_TAP_FRAMES)
++        return FALSE;
++    *x = sCtrDex.tapX;
++    *y = sCtrDex.tapY;
++    return TRUE;
++}
++
++// What comes before a tap: leaving, the POKeDEX button, or what the screen
++// before left for this one.
++static u8 CtrDex_Pending(void)
++{
++    u8 act;
++
++    if (sCtrDex.leave)
++        return CTR_DEX_BACK;
++    act = sCtrDex.queued;
++    sCtrDex.queued = CTR_DEX_NONE;
++    return act;
++}
++
++static bool8 CtrDex_DragStep(s8 dir)
++{
++    if (sCtrDex.drag != CTR_DRAG_LIST || (dir < 0 ? sCtrDex.steps >= 0 : sCtrDex.steps <= 0))
++        return FALSE;
++    sCtrDex.steps -= dir;
++    return TRUE;
++}
++
++static bool8 CtrDex_Swipe(s8 dir)
++{
++    if (sCtrDex.swipe != dir)
++        return FALSE;
++    sCtrDex.swipe = 0;
++    return TRUE;
++}
++
++// The list's selection moved by delta, as left and right move it a page.
++// The stat bars go with the mon sprites, and the D-pad recreates them after
++// (HandleCreateStatBarsDPAD_HGSS reads justScrolled).
++static void CtrDex_ListJump(s16 delta, u16 sound)
++{
++    s16 target = sPokedexView->selectedPokemon + delta;
++
++    if (target > (s16)(sPokedexView->pokemonListCount - 1))
++        target = sPokedexView->pokemonListCount - 1;
++    if (target < 0)
++        target = 0;
++    if (target == (s16)sPokedexView->selectedPokemon)
++        return;
++    sPokedexView->pokeBallRotation += 16 * (target - (s16)sPokedexView->selectedPokemon);
++    sPokedexView->selectedPokemon = target;
++    ClearMonSprites();
++    HandleDestroyStatBars_HGSS();
++    CreateMonSpritesAtPos(target, 0xE);
++    sPokedexView->justScrolled = TRUE;
++    PlaySE(sound);
++}
++
++// The list, main or search results.
++static u8 CtrDex_ListAction(void)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y, row;
++
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return act;
++    // START MENU and SELECT SEARCH, bottom left.
++    if (x < 72 && y >= 108 && y < 132)
++        return CTR_DEX_MENU;
++    if (x < 72 && y >= 132 && y < 156)
++        return CTR_DEX_SEARCH;
++    // The scroll bar: that place of the list.
++    if (x >= CTR_LIST_RIGHT)
++    {
++        if (y >= 12 && y < 148 && sPokedexView->pokemonListCount > 1)
++        {
++            s16 at = y < 20 ? 0 : y >= 140 ? 120 : y - 20;
++
++            CtrDex_ListJump((s16)((int)at * (sPokedexView->pokemonListCount - 1) / 120 - sPokedexView->selectedPokemon),
++                            SE_DEX_PAGE);
++        }
++        return CTR_DEX_NONE;
++    }
++    if (x >= CTR_LIST_LEFT)
++    {
++        // The arrows: a page, as left and right.
++        if (y < CTR_LIST_TOP)
++            CtrDex_ListJump(-7, SE_DEX_PAGE);
++        else if (y >= CTR_LIST_BOTTOM)
++            CtrDex_ListJump(7, SE_DEX_PAGE);
++        // A row: the selection goes to it; the selected one is opened.
++        else if ((row = (y - CTR_LIST_MIDDLE + 10 * CTR_ROW_HEIGHT) / CTR_ROW_HEIGHT - 10) == 0)
++            return CTR_DEX_CHOOSE;
++        else
++            CtrDex_ListJump(row, SE_DEX_SCROLL);
++        return CTR_DEX_NONE;
++    }
++    // The selected mon's picture.
++    if (x >= 56 && y >= 40 && y < 120)
++        return CTR_DEX_CHOOSE;
++    return CTR_DEX_NONE;
++}
++
++// The list's START menu, sliding up from the bottom edge: count options of
++// 16 pixels inside its frame.
++static u8 CtrDex_MenuAction(u8 count)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y, top = DISPLAY_HEIGHT - sPokedexView->menuY + 8;
++
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return act;
++    if (x >= 128 && y >= top && y < top + count * 16)
++    {
++        sPokedexView->menuCursorPos = (y - top) / 16;
++        return CTR_DEX_CHOOSE;
++    }
++    // Beside it: it closes, as B.
++    return CTR_DEX_BACK;
++}
++
++static s8 CtrDex_TabAt(s16 x, s16 y)
++{
++    if (y >= CTR_TAB_BOTTOM || x < CTR_TAB_LEFT || x >= CTR_TAB_LEFT + SCREEN_COUNT * CTR_TAB_WIDTH)
++        return -1;
++    return (x - CTR_TAB_LEFT) / CTR_TAB_WIDTH;
++}
++
++// An entry: a tab of its bar is chosen, as A on it. Runs before
++// TryHandleInfoScreenInput_HGSS, which otherwise takes the input first.
++static u8 CtrDex_InfoAction(void)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y;
++    s8 tab;
++
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return act;
++    tab = CtrDex_TabAt(x, y);
++    if (tab < 0)
++        return CTR_DEX_NONE;
++    if (tab != sPokedexView->selectedScreen)
++    {
++        sPokedexView->selectedScreen = tab;
++        HighlightScreenSelectBarItem(tab, 0xD);
++    }
++    return CTR_DEX_CHOOSE;
++}
++
++// The cry and size screens: their bar's tabs go to that screen, its last
++// one is B. The cry screen's play spot is its A.
++static u8 CtrDex_SubmenuAction(u8 screen)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y;
++    s8 tab;
++
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return act;
++    if (screen == CRY_SCREEN && x >= CTR_CRY_PLAY_LEFT && x < CTR_CRY_PLAY_RIGHT && y >= CTR_CRY_PLAY_TOP && y < CTR_CRY_PLAY_BOTTOM)
++        return CTR_DEX_CHOOSE;
++    tab = CtrDex_TabAt(x, y);
++    if (tab < 0 || tab == screen)
++        return CTR_DEX_NONE;
++    switch (tab)
++    {
++    case AREA_SCREEN: return CTR_DEX_TO_AREA;
++    case CRY_SCREEN:  return CTR_DEX_TO_CRY;
++    case SIZE_SCREEN: return CTR_DEX_TO_SIZE;
++    default:          return CTR_DEX_BACK;
++    }
++}
++
++// The area screen's input (pokedex_area_screen.c): which screen it goes to,
++// as its B and right do (data[1] = 1 and 2), or the time-of-day label
++// (data[1] = 3). There is no area-to-size path in this dex, so a SIZE tab
++// tap is dropped rather than collide with data[1] = 3.
++bool8 CtrPokedex_AreaTab(s16 *switchTo)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y;
++    s8 tab;
++
++    if (act == CTR_DEX_BACK)
++    {
++        *switchTo = 1;
++        PlaySE(SE_PC_OFF);
++        return TRUE;
++    }
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return FALSE;
++#if OW_TIME_OF_DAY_ENCOUNTERS
++    if (x >= CTR_AREA_TIME_LEFT && y >= CTR_AREA_TIME_TOP)
++    {
++        gAreaTimeOfDay = TryIncrementTimeOfDay(gAreaTimeOfDay);
++        *switchTo = 3;
++        PlaySE(SE_DEX_PAGE);
++        return TRUE;
++    }
++#endif
++    tab = CtrDex_TabAt(x, y);
++    if (tab == CRY_SCREEN)
++    {
++        // As on RIGHT: only a caught mon goes on.
++        if (!sPokedexListItem->owned)
++        {
++            PlaySE(SE_FAILURE);
++            return FALSE;
++        }
++        *switchTo = 2;
++        PlaySE(SE_DEX_PAGE);
++        return TRUE;
++    }
++    if (tab == CANCEL_SCREEN)
++    {
++        *switchTo = 1;
++        PlaySE(SE_PC_OFF);
++        return TRUE;
++    }
++    return FALSE;
++}
++
++// The search's top bar and menu. Geometry from sSearchMenuTopBarItems (top
++// bar: three 5-tile highlights at tile columns 0, 6, 12) and
++// sSearchMenuItems (menu rows every two tiles from row 2, selections from
++// tile column 5; TYPE splits at tile column 11; OK is 5 tiles wide).
++static s8 CtrDex_SearchBarAt(s16 x, s16 y)
++{
++    if (y >= 16 || x >= 136 || x % 48 >= 40)
++        return -1;
++    return x / 48;
++}
++
++static s8 CtrDex_SearchItemAt(s16 x, s16 y)
++{
++    if (x >= 136 || y < 16 || y >= 112)
++        return -1;
++    switch (y / 16 - 1)
++    {
++    case 0: return SEARCH_NAME;
++    case 1: return SEARCH_COLOR;
++    case 2: return x < 88 ? SEARCH_TYPE_LEFT : SEARCH_TYPE_RIGHT;
++    case 3: return SEARCH_ORDER;
++    case 4: return SEARCH_MODE;
++    default: return x < 40 ? SEARCH_OK : -1;
++    }
++}
++
++// Whether the menu of SEARCH or SHIFT has that item: its first one, or one
++// its cursor can reach.
++static bool8 CtrDex_SearchHasItem(u8 topBarItem, u8 item)
++{
++    const u8 (*map)[4];
++    u8 i, k;
++
++    if (topBarItem == SEARCH_TOPBAR_SEARCH)
++        map = IsNationalPokedexEnabled() ? sSearchMovementMap_SearchNatDex : sSearchMovementMap_SearchHoennDex;
++    else
++        map = IsNationalPokedexEnabled() ? sSearchMovementMap_ShiftNatDex : sSearchMovementMap_ShiftHoennDex;
++    if (item == (topBarItem == SEARCH_TOPBAR_SEARCH ? SEARCH_NAME : SEARCH_ORDER))
++        return TRUE;
++    for (i = 0; i < SEARCH_COUNT; i++)
++        for (k = 0; k < 4; k++)
++            if (map[i][k] == item)
++                return TRUE;
++    return FALSE;
++}
++
++static u8 CtrDex_SearchTopBarAction(u8 taskId)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y;
++    s8 bar, item;
++
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return act;
++    bar = CtrDex_SearchBarAt(x, y);
++    item = CtrDex_SearchItemAt(x, y);
++    if (bar >= 0)
++    {
++        if (bar != gTasks[taskId].tTopBarItem)
++        {
++            gTasks[taskId].tTopBarItem = bar;
++            HighlightSelectedSearchTopBarItem(bar);
++            CopyWindowToVram(0, COPYWIN_GFX);
++            CopyBgTilemapBufferToVram(3);
++        }
++        return CTR_DEX_CHOOSE;
++    }
++    // An item of the menu: its menu opens on it, and it is chosen there.
++    if (item >= 0)
++    {
++        if (gTasks[taskId].tTopBarItem == SEARCH_TOPBAR_CANCEL
++         || !CtrDex_SearchHasItem(gTasks[taskId].tTopBarItem, item))
++            gTasks[taskId].tTopBarItem = SEARCH_TOPBAR_SEARCH;
++        if (!CtrDex_SearchHasItem(gTasks[taskId].tTopBarItem, item))
++            return CTR_DEX_NONE;
++        gTasks[taskId].tMenuItem = item;
++        gTasks[taskId].func = Task_SwitchToSearchMenu;
++        sCtrDex.queued = CTR_DEX_CHOOSE;
++    }
++    return CTR_DEX_NONE;
++}
++
++static u8 CtrDex_SearchMenuAction(u8 taskId)
++{
++    u8 act = CtrDex_Pending();
++    s16 x, y;
++    s8 item;
++
++    if (act != CTR_DEX_NONE || !CtrDex_TakeTap(&x, &y))
++        return act;
++    // The top bar: back to it, as B.
++    if (CtrDex_SearchBarAt(x, y) >= 0)
++        return CTR_DEX_BACK;
++    item = CtrDex_SearchItemAt(x, y);
++    if (item < 0 || !CtrDex_SearchHasItem(gTasks[taskId].tTopBarItem, item))
++        return CTR_DEX_NONE;
++    if (item != gTasks[taskId].tMenuItem)
++    {
++        gTasks[taskId].tMenuItem = item;
++        HighlightSelectedSearchMenuItem(gTasks[taskId].tTopBarItem, item);
++        CopyWindowToVram(0, COPYWIN_GFX);
++        CopyBgTilemapBufferToVram(3);
++    }
++    return CTR_DEX_CHOOSE;
++}
++
++// A search parameter's list: its cursor put on a row, or the list scrolled,
++// as up and down do.
++static void CtrDex_SearchParamShow(u8 taskId)
++{
++    u8 menuItem = gTasks[taskId].tMenuItem;
++    u16 *cursorPos = (u16 *)&gTasks[taskId].data[sSearchOptions[menuItem].taskDataCursorPos];
++    u16 *scrollOffset = (u16 *)&gTasks[taskId].data[sSearchOptions[menuItem].taskDataScrollOffset];
++
++    PlaySE(SE_SELECT);
++    EraseAndPrintSearchTextBox(sSearchOptions[menuItem].texts[*cursorPos + *scrollOffset].description);
++    CopyWindowToVram(0, COPYWIN_GFX);
++}
++
++static void CtrDex_SearchParamScroll(u8 taskId, s16 delta)
++{
++    u8 menuItem = gTasks[taskId].tMenuItem;
++    u16 *cursorPos = (u16 *)&gTasks[taskId].data[sSearchOptions[menuItem].taskDataCursorPos];
++    u16 *scrollOffset = (u16 *)&gTasks[taskId].data[sSearchOptions[menuItem].taskDataScrollOffset];
++    s16 maxOption = sSearchOptions[menuItem].numOptions - 1;
++    s16 maxScroll = maxOption > MAX_SEARCH_PARAM_CURSOR_POS ? maxOption - MAX_SEARCH_PARAM_CURSOR_POS : 0;
++    s16 offset = *scrollOffset + delta;
++
++    if (offset > maxScroll)
++        offset = maxScroll;
++    if (offset < 0)
++        offset = 0;
++    if (offset == *scrollOffset)
++        return;
++    *scrollOffset = offset;
++    PrintSearchParameterText(taskId);
++    PrintSelectorArrow(*cursorPos);
++    CtrDex_SearchParamShow(taskId);
++}
++
++static u8 CtrDex_SearchParamAction(u8 taskId)
++{
++    u8 act = CtrDex_Pending();
++    u8 menuItem = gTasks[taskId].tMenuItem;
++    u16 *cursorPos = (u16 *)&gTasks[taskId].data[sSearchOptions[menuItem].taskDataCursorPos];
++    u16 *scrollOffset = (u16 *)&gTasks[taskId].data[sSearchOptions[menuItem].taskDataScrollOffset];
++    s16 x, y, row;
++
++    if (act != CTR_DEX_NONE)
++        return act;
++    if (sCtrDex.drag == CTR_DRAG_PARAM && sCtrDex.steps != 0)
++    {
++        CtrDex_SearchParamScroll(taskId, sCtrDex.steps);
++        sCtrDex.steps = 0;
++    }
++    if (!CtrDex_TakeTap(&x, &y))
++        return CTR_DEX_NONE;
++    if (x < CTR_PARAM_LEFT)
++        return CTR_DEX_BACK;    // beside the list: it closes, as B
++    // Its arrows: a row up or down.
++    if (y < CTR_PARAM_TOP)
++    {
++        CtrDex_SearchParamScroll(taskId, -1);
++        return CTR_DEX_NONE;
++    }
++    row = (y - CTR_PARAM_TOP) / 16;
++    if (row > MAX_SEARCH_PARAM_CURSOR_POS)
++    {
++        if (row == MAX_SEARCH_PARAM_CURSOR_POS + 1)
++            CtrDex_SearchParamScroll(taskId, 1);
++        return CTR_DEX_NONE;
++    }
++    if (row + *scrollOffset > sSearchOptions[menuItem].numOptions - 1)
++        return CTR_DEX_NONE;
++    // A row: the cursor goes to it, so that its description shows; on the
++    // cursor's row, it is chosen.
++    if (row == *cursorPos)
++        return CTR_DEX_CHOOSE;
++    EraseSelectorArrow(*cursorPos);
++    *cursorPos = row;
++    PrintSelectorArrow(*cursorPos);
++    CtrDex_SearchParamShow(taskId);
++    return CTR_DEX_NONE;
++}
++
++// A message that waits for A: any tap, and leaving, go on.
++static u8 CtrDex_AnyTapAction(void)
++{
++    s16 x, y;
++
++    if (CtrDex_Pending() != CTR_DEX_NONE || CtrDex_TakeTap(&x, &y))
++        return CTR_DEX_CHOOSE;
++    return CTR_DEX_NONE;
++}
++#endif
+diff --git c/src/pokedex_area_screen.c w/src/pokedex_area_screen.c
+index 79201e93..138b4fe5 100644
+--- c/src/pokedex_area_screen.c
++++ w/src/pokedex_area_screen.c
+@@ -130,6 +130,9 @@ static void CreateAreaMarkerSprites(void);
+ static void LoadAreaUnknownGraphics(void);
+ static void CreateAreaUnknownSprites(void);
+ static void Task_HandlePokedexAreaScreenInput(u8);
++#ifdef PLATFORM_3DS
++bool8 CtrPokedex_AreaTab(s16 *switchTo);
++#endif
+ static void ResetPokedexAreaMapBg(void);
+ static void DestroyAreaScreenSprites(void);
+ static void AddTimeOfDayLabels(void);
+@@ -865,6 +868,16 @@ static void Task_HandlePokedexAreaScreenInput(u8 taskId)
+             return;
+         break;
+     case 1:
++#ifdef PLATFORM_3DS
++        // A tab of the select bar, or the time-of-day label, touched
++        // (pokedex.c). data[1] = 1 is B, 2 is RIGHT, 3 is time-of-day.
++        if (CtrPokedex_AreaTab(&gTasks[taskId].data[1]))
++        {
++            if (gTasks[taskId].data[1] == 3)
++                sPokedexAreaScreen->areaState = DEX_UPDATE_AREA_SCREEN;
++            break;
++        }
++#endif
+         if (JOY_NEW(B_BUTTON))
+         {
+             gTasks[taskId].data[1] = 1;
 diff --git c/src/pokedex_cry_screen.c w/src/pokedex_cry_screen.c
 index 550127f5..c5b5c237 100644
 --- c/src/pokedex_cry_screen.c
@@ -27304,10 +29210,363 @@ index 43c9e2c1..b6dd9076 100644
      u32 var;
  
 diff --git c/src/pokemon_storage_system.c w/src/pokemon_storage_system.c
-index 034c187e..fcfed1c1 100644
+index 034c187e..4f5dfc97 100644
 --- c/src/pokemon_storage_system.c
 +++ w/src/pokemon_storage_system.c
-@@ -3819,6 +3819,10 @@ static void FreePokeStorageData(void)
+@@ -46,6 +46,12 @@
+ #include "constants/pokemon_icon.h"
+ #include "chooseboxmon.h"
+ #include "party_menu.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
++#if defined(PLATFORM_3DS)
++#include "3ds_assets.h"
++#endif
+ 
+ /*
+     NOTE: This file is large. Some general groups of functions have
+@@ -596,6 +602,27 @@ static u8 InBoxInput_Normal(void);
+ static u8 InBoxInput_MovingMultiple(void);
+ static u8 InBoxInput_SelectingMultiple(void);
+ static u8 HandleInput(void);
++#if defined(PLATFORM_3DS)
++// Touch on the 3DS bottom screen, where the PC is shown (3ds_bottom_ui.c).
++// A tap is taken by whatever waits for input next and acts there directly:
++// the cursor goes to the slot or button tapped and what A does there is
++// done, a menu entry is chosen, a message goes on. The buttons work as ever.
++static bool8 sCtrSelect; // HandleInput's handler takes A as pressed
++static bool8 CtrStorage_TakeTap(s16 *x, s16 *y);
++static bool8 CtrStorage_TakeAck(void);
++static u8 CtrStorage_TouchInput(void);
++static bool8 CtrStorage_MenuTap(s16 *input);
++static u8 CtrStorage_ChooseBoxTap(void);
++static bool8 CtrStorage_MarkingsTap(bool8 *open);
++static s8 StorageYesNoInput(void);
++static void CtrStorage_Prefetch(void);
++#define STORAGE_A_PRESSED() (JOY_NEW(A_BUTTON) || sCtrSelect)
++#define STORAGE_ACK(keys) (JOY_NEW(keys) || CtrStorage_TakeAck())
++#else
++#define STORAGE_A_PRESSED() JOY_NEW(A_BUTTON)
++#define STORAGE_ACK(keys) JOY_NEW(keys)
++#define StorageYesNoInput Menu_ProcessInputNoWrapClearOnChoose
++#endif
+ static void AddBoxOptionsMenu(void);
+ static u8 SetSelectionMenuTexts(void);
+ static bool8 SetMenuTexts_Mon(void);
+@@ -1499,8 +1526,17 @@ enum {
+     STATE_HANDLE_INPUT,
+     STATE_ERROR_MSG,
+     STATE_ENTER_PC,
++#if defined(PLATFORM_3DS)
++    STATE_CTR_FADE_OUT,
++#endif
+ };
+ 
++#if defined(PLATFORM_3DS)
++// 3ds_bottom_ui.c: the top screen keeps the world from now until the field
++// is back, while the boxes are on the bottom screen.
++void CtrBottom_KeepWorld(void);
++#endif
++
+ #define tState          data[0]
+ #define tSelectedOption data[1]
+ #define tInput          data[2]
+@@ -1571,12 +1607,27 @@ static void Task_PCMainMenu(u8 taskId)
+             else
+             {
+                 // Enter PC
++#if defined(PLATFORM_3DS)
++                // The top screen is to be left showing the world, so the
++                // menu goes first and the fade starts on the next frame.
++                ClearStdWindowAndFrame(task->tWindowId, TRUE);
++                ClearDialogWindowAndFrame(0, TRUE);
++                task->tState = STATE_CTR_FADE_OUT;
++#else
+                 FadeScreen(FADE_TO_BLACK, 0);
+                 task->tState = STATE_ENTER_PC;
++#endif
+             }
+             break;
+         }
+         break;
++#if defined(PLATFORM_3DS)
++    case STATE_CTR_FADE_OUT:
++        CtrBottom_KeepWorld();
++        FadeScreen(FADE_TO_BLACK, 0);
++        task->tState = STATE_ENTER_PC;
++        break;
++#endif
+     case STATE_ERROR_MSG:
+         // Printed "can't do PC option message"
+         // Wait for new input after message
+@@ -1777,6 +1828,12 @@ static void DestroyChooseBoxMenuSprites(void)
+ // For the popout window when choosing a box to deposit in or jump to
+ static u8 HandleChooseBoxMenuInput(void)
+ {
++#if defined(PLATFORM_3DS)
++    u8 tapped = CtrStorage_ChooseBoxTap();
++
++    if (tapped != BOXID_NONE_CHOSEN)
++        return tapped;
++#endif
+     if (JOY_NEW(B_BUTTON))
+     {
+         PlaySE(SE_SELECT);
+@@ -1967,6 +2024,9 @@ static void CB2_PokeStorage(void)
+     UpdateCloseBoxButtonFlash();
+     AnimateSprites();
+     BuildOamBuffer();
++#if defined(PLATFORM_3DS)
++    CtrStorage_Prefetch();
++#endif
+ }
+ 
+ static void EnterPokeStorage(u8 boxOption)
+@@ -2214,7 +2274,7 @@ static void Task_ReshowPokeStorage(u8 taskId)
+         }
+         break;
+     case 2:
+-        if (!IsDma3ManagerBusyWithBgCopy() && JOY_NEW(A_BUTTON | B_BUTTON))
++        if (!IsDma3ManagerBusyWithBgCopy() && STORAGE_ACK(A_BUTTON | B_BUTTON))
+         {
+             ClearBottomWindow();
+             sStorage->state++;
+@@ -2454,7 +2514,7 @@ static void Task_PokeStorageMain(u8 taskId)
+         }
+         break;
+     case MSTATE_WAIT_MSG:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             sStorage->state = MSTATE_HANDLE_INPUT;
+@@ -2471,7 +2531,7 @@ static void Task_PokeStorageMain(u8 taskId)
+         sStorage->state = MSTATE_WAIT_ERROR_MSG;
+         break;
+     case MSTATE_WAIT_ERROR_MSG:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+@@ -2721,7 +2781,7 @@ static void Task_OnSelectedMon(u8 taskId)
+         sStorage->state = 6;
+         break;
+     case 6:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+@@ -2806,7 +2866,7 @@ static void Task_WithdrawMon(u8 taskId)
+         }
+         break;
+     case 1:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+@@ -2896,7 +2956,7 @@ static void Task_DepositMenu(u8 taskId)
+         }
+         break;
+     case 4:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             PrintMessage(MSG_DEPOSIT_IN_WHICH_BOX);
+             sStorage->state = 1;
+@@ -2915,7 +2975,7 @@ static void Task_ReleaseMon(u8 taskId)
+         sStorage->state++;
+         // fallthrough
+     case 1:
+-        switch (Menu_ProcessInputNoWrapClearOnChoose())
++        switch (StorageYesNoInput())
+         {
+         case MENU_B_PRESSED:
+         case  1: // No
+@@ -2957,14 +3017,14 @@ static void Task_ReleaseMon(u8 taskId)
+         sStorage->state++;
+         break;
+     case 4:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             PrintMessage(MSG_BYE_BYE);
+             sStorage->state++;
+         }
+         break;
+     case 5:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             if (sInPartyMenu)
+@@ -2997,14 +3057,14 @@ static void Task_ReleaseMon(u8 taskId)
+         sStorage->state++;
+         break;
+     case 9:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             PrintMessage(MSG_SURPRISE);
+             sStorage->state++;
+         }
+         break;
+     case 10:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             ReshowReleaseMon();
+@@ -3020,14 +3080,14 @@ static void Task_ReleaseMon(u8 taskId)
+         }
+         break;
+     case 12:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             PrintMessage(MSG_WORRIED);
+             sStorage->state++;
+         }
+         break;
+     case 13:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+@@ -3047,7 +3107,13 @@ static void Task_ShowMarkMenu(u8 taskId)
+         sStorage->state++;
+         break;
+     case 1:
+-        if (!HandleMonMarkingsMenuInput())
++    {
++        bool8 open;
++#if defined(PLATFORM_3DS)
++        if (!CtrStorage_MarkingsTap(&open))
++#endif
++            open = HandleMonMarkingsMenuInput();
++        if (!open)
+         {
+             FreeMonMarkingsMenu();
+             ClearBottomWindow();
+@@ -3057,6 +3123,7 @@ static void Task_ShowMarkMenu(u8 taskId)
+         }
+         break;
+     }
++    }
+ }
+ 
+ static void Task_TakeItemForMoving(u8 taskId)
+@@ -3121,7 +3188,7 @@ static void Task_GiveMovingItemToMon(u8 taskId)
+         }
+         break;
+     case 3:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             sStorage->state++;
+@@ -3160,7 +3227,7 @@ static void Task_ItemToBag(u8 taskId)
+         }
+         break;
+     case 2:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             RefreshDisplayMon();
+@@ -3173,7 +3240,7 @@ static void Task_ItemToBag(u8 taskId)
+             SetPokeStorageTask(Task_PokeStorageMain);
+         break;
+     case 3:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+@@ -3213,7 +3280,7 @@ static void Task_SwitchSelectedItem(u8 taskId)
+         }
+         break;
+     case 3:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             sStorage->state++;
+@@ -3252,7 +3319,7 @@ static void Task_ShowItemInfo(u8 taskId)
+             sStorage->state++;
+         break;
+     case 4:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             PlaySE(SE_WIN_OPEN);
+             sStorage->state++;
+@@ -3280,7 +3347,7 @@ static void Task_CloseBoxWhileHoldingItem(u8 taskId)
+         sStorage->state = 1;
+         break;
+     case 1:
+-        switch (Menu_ProcessInputNoWrapClearOnChoose())
++        switch (StorageYesNoInput())
+         {
+         case MENU_B_PRESSED:
+         case 1: // No
+@@ -3302,7 +3369,7 @@ static void Task_CloseBoxWhileHoldingItem(u8 taskId)
+         }
+         break;
+     case 2:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             sStorage->state = 5;
+@@ -3358,7 +3425,7 @@ static void Task_PrintCantStoreMail(u8 taskId)
+             sStorage->state++;
+         break;
+     case 2:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             sStorage->state++;
+@@ -3628,14 +3695,14 @@ static void Task_OnCloseBoxPressed(u8 taskId)
+         }
+         break;
+     case 1:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+         }
+         break;
+     case 2:
+-        switch (Menu_ProcessInputNoWrapClearOnChoose())
++        switch (StorageYesNoInput())
+         {
+         case MENU_B_PRESSED:
+         case 1:
+@@ -3706,14 +3773,14 @@ static void Task_OnBPressed(u8 taskId)
+         }
+         break;
+     case 1:
+-        if (JOY_NEW(A_BUTTON | B_BUTTON | DPAD_ANY))
++        if (STORAGE_ACK(A_BUTTON | B_BUTTON | DPAD_ANY))
+         {
+             ClearBottomWindow();
+             SetPokeStorageTask(Task_PokeStorageMain);
+         }
+         break;
+     case 2:
+-        switch (Menu_ProcessInputNoWrapClearOnChoose())
++        switch (StorageYesNoInput())
+         {
+         case 0:
+             ClearBottomWindow();
+@@ -3819,6 +3886,10 @@ static void FreePokeStorageData(void)
      MultiMove_Free();
      FREE_AND_SET_NULL(sStorage);
      FreeAllWindowBuffers();
@@ -27318,7 +29577,7 @@ index 034c187e..fcfed1c1 100644
  }
  
  
-@@ -4189,6 +4193,10 @@ static void StopFlashingCloseBoxButton(void)
+@@ -4189,6 +4260,10 @@ static void StopFlashingCloseBoxButton(void)
  
  static void UpdateCloseBoxButtonFlash(void)
  {
@@ -27329,7 +29588,7 @@ index 034c187e..fcfed1c1 100644
      if (sStorage != NULL)
      {
          if (sStorage->closeBoxFlashing && ++sStorage->closeBoxFlashTimer > 30)
-@@ -5126,7 +5134,12 @@ static bool8 ResetReleaseMonSpritePtr(void)
+@@ -5126,7 +5201,12 @@ static bool8 ResetReleaseMonSpritePtr(void)
  
  static void SetMovingMonPriority(u8 priority)
  {
@@ -27342,6 +29601,505 @@ index 034c187e..fcfed1c1 100644
  }
  
  static void SpriteCB_HeldMon(struct Sprite *sprite)
+@@ -7123,6 +7203,359 @@ static void SetDisplayMonData(void *pokemon, u8 mode)
+ }
+ 
+ 
++#if defined(PLATFORM_3DS)
++//------------------------------------------------------------------------------
++//  SECTION: Touch (3DS bottom screen)
++//
++//  3ds_bottom_ui.c passes a tap in pixels of the GBA screen. It is kept until
++//  something that waits for input takes it, or for half a second at most, so
++//  a tap made while the PC is busy does not act much later.
++//------------------------------------------------------------------------------
++
++enum {
++    CTR_TOUCH_NONE,
++    CTR_TOUCH_SLOT,         // a cursor position, where A is then done
++    CTR_TOUCH_SCROLL_LEFT,  // the arrows beside the box title
++    CTR_TOUCH_SCROLL_RIGHT,
++};
++
++static struct {
++    bool8 pending;
++    s16 x, y;
++    u32 frame;
++} sCtrTap;
++
++// A slot tapped that the cursor is still on its way to.
++static struct {
++    bool8 active;
++    bool8 leftParty; // the party was asked to go away for it
++    s8 area, position;
++} sCtrTarget;
++
++// menu.c and mon_markings.c, for the taps on their menus.
++s8 CtrMenu_EntryAt(s16 x, s16 y);
++s8 CtrMenu_Choose(s8 entry, bool8 sound);
++bool8 CtrMonMarkings_Menu(s8 *cursor, s16 *x, s16 *y);
++bool8 CtrMonMarkings_Choose(s8 cursor);
++
++bool8 CtrStorage_IsOpen(void)
++{
++    return sStorage != NULL && gMain.callback2 == CB2_PokeStorage;
++}
++
++void CtrStorage_Tap(s16 x, s16 y)
++{
++    sCtrTap.pending = TRUE;
++    sCtrTap.x = x;
++    sCtrTap.y = y;
++    sCtrTap.frame = gMain.vblankCounter1;
++}
++
++static bool8 CtrStorage_TakeTap(s16 *x, s16 *y)
++{
++    if (!sCtrTap.pending)
++        return FALSE;
++    sCtrTap.pending = FALSE;
++    if (gMain.vblankCounter1 - sCtrTap.frame > 30)
++        return FALSE;
++    *x = sCtrTap.x;
++    *y = sCtrTap.y;
++    return TRUE;
++}
++
++// A message waiting for A or B: any tap goes on.
++static bool8 CtrStorage_TakeAck(void)
++{
++    s16 x, y;
++
++    return CtrStorage_TakeTap(&x, &y);
++}
++
++// What the tap at (x, y) is on, in the main view.
++static u8 CtrStorage_HitTest(s16 x, s16 y, s8 *area, s8 *position)
++{
++    if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT)
++        return CTR_TOUCH_NONE;
++
++    if (sInPartyMenu)
++    {
++        *area = CURSOR_AREA_IN_PARTY;
++        if (x >= 88 && x < 128 && y >= 40 && y < 88)
++        {
++            *position = 0;
++            return CTR_TOUCH_SLOT;
++        }
++        if (x >= 128 && x < 176 && y >= 4 && y < 4 + 24 * (PARTY_SIZE - 1))
++        {
++            *position = 1 + (y - 4) / 24;
++            return CTR_TOUCH_SLOT;
++        }
++        if (x >= 128 && x < 176 && y >= 128 && y < 152)
++        {
++            *position = PARTY_SIZE; // CANCEL
++            return CTR_TOUCH_SLOT;
++        }
++        if (x < 176)
++            return CTR_TOUCH_NONE;
++        // Beside the party, in the box: the party goes away first.
++    }
++
++    if (y < 17)
++    {
++        *area = CURSOR_AREA_BUTTONS;
++        if (x >= 80 && x < 152)
++            *position = 0; // PARTY POKéMON
++        else if (x >= 166)
++            *position = 1; // CLOSE BOX
++        else
++            return CTR_TOUCH_NONE;
++        return CTR_TOUCH_SLOT;
++    }
++    if (y < 40)
++    {
++        if (x >= 80 && x < 100)
++            return CTR_TOUCH_SCROLL_LEFT;
++        if (x >= 220)
++            return CTR_TOUCH_SCROLL_RIGHT;
++        if (x < 100)
++            return CTR_TOUCH_NONE;
++        *area = CURSOR_AREA_BOX_TITLE;
++        *position = 0;
++        return CTR_TOUCH_SLOT;
++    }
++    // The icons' rows start 36 lines down, below the title.
++    if (x >= 88 && x < 88 + 24 * IN_BOX_COLUMNS && y < 36 + 24 * IN_BOX_ROWS)
++    {
++        *area = CURSOR_AREA_IN_BOX;
++        *position = ((y - 36) / 24) * IN_BOX_COLUMNS + (x - 88) / 24;
++        return CTR_TOUCH_SLOT;
++    }
++    return CTR_TOUCH_NONE;
++}
++
++// Called first by HandleInput. The cursor goes straight to a slot tapped, as
++// the D-pad would take it there one step at a time; once it is there, the
++// handler of that area does what A does (sCtrSelect).
++static u8 CtrStorage_TouchInput(void)
++{
++    s16 x, y;
++    s8 area, position;
++
++    sCtrSelect = FALSE;
++    if (CtrStorage_TakeTap(&x, &y))
++    {
++        sCtrTarget.active = FALSE;
++        // Selecting or moving several Pokémon needs A held: buttons only.
++        if (sStorage->inBoxMovingMode != MOVE_MODE_NORMAL)
++            return INPUT_NONE;
++        switch (CtrStorage_HitTest(x, y, &area, &position))
++        {
++        case CTR_TOUCH_SCROLL_LEFT:
++            if (sCursorArea == CURSOR_AREA_BOX_TITLE)
++                AnimateBoxScrollArrows(FALSE);
++            return INPUT_SCROLL_LEFT;
++        case CTR_TOUCH_SCROLL_RIGHT:
++            if (sCursorArea == CURSOR_AREA_BOX_TITLE)
++                AnimateBoxScrollArrows(FALSE);
++            return INPUT_SCROLL_RIGHT;
++        case CTR_TOUCH_SLOT:
++            sCtrTarget.active = TRUE;
++            sCtrTarget.leftParty = FALSE;
++            sCtrTarget.area = area;
++            sCtrTarget.position = position;
++            break;
++        default:
++            return INPUT_NONE;
++        }
++    }
++    if (!sCtrTarget.active)
++        return INPUT_NONE;
++
++    if (sCtrTarget.area != CURSOR_AREA_IN_PARTY && sCursorArea == CURSOR_AREA_IN_PARTY)
++    {
++        // Out of the party, as right or B takes the cursor to the box; once,
++        // for the game may refuse (a Pokémon holding mail).
++        if (!sCtrTarget.leftParty
++         && (sStorage->boxOption == OPTION_MOVE_MONS || sStorage->boxOption == OPTION_MOVE_ITEMS))
++        {
++            sCtrTarget.leftParty = TRUE;
++            return INPUT_HIDE_PARTY;
++        }
++        sCtrTarget.active = FALSE;
++        return INPUT_NONE;
++    }
++    if (sCtrTarget.area != sCursorArea || sCtrTarget.position != sCursorPosition)
++    {
++        sStorage->cursorHorizontalWrap = 0;
++        sStorage->cursorVerticalWrap = 0;
++        // The hand turns over going on or off the buttons.
++        sStorage->cursorFlipTimer = (sCtrTarget.area == CURSOR_AREA_BUTTONS) != sStorage->cursorSprite->vFlip;
++        if (sCursorArea == CURSOR_AREA_BOX_TITLE)
++            AnimateBoxScrollArrows(FALSE);
++        SetCursorPosition(sCtrTarget.area, sCtrTarget.position);
++        return INPUT_MOVE_CURSOR;
++    }
++    sCtrTarget.active = FALSE;
++    sCtrSelect = TRUE;
++    return INPUT_NONE;
++}
++
++// A tap on the PC's own menus: the entry tapped is chosen, anywhere else is B.
++static bool8 CtrStorage_MenuTap(s16 *input)
++{
++    s16 x, y;
++    s8 entry;
++
++    if (!CtrStorage_TakeTap(&x, &y))
++        return FALSE;
++    entry = CtrMenu_EntryAt(x, y);
++    if (entry >= 0)
++    {
++        *input = CtrMenu_Choose(entry, FALSE);
++    }
++    else
++    {
++        PlaySE(SE_SELECT);
++        *input = MENU_B_PRESSED;
++    }
++    return TRUE;
++}
++
++// The box chooser (Deposit, Jump): its arrows, its middle, or away from it.
++static u8 CtrStorage_ChooseBoxTap(void)
++{
++    s16 x, y;
++
++    if (!CtrStorage_TakeTap(&x, &y))
++        return BOXID_NONE_CHOSEN;
++    PlaySE(SE_SELECT);
++    if (y >= 64 && y < 128 && x >= 112 && x < 136)
++        ChooseBoxMenu_MoveLeft();
++    else if (y >= 64 && y < 128 && x >= 184 && x < 208)
++        ChooseBoxMenu_MoveRight();
++    else if (y >= 64 && y < 128 && x >= 136 && x < 184)
++        return sChooseBoxMenu->curBox;
++    else
++        return BOXID_CANCELED;
++    return BOXID_NONE_CHOSEN;
++}
++
++// The markings menu: a row is chosen as A chooses it, away from it is B.
++static bool8 CtrStorage_MarkingsTap(bool8 *open)
++{
++    s16 x, y, left, top;
++    s8 cursor;
++
++    if (!CtrStorage_TakeTap(&x, &y) || !CtrMonMarkings_Menu(&cursor, &left, &top))
++        return FALSE;
++    // The markings, then OK and CANCEL.
++    if (x >= left && x < left + 64 && y >= top + 8 && y < top + 8 + 16 * (NUM_MON_MARKINGS + 2))
++    {
++        *open = CtrMonMarkings_Choose((y - top - 8) / 16);
++    }
++    else
++    {
++        PlaySE(SE_SELECT);
++        *open = FALSE;
++    }
++    return TRUE;
++}
++
++//------------------------------------------------------------------------------
++//  Reading ahead. A file off the SD card costs milliseconds on a console, and
++//  a box scrolling in reads its wallpaper and up to thirty icons within a few
++//  frames. While the PC waits for input the other boxes' are read ahead into
++//  the asset cache, which keeps them: nearest boxes first, one read a frame.
++//------------------------------------------------------------------------------
++
++static struct {
++    u8 fromBox;
++    u16 next;
++} sCtrPrefetch = {0xFF, 0};
++
++// The asset at ptr, loaded if it is not yet. TRUE when that took a read.
++static bool8 CtrStorage_Touch(const void *ptr)
++{
++    u32 misses = CtrAssets_GetStats()->misses;
++
++    if (ptr != NULL)
++        Port_ResolveAssetPointer(ptr);
++    return CtrAssets_GetStats()->misses != misses;
++}
++
++static bool8 CtrStorage_TouchWallpaper(u8 boxId)
++{
++    u8 wallpaperId = GetBoxWallpaper(boxId);
++    const struct Wallpaper *wallpaper;
++    bool8 read;
++
++    if (wallpaperId != WALLPAPER_FRIENDS)
++        wallpaper = &sWallpapers[wallpaperId];
++    else
++        wallpaper = &sWaldaWallpapers[GetWaldaWallpaperPatternId()];
++    read = CtrStorage_Touch(wallpaper->tiles);
++    read |= CtrStorage_Touch(wallpaper->tilemap);
++    read |= CtrStorage_Touch(wallpaper->palettes);
++    if (wallpaperId == WALLPAPER_FRIENDS)
++        read |= CtrStorage_Touch(sWaldaWallpaperIcons[GetWaldaWallpaperIconId()]);
++    return read;
++}
++
++static void CtrStorage_Prefetch(void)
++{
++    u8 current = StorageGetCurrentBox();
++    u16 end = TOTAL_BOXES_COUNT * (IN_BOX_COUNT + 1);
++
++    if (sStorage == NULL || gTasks[sStorage->taskId].func != Task_PokeStorageMain
++     || sStorage->state != MSTATE_HANDLE_INPUT)
++        return;
++    // Around whatever box is on show now.
++    if (sCtrPrefetch.fromBox != current)
++    {
++        sCtrPrefetch.fromBox = current;
++        sCtrPrefetch.next = 0;
++    }
++    while (sCtrPrefetch.next < end)
++    {
++        u16 step = sCtrPrefetch.next / (IN_BOX_COUNT + 1), slot = sCtrPrefetch.next % (IN_BOX_COUNT + 1);
++        // 0, +1, -1, +2, -2...
++        s16 offset = (step & 1) ? (step + 1) / 2 : -(s16)(step / 2);
++        u8 boxId = (current + TOTAL_BOXES_COUNT + offset) % TOTAL_BOXES_COUNT;
++        bool8 read;
++
++        sCtrPrefetch.next++;
++        if (slot == IN_BOX_COUNT)
++        {
++            read = CtrStorage_TouchWallpaper(boxId);
++        }
++        else
++        {
++            u32 species = GetBoxMonDataAt(boxId, slot, MON_DATA_SPECIES_OR_EGG);
++            u32 personality = GetBoxMonDataAt(boxId, slot, MON_DATA_PERSONALITY);
++
++            read = species != SPECIES_NONE && CtrStorage_Touch(GetMonIconTiles(species, personality));
++        }
++        if (read)
++            return;
++    }
++}
++
++static s8 StorageYesNoInput(void)
++{
++    s16 x, y;
++    s8 entry;
++
++    if (CtrStorage_TakeTap(&x, &y) && (entry = CtrMenu_EntryAt(x, y)) >= 0)
++    {
++        entry = CtrMenu_Choose(entry, TRUE);
++        EraseYesNoWindow();
++        return entry;
++    }
++    return Menu_ProcessInputNoWrapClearOnChoose();
++}
++#endif // PLATFORM_3DS
++
++
+ //------------------------------------------------------------------------------
+ //  SECTION: Input handlers
+ //
+@@ -7222,7 +7655,7 @@ static u8 InBoxInput_Normal(void)
+             break;
+         }
+ 
+-        if ((JOY_NEW(A_BUTTON)) && SetSelectionMenuTexts())
++        if ((STORAGE_A_PRESSED()) && SetSelectionMenuTexts())
+         {
+             if (!sAutoActionOn)
+                 return INPUT_IN_MENU;
+@@ -7498,7 +7931,7 @@ static u8 HandleInput_InParty(void)
+             break;
+         }
+ 
+-        if (JOY_NEW(A_BUTTON))
++        if (STORAGE_A_PRESSED())
+         {
+             if (sCursorPosition == PARTY_SIZE)
+             {
+@@ -7608,7 +8041,7 @@ static u8 HandleInput_OnBox(void)
+                 return INPUT_SCROLL_RIGHT;
+         }
+ 
+-        if (JOY_NEW(A_BUTTON))
++        if (STORAGE_A_PRESSED())
+         {
+             AnimateBoxScrollArrows(FALSE);
+             AddBoxOptionsMenu();
+@@ -7690,7 +8123,7 @@ static u8 HandleInput_OnButtons(void)
+         }
+ 
+         // Button was pressed, determine which
+-        if (JOY_NEW(A_BUTTON))
++        if (STORAGE_A_PRESSED())
+             return (cursorPosition == 0) ? INPUT_SHOW_PARTY : INPUT_CLOSE_BOX;
+ 
+         if (JOY_NEW(B_BUTTON))
+@@ -7727,6 +8160,12 @@ static u8 HandleInput(void)
+     };
+ 
+     u16 i = 0;
++#if defined(PLATFORM_3DS)
++    u8 touched = CtrStorage_TouchInput();
++
++    if (touched != INPUT_NONE)
++        return touched;
++#endif
+     while (inputFuncs[i].func != NULL)
+     {
+         if (inputFuncs[i].area == sCursorArea)
+@@ -8159,7 +8598,13 @@ static bool8 IsMenuLoading(void)
+ static s16 HandleMenuInput(void)
+ {
+     s32 input = MENU_NOTHING_CHOSEN;
++#if defined(PLATFORM_3DS)
++    s16 tapped;
+ 
++    if (CtrStorage_MenuTap(&tapped))
++        input = tapped;
++    else
++#endif
+     do
+     {
+         if (JOY_NEW(A_BUTTON))
+diff --git c/src/pokemon_summary_screen.c w/src/pokemon_summary_screen.c
+index 7d412d9d..e134805d 100644
+--- c/src/pokemon_summary_screen.c
++++ w/src/pokemon_summary_screen.c
+@@ -1736,10 +1736,71 @@ static void HandleMoveRelearnerInput(u8 taskId)
+     }
+ }
+ 
++#ifdef PLATFORM_3DS
++// Touch on the 3DS bottom screen (3ds_bottom_ui.c), in pixels of this
++// screen. It acts directly: CANCEL closes, a page's dot turns the page
++// towards it, the Pokémon's side goes to the previous (top) or next one
++// (bottom), the page's side turns back (left) or on (right).
++// It only turns pages, changes mons, or cancels: unlike A it never renames
++// or opens the move relearner.
++static struct {
++    bool8 pending;
++    s16 x, y;
++    u32 frame;
++} sCtrTap;
++
++void CtrSummary_Tap(s16 x, s16 y)
++{
++    sCtrTap.pending = TRUE;
++    sCtrTap.x = x;
++    sCtrTap.y = y;
++    sCtrTap.frame = gMain.vblankCounter1;
++}
++
++static bool8 CtrSummary_TouchInput(u8 taskId)
++{
++    s16 x = sCtrTap.x, y = sCtrTap.y;
++
++    if (!sCtrTap.pending)
++        return FALSE;
++    sCtrTap.pending = FALSE;
++    if (gMain.vblankCounter1 - sCtrTap.frame > 30 || x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT)
++        return FALSE;
++
++    if (y < 16 && x >= 176)
++    {
++        StopPokemonAnimations();
++        PlaySE(SE_SELECT);
++        BeginCloseSummaryScreen(taskId);
++    }
++    else if (y < 16)
++    {
++        // The page dots, 16 pixels apart from x 86.
++        s16 page = (x - 86) / 16;
++
++        if (x >= 86 && page != sMonSummaryScreen->currPageIndex)
++            ChangePage(taskId, page > sMonSummaryScreen->currPageIndex ? 1 : -1);
++    }
++    else if (x < 88)
++    {
++        ChangeSummaryPokemon(taskId, y < 88 ? -1 : 1);
++    }
++    else
++    {
++        ChangePage(taskId, x < 164 ? -1 : 1);
++    }
++    return TRUE;
++}
++#endif
++
+ static void Task_HandleInput(u8 taskId)
+ {
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE && !gPaletteFade.active)
+     {
++#ifdef PLATFORM_3DS
++        if (CtrSummary_TouchInput(taskId))
++            return;
++#endif
+         if (JOY_NEW(DPAD_UP))
+         {
+             ChangeSummaryPokemon(taskId, -1);
 diff --git c/src/pokenav.c w/src/pokenav.c
 index c826d58e..a133fb0c 100644
 --- c/src/pokenav.c
@@ -29798,7 +32556,7 @@ index 00000000..e99ff4c0
 +    return gBDPCMBlockBuffer[current & 63]; // index same as current % 64
 +}
 diff --git c/src/sprite.c w/src/sprite.c
-index 400ff93f..21fc723c 100644
+index 400ff93f..24e640f7 100644
 --- c/src/sprite.c
 +++ w/src/sprite.c
 @@ -7,6 +7,16 @@
@@ -29851,12 +32609,13 @@ index 400ff93f..21fc723c 100644
  void ResetSpriteData(void)
  {
      ResetOamRange(0, 128);
-@@ -383,9 +412,28 @@ void BuildOamBuffer(void)
+@@ -383,9 +412,33 @@ void BuildOamBuffer(void)
      oamLoadDisabled = gMain.oamLoadDisabled;
      gMain.oamLoadDisabled = TRUE;
  
 +#if defined(PLATFORM_3DS)
 +    CtrVideo_ClearOamAnchors();
++    CtrVideo_ClearScreenOam();
 +#endif
 +#if defined(PLATFORM_3DS) && CTR_VOXEL_ENABLED
 +    CtrVideo_ClearVoxelWeatherOam();
@@ -29870,6 +32629,10 @@ index 400ff93f..21fc723c 100644
 +#if defined(PLATFORM_3DS)
 +        CtrVideo_SetOamAnchor(first, oamIndex, sprite->y + sprite->y2 + sprite->centerToCornerVecY
 +                              + (sprite->coordOffsetEnabled ? gSpriteCoordOffsetY : 0));
++        // Placed on the screen, not on the map: a battle transition's
++        // sprites, which the compositor draws with the transition.
++        if (!sprite->coordOffsetEnabled)
++            CtrVideo_MarkScreenOam(first, oamIndex);
 +#endif
 +#if defined(PLATFORM_3DS) && CTR_VOXEL_ENABLED
 +        if (IsVoxelWeatherSprite(sprite))
@@ -29881,7 +32644,7 @@ index 400ff93f..21fc723c 100644
              break;
      }
  
-@@ -409,6 +457,54 @@ void BuildOamBuffer(void)
+@@ -409,6 +462,61 @@ void BuildOamBuffer(void)
      sShouldProcessSpriteCopyRequests = TRUE;
  }
  
@@ -29931,12 +32694,19 @@ index 400ff93f..21fc723c 100644
 +    }
 +    return FALSE;
 +}
++
++/* The voxel field draws the other map sprites as cards and the weather over
++ * the view (voxel_entities.c). */
++bool8 CtrSprite_IsVoxelWeather(const struct Sprite *sprite)
++{
++    return IsVoxelWeatherSprite(sprite);
++}
 +#endif
 +
  static inline void InsertionSort(u32 *spritePriorities, s32 n)
  {
      s32 i = 1;
-@@ -512,8 +608,19 @@ u32 CreateSpriteAt(u32 index, const struct SpriteTemplate *template, s16 x, s16
+@@ -512,8 +620,19 @@ u32 CreateSpriteAt(u32 index, const struct SpriteTemplate *template, s16 x, s16
      if (template->tileTag == TAG_NONE)
      {
          s16 tileNum;
@@ -29957,7 +32727,7 @@ index 400ff93f..21fc723c 100644
          if (tileNum == -1)
          {
              ResetSprite(sprite);
-@@ -572,7 +679,13 @@ void DestroySprite(struct Sprite *sprite)
+@@ -572,7 +691,13 @@ void DestroySprite(struct Sprite *sprite)
          if (!sprite->usingSheet)
          {
              u16 i;
@@ -29972,7 +32742,7 @@ index 400ff93f..21fc723c 100644
              for (i = sprite->oam.tileNum; i < tileEnd; i++)
                  FREE_SPRITE_TILE(i);
          }
-@@ -779,6 +892,10 @@ void ProcessSpriteCopyRequests(void)
+@@ -779,6 +904,10 @@ void ProcessSpriteCopyRequests(void)
          while (sSpriteCopyRequestCount > 0)
          {
              CpuCopy16(sSpriteCopyRequests[i].src, sSpriteCopyRequests[i].dest, sSpriteCopyRequests[i].size);
@@ -29983,7 +32753,7 @@ index 400ff93f..21fc723c 100644
              sSpriteCopyRequestCount--;
              i++;
          }
-@@ -791,16 +908,41 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
+@@ -791,16 +920,41 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
  {
      if (sSpriteCopyRequestCount < MAX_SPRITE_COPY_REQUESTS)
      {
@@ -30029,7 +32799,7 @@ index 400ff93f..21fc723c 100644
          sSpriteCopyRequests[sSpriteCopyRequestCount].dest = (u8 *)OBJ_VRAM0 + TILE_SIZE_4BPP * tileNum;
          sSpriteCopyRequestCount++;
      }
-@@ -810,6 +952,9 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
+@@ -810,6 +964,9 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
  {
      if (sSpriteCopyRequestCount < MAX_SPRITE_COPY_REQUESTS)
      {
@@ -30039,7 +32809,7 @@ index 400ff93f..21fc723c 100644
          sSpriteCopyRequests[sSpriteCopyRequestCount].src = src;
          sSpriteCopyRequests[sSpriteCopyRequestCount].dest = dest;
          sSpriteCopyRequests[sSpriteCopyRequestCount].size = size;
-@@ -1507,7 +1652,19 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
+@@ -1507,7 +1664,19 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
  
  static u16 LoadSpriteSheetWithOffset(const struct SpriteSheet *sheet, u32 offset)
  {
@@ -30060,7 +32830,7 @@ index 400ff93f..21fc723c 100644
  
      if (tileStart < 0)
      {
-@@ -1518,8 +1675,12 @@ static u16 LoadSpriteSheetWithOffset(const struct SpriteSheet *sheet, u32 offset
+@@ -1518,8 +1687,12 @@ static u16 LoadSpriteSheetWithOffset(const struct SpriteSheet *sheet, u32 offset
      }
      else
      {
@@ -30075,7 +32845,7 @@ index 400ff93f..21fc723c 100644
          return (u16)tileStart;
      }
  }
-@@ -1695,6 +1856,9 @@ u8 LoadSpritePaletteInSlot(const struct SpritePalette *palette, u8 paletteNum)
+@@ -1695,6 +1868,9 @@ u8 LoadSpritePaletteInSlot(const struct SpritePalette *palette, u8 paletteNum)
  
  void DoLoadSpritePalette(const u16 *src, u16 paletteOffset)
  {
