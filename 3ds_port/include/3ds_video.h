@@ -3,6 +3,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Reserve a voxel transfer (at most a split and a copy) before touching its
+ * destination. False means retain the completed CPU job for the next frame. */
+bool CtrVideo_TryVoxelUpload(void);
+/* How many more uploads TryVoxelUpload would grant this frame. */
+unsigned CtrVideo_VoxelUploadsLeft(void);
+
 #define CTR_GAME_WIDTH 400
 #define CTR_GAME_HEIGHT 240
 

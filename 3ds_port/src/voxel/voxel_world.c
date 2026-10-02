@@ -206,6 +206,80 @@ bool Voxel_LoadTiles(const void *tilesetPtr, uint8_t *dest, uint32_t destSize)
 
 /* ── Availability ───────────────────────────────────────────────────────── */
 
+/* Return completion separately from success, allowing bounded decoding. */
+bool Voxel_LoadTilesStep(const void *tilesetPtr, uint8_t *dest, uint32_t destSize,
+                         VoxelTileLoad *load, unsigned bytes)
+{
+    const struct Tileset *tileset = tilesetPtr;
+    const uint8_t *src;
+    if (load->done) return true;
+    if (!tileset || !tileset->tiles || !dest) goto failed;
+    src = Port_ResolveAssetPointer(tileset->tiles);
+    if (!src) goto failed;
+    if (!load->initialized)
+    {
+        load->packedSize = Port_GetAssetSizeExact(tileset->tiles);
+        if (!load->packedSize) goto failed;
+        load->size = load->packedSize;
+        if (tileset->isCompressed)
+        {
+            if (load->packedSize < 4 || src[0] != 0x10) goto failed;
+            load->size = (uint32_t)src[1] | ((uint32_t)src[2] << 8) | ((uint32_t)src[3] << 16);
+            load->source = 4;
+        }
+        if (!load->size || load->size > destSize) goto failed;
+        load->initialized = true;
+    }
+    if (load->size > destSize) goto failed;
+    if (!tileset->isCompressed)
+    {
+        unsigned count = load->size - load->written;
+        if (count > bytes) count = bytes;
+        memcpy(dest + load->written, src + load->written, count);
+        load->written += count;
+    }
+    else while (bytes && load->written < load->size)
+    {
+        if (!load->remaining)
+        {
+            if (!load->bits)
+            {
+                if (load->source >= load->packedSize) goto failed;
+                load->flags = src[load->source++];
+                load->bits = 8;
+            }
+            bool match = (load->flags & 0x80) != 0;
+            load->flags <<= 1;
+            --load->bits;
+            if (match)
+            {
+                if (load->packedSize - load->source < 2) goto failed;
+                unsigned a = src[load->source++], b = src[load->source++];
+                load->remaining = (a >> 4) + 3;
+                load->distance = ((a & 15) << 8) + b + 1;
+                if (load->distance > load->written) goto failed;
+            }
+            else
+            {
+                if (load->source >= load->packedSize) goto failed;
+                dest[load->written++] = src[load->source++];
+                --bytes;
+                continue;
+            }
+        }
+        dest[load->written] = dest[load->written - load->distance];
+        ++load->written;
+        --load->remaining;
+        --bytes;
+    }
+    if (load->written == load->size) load->done = load->ok = true;
+    return load->done;
+failed:
+    load->done = true;
+    load->ok = false;
+    return true;
+}
+
 bool VoxelWorld_IsMapAvailable(void)
 {
     if (gMapHeader.mapLayout == NULL)
@@ -752,6 +826,16 @@ void VoxelWorld_GetLocation(int *mapGroup, int *mapNum)
     if (mapNum != NULL) *mapNum = gSaveBlock1Ptr != NULL ? gSaveBlock1Ptr->location.mapNum : -1;
 }
 
+static int sMaterialView[4], sMaterialMargin;
+static bool sMaterialViewSet;
+
+void VoxelWorld_SetMaterialView(const int rect[4], int margin)
+{
+    sMaterialViewSet = rect != NULL;
+    if (rect != NULL) memcpy(sMaterialView, rect, sizeof(sMaterialView));
+    sMaterialMargin = margin;
+}
+
 void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *secondaryTileset,
                                   uint8_t *used)
 {
@@ -765,36 +849,46 @@ void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *second
          || inst->secondaryTileset != secondaryTileset)
             continue;
 
-        if (i == 0)
+        int x0 = 0, y0 = 0, x1 = inst->width, y1 = inst->height;
+        if (sMaterialViewSet)
         {
-            /* The live grid, so a metatile a script has already placed is in
-             * the atlas too. */
-            const u16 *map = gBackupMapLayout.map;
-            int area = gBackupMapLayout.width * gBackupMapLayout.height;
-
-            for (int t = 0; t < area; ++t)
-                used[map[t] & MAPGRID_METATILE_ID_MASK] = 1;
+            if (x0 < sMaterialView[0] - sMaterialMargin - inst->originX)
+                x0 = sMaterialView[0] - sMaterialMargin - inst->originX;
+            if (y0 < sMaterialView[1] - sMaterialMargin - inst->originY)
+                y0 = sMaterialView[1] - sMaterialMargin - inst->originY;
+            if (x1 > sMaterialView[2] + sMaterialMargin - inst->originX)
+                x1 = sMaterialView[2] + sMaterialMargin - inst->originX;
+            if (y1 > sMaterialView[3] + sMaterialMargin - inst->originY)
+                y1 = sMaterialView[3] + sMaterialMargin - inst->originY;
         }
-        else
-        {
-            const uint16_t *map = Voxel_ResolveMap(layout);
-
-            if (map != NULL)
-                for (int t = 0, area = inst->width * inst->height; t < area; ++t)
-                    used[map[t] & MAPGRID_METATILE_ID_MASK] = 1;
-        }
+        const uint16_t *map = i == 0 ? gBackupMapLayout.map : Voxel_ResolveMap(layout);
+        if (map != NULL)
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x)
+                {
+                    int bx = i == 0 ? x + MAP_OFFSET : x;
+                    int by = i == 0 ? y + MAP_OFFSET : y;
+                    int stride = i == 0 ? gBackupMapLayout.width : inst->width;
+                    if (i == 0 && (bx < 0 || by < 0 || bx >= stride || by >= gBackupMapLayout.height))
+                        continue;
+                    unsigned m = map[by * stride + bx] & MAPGRID_METATILE_ID_MASK;
+                    unsigned priority = !sMaterialViewSet ||
+                        (x + inst->originX >= sMaterialView[0] && x + inst->originX < sMaterialView[2]
+                      && y + inst->originY >= sMaterialView[1] && y + inst->originY < sMaterialView[3]) ? 2u : 1u;
+                    if (used[m] < priority) used[m] = priority;
+                }
 
         border = layout->border != NULL ? Port_ResolveAssetPointer(layout->border) : NULL;
         if (border != NULL)
             for (unsigned t = 0; t < 4; ++t)
-                used[border[t] & MAPGRID_METATILE_ID_MASK] = 1;
+                used[border[t] & MAPGRID_METATILE_ID_MASK] = 2;
     }
     /* The replacement removes canopy fringes even on maps that never used
      * their bare ground tile. Keep that material available in the atlas. */
     if (primaryTileset == &gTileset_General)
         for (int m = 0; m < NUM_METATILES_TOTAL; ++m)
-            if (used[m])
-                used[VoxelTree_GroundMetatile(m)] = 1;
+            if (used[m] > used[VoxelTree_GroundMetatile(m)])
+                used[VoxelTree_GroundMetatile(m)] = used[m];
 }
 
 /*
@@ -1052,4 +1146,26 @@ unsigned VoxelWorld_NearbyPayloads(const void **payloads, unsigned max)
         }
     }
     return count;
+}
+
+uint32_t VoxelWorld_PayloadSignature(void)
+{
+    uint32_t hash = 2166136261u;
+    for (unsigned i = 0; i < sInstanceCount; ++i)
+    {
+        const struct MapHeader *header = sInstances[i].header;
+        const struct MapEvents *events = header != NULL ? header->events : NULL;
+        hash = (hash ^ (uint32_t)(uintptr_t)sInstances[i].layout) * 16777619u;
+        hash = (hash ^ (uint32_t)(uintptr_t)header) * 16777619u;
+        if (events == NULL || events->objectEvents == NULL)
+            continue;
+        for (unsigned j = 0; j < events->objectEventCount; ++j)
+        {
+            const struct ObjectEventGraphicsInfo *info =
+                GetObjectEventGraphicsInfo(events->objectEvents[j].graphicsId);
+            const void *payload = info != NULL && info->images != NULL ? info->images[0].data : NULL;
+            hash = (hash ^ (uint32_t)(uintptr_t)payload) * 16777619u;
+        }
+    }
+    return hash;
 }

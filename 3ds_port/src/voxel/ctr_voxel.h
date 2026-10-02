@@ -67,11 +67,16 @@ typedef struct
      * reset that follows a change to them (region layouts come off RomFS
      * there), the atlas job, and the billboards. */
     float worldMs, atlasMs, spritesMs;
+    /* ... and of what no other figure holds: the building pages' stream, the
+     * animated tiles' recomposition, the drafts. */
+    float streamMs, animMs, draftMs;
     /* Spent building after the last FrameEnd (CtrVoxel_AfterSubmit), and the
      * budget it had. */
     float afterMs, afterBudgetMs;
     /* Chunks built this frame, and still waiting for a later one. */
     unsigned frameBuilds, pendingBuilds;
+    /* Squares drawn this frame as their draft only, and drafts made in all. */
+    unsigned draftsVisible, draftsMade;
     /* Bytes still free in the two pools this competes for. VRAM is here
      * because it is almost entirely unused, which is the whole argument for
      * moving the mesh into it. */

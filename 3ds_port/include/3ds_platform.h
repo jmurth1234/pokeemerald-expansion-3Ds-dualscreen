@@ -54,6 +54,7 @@ FILE *CtrFs_OpenData(const char *relativePath, const char *mode);
 
 /* The port's own settings (settings.txt on the SD card, see 3ds_settings.c). */
 void CtrSettings_Load(void);
+void CtrSettings_Shutdown(void);
 bool CtrSettings_Voxel(void);
 void CtrSettings_SetVoxel(bool on);
 /* Voxel camera pitch in degrees and zoom in percent, from a short fixed list. */

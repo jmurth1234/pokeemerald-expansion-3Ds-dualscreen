@@ -342,6 +342,18 @@ $(ROMFS_GAMEDATA_OUTS) &: build/gamedata_image.elf $(TARGET).elf scripts/gen_gam
 	"$(PYTHON)" scripts/gen_gamedata_bundle.py --image build/gamedata_image.elf --elf $(TARGET).elf \
 		--out-dir romfs/gamedata
 
+# Host world/atlas fixtures include global.h's generated map constants.
+$(MAPJSON): $(wildcard $(ROOT)/tools/mapjson/*.cpp $(ROOT)/tools/mapjson/*.h)
+	$(MAKE) -C $(ROOT)/tools/mapjson
+
+$(ROOT)/include/constants/map_groups.h: $(ROOT)/data/maps/map_groups.json $(wildcard $(ROOT)/data/maps/*/map.json) | $(MAPJSON)
+	"$(MAPJSON)" groups emerald $< $(ROOT)/data/maps $(ROOT)/include/constants
+
+$(ROOT)/include/constants/layouts.h: $(ROOT)/data/layouts/layouts.json | $(MAPJSON)
+	"$(MAPJSON)" layouts emerald $< $(ROOT)/data/layouts $(ROOT)/include/constants
+
+HOST_MAP_HEADERS := $(ROOT)/include/constants/map_groups.h $(ROOT)/include/constants/layouts.h
+
 .PHONY: map-includes
 map-includes:
 	"$(PYTHON)" $(SCRIPTS)/gen_missing_map_includes.py
@@ -396,13 +408,13 @@ romfs/voxel/trees.rgba5551: scripts/gen_voxel_trees.py \
 # in the GBA's projection and refuses to write one that differs from its art
 # by a single pixel, so a spec that stops matching fails the build here.
 romfs/voxel/buildings.bin: scripts/gen_voxel_buildings.py scripts/voxel_building.py \
-		scripts/voxel_building_specs.py scripts/dump_region_art.py \
+		scripts/voxel_building_specs.py scripts/dump_region_art.py scripts/voxel_props.py \
 		$(ROOT)/data/layouts/layouts.json | build/graphics.stamp
 	@mkdir -p $(@D)
 	"$(PYTHON)" scripts/gen_voxel_buildings.py --output $@ $(VOXEL_BUILDINGS_FLAGS)
 
 # Terrain relief read off the drawing: gen_voxel_relief.py explains it.
-romfs/voxel/relief.bin: scripts/gen_voxel_relief.py scripts/voxel_cells.py \
+romfs/voxel/relief.bin: scripts/gen_voxel_relief.py scripts/voxel_cells.py scripts/voxel_props.py \
 		scripts/voxel_art.py scripts/voxel_building.py scripts/dump_region_art.py \
 		$(ROOT)/data/layouts/layouts.json | build/graphics.stamp
 	@mkdir -p $(@D)
@@ -421,7 +433,7 @@ verify: verify-voxel-world
 verify-voxel-world: build/voxel_world_hash_test.exe
 	./build/voxel_world_hash_test.exe
 
-build/voxel_world_hash_test.exe: tests/voxel_world_hash_test.c src/voxel/voxel_world.c src/voxel/voxel_world.h
+build/voxel_world_hash_test.exe: tests/voxel_world_hash_test.c src/voxel/voxel_world.c src/voxel/voxel_world.h $(HOST_MAP_HEADERS)
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=gnu99 -O2 -DPORTABLE -DMODERN=1 -D__INTELLISENSE__ $(PORT_EXPANSION_DEF) \
 		-iquote compat -iquote ../include -Isrc/voxel tests/voxel_world_hash_test.c -o $@
@@ -441,10 +453,10 @@ verify-voxel-atlas: build/voxel_atlas_test.exe
 	./build/voxel_atlas_test.exe
 
 build/voxel_atlas_test.exe: tests/voxel_atlas_test.c src/voxel/voxel_atlas.c src/voxel/voxel_atlas.h \
-		src/3ds_video_decode.c
+        src/3ds_video_decode.c src/voxel/voxel_grade.c src/voxel/voxel_grade.h $(HOST_MAP_HEADERS)
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=gnu99 -O2 -DPORTABLE -DMODERN=1 -D__INTELLISENSE__ \
-		-iquote compat -iquote ../include -Iinclude -Isrc/voxel tests/voxel_atlas_test.c -o $@
+		-iquote compat -iquote ../include -Iinclude -Isrc/voxel tests/voxel_atlas_test.c src/voxel/voxel_grade.c -o $@
 
 verify: verify-voxel-trees
 verify-voxel-trees: build/voxel_tree_test.exe
@@ -453,12 +465,13 @@ verify-voxel-trees: build/voxel_tree_test.exe
 build/voxel_tree_test.exe: tests/voxel_tree_test.c src/voxel/voxel_tree.c \
 		src/voxel/voxel_mesh_builder.c src/voxel/voxel_sign.c \
 		src/voxel/voxel_tree.h src/voxel/voxel_mesh_builder.h \
-		src/voxel/voxel_world.h src/voxel/voxel_atlas.h src/voxel/voxel_regions.h
+		src/voxel/voxel_world.h src/voxel/voxel_atlas.h src/voxel/voxel_regions.h \
+		src/voxel/voxel_building.c src/voxel/voxel_relief.c src/voxel/voxel_grade.c src/3ds_video_decode.c
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Isrc/voxel \
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel \
 		tests/voxel_tree_test.c src/voxel/voxel_tree.c \
 		src/voxel/voxel_mesh_builder.c src/voxel/voxel_sign.c \
-		src/voxel/voxel_building.c src/voxel/voxel_relief.c $(HOST_VOXEL_DEFS) -lm -o $@
+		src/voxel/voxel_building.c src/voxel/voxel_relief.c src/voxel/voxel_grade.c src/3ds_video_decode.c $(HOST_VOXEL_DEFS) -lm -o $@
 
 .PHONY: verify-voxel-lighting
 verify: verify-voxel-lighting
@@ -490,17 +503,24 @@ verify-voxel-structures: build/voxel_ground_mesh_test.exe build/voxel_sign_test.
 
 GROUND_TEST_SRCS := tests/voxel_ground_mesh_test.c \
 	src/voxel/voxel_mesh_builder.c src/voxel/voxel_tree.c src/voxel/voxel_sign.c \
-	src/voxel/voxel_building.c src/voxel/voxel_relief.c
+	src/voxel/voxel_building.c src/voxel/voxel_relief.c src/voxel/voxel_grade.c src/3ds_video_decode.c
 build/voxel_ground_mesh_test.exe: $(GROUND_TEST_SRCS) $(LIGHTING_TEST_HEADERS) src/voxel/voxel_sign.h
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Isrc/voxel $(HOST_VOXEL_DEFS) \
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel $(HOST_VOXEL_DEFS) \
 		-DVOXEL_BUILDINGS_PATH=\"romfs/voxel/buildings.bin\" $(GROUND_TEST_SRCS) -lm -o $@
 
 build/voxel_sign_test.exe: tests/voxel_sign_test.c src/voxel/voxel_sign.c src/voxel/voxel_sign.h
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Isrc/voxel \
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel \
 		-DVOXEL_HOST_FILES -DSIGN_MASK_PATH='"romfs/voxel/signposts.bin"' \
 		tests/voxel_sign_test.c src/voxel/voxel_sign.c -o $@
+
+# The mountains' geometry against what the projection allows, every drawn
+# group (scripts/voxel_relief_check.py), compared with the run before.
+.PHONY: check-voxel-relief
+check-voxel-relief:
+	"$(PYTHON)" scripts/voxel_relief_check.py --images build/relief_check \
+		--against build/relief_check.pkl --save build/relief_check.pkl
 
 .PHONY: verify-voxel-relief
 verify: verify-voxel-relief
@@ -509,7 +529,37 @@ verify-voxel-relief: build/voxel_relief_test.exe romfs/voxel/relief.bin
 
 build/voxel_relief_test.exe: tests/voxel_relief_test.c src/voxel/voxel_relief.c src/voxel/voxel_relief.h
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Isrc/voxel $(HOST_VOXEL_DEFS) \
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel $(HOST_VOXEL_DEFS) \
 		-DVOXEL_RELIEF_PATH='"romfs/voxel/relief.bin"' \
 		tests/voxel_relief_test.c src/voxel/voxel_relief.c -lm -o $@
 endif
+
+.PHONY: verify-settings
+verify: verify-settings
+verify-settings: build/settings_shutdown_test.exe
+	./build/settings_shutdown_test.exe
+	./build/settings_shutdown_test.exe 1
+	./build/settings_shutdown_test.exe 2
+
+build/settings_shutdown_test.exe: tests/settings_shutdown_test.c tests/settings_host/3ds.h src/3ds_settings.c
+	@mkdir -p $(@D)
+	$(HOSTCC) -std=gnu99 -O2 -Wall -Wextra -Werror -Itests/settings_host -Iinclude $< -pthread -o $@
+.PHONY: verify-voxel-runtime
+verify: verify-voxel-runtime
+verify-voxel-runtime:
+	"$(PYTHON)" tests/voxel_runtime_test.py --cc "$(HOSTCC)"
+
+.PHONY: verify-voxel-draft
+verify: verify-voxel-draft
+verify-voxel-draft:
+	"$(PYTHON)" -B tests/voxel_draft_test.py --cc "$(HOSTCC)"
+
+.PHONY: verify-bottom-map
+verify: verify-bottom-map
+verify-bottom-map:
+	"$(PYTHON)" -B tests/bottom_map_test.py --cc "$(HOSTCC)"
+
+.PHONY: verify-voxel-regions
+verify: verify-voxel-regions
+verify-voxel-regions: romfs/voxel/regions.bin
+	"$(PYTHON)" -B tests/voxel_regions_test.py --cc "$(HOSTCC)"

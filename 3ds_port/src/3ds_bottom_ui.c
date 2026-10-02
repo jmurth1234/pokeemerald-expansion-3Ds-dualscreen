@@ -2620,11 +2620,22 @@ static void BuildMapCache(void)
     sDst = sCanvas;
 }
 
-static void DrawRegionMap(const ViewState *s)
+static void DrawRegionName(const ViewState *s)
 {
     u8 name[32];
     bool8 picked = s->pickMapsec != MAPSEC_NONE;
     u8 mapsec = picked ? s->pickMapsec : s->mapsec;
+
+    if (mapsec == MAPSEC_NONE)
+        return;
+    GetMapName(name, mapsec, 0);
+    DrawBoxEx(BOX_MENU, 8, 188, 28, 5, picked);
+    DrawStrCentered(&sNormal, name, CW / 2, 200, LABEL_FG(picked), LABEL_SH(picked));
+}
+
+static void DrawRegionMap(const ViewState *s)
+{
+    bool8 picked = s->pickMapsec != MAPSEC_NONE;
 
     if (s->mapsec != MAPSEC_NONE && sRes.playerIcon[s->gender])
         DrawSprite(sRes.playerIcon[s->gender], 2, 2, MAP_ORIGIN_X + s->cursorX * 8 - 4,
@@ -2634,11 +2645,7 @@ static void DrawRegionMap(const ViewState *s)
                    sRes.cursorPal.c);
     AddHit(0, 0, CW, 176, HIT_MAP);
 
-    if (mapsec == MAPSEC_NONE)
-        return;
-    GetMapName(name, mapsec, 0);
-    DrawBoxEx(BOX_MENU, 8, 188, 28, 5, picked);
-    DrawStrCentered(&sNormal, name, CW / 2, 200, LABEL_FG(picked), LABEL_SH(picked));
+    DrawRegionName(s);
 }
 
 /* The section under a tapped map cell, as the region map's cursor finds it. */
@@ -4247,11 +4254,13 @@ static bool8 MapCursorOnlyMoved(const ViewState *now, const ViewState *shown)
     if (now->screen != SCR_MAP || now->mode == MODE_OFF || now->mode >= MODE_BATTLE_INFO
      || now->inBattle || now->bagView == BAG_VIEW_WHOLE
      || now->mapsec == MAPSEC_NONE || shown->mapsec == MAPSEC_NONE
-     || (now->cursorX == shown->cursorX && now->cursorY == shown->cursorY))
+     || (now->cursorX == shown->cursorX && now->cursorY == shown->cursorY
+         && now->mapsec == shown->mapsec))
         return FALSE;
     moved = *now;
     moved.cursorX = shown->cursorX;
     moved.cursorY = shown->cursorY;
+    moved.mapsec = shown->mapsec;
     return memcmp(&moved, shown, sizeof(moved)) == 0;
 }
 
@@ -4302,6 +4311,17 @@ static bool8 MoveMapCursor(const ViewState *from, const ViewState *to)
     sOX = 0;
     DrawSprite(icon, 2, 2, MAP_ORIGIN_X + to->cursorX * 8 - 4, MAP_ORIGIN_Y + to->cursorY * 8 - 4,
                sRes.playerIconPal[to->gender].c);
+    /* Crossing a region changes only the label below the map. Restore and
+     * redraw that rectangle instead of the map and the eight-button column. */
+    if (to->mapsec != from->mapsec && to->pickMapsec == MAPSEC_NONE)
+    {
+        for (int x = 8; x < 232; ++x)
+            memcpy(sCanvas + x * H + (H - 228), sCache[CACHE_MAP] + x * H + (H - 228),
+                   40 * sizeof(u16));
+        ResolveFonts();
+        DrawRegionName(to);
+        CtrBottom_BlitRect(sCanvas, 8, 188, 232, 228);
+    }
     /* A picked cell's cursor is drawn over the mark, as Render does. */
     if (to->pickMapsec != MAPSEC_NONE && sRes.cursorTiles)
         DrawSprite(sRes.cursorTiles, 2, 2, MAP_ORIGIN_X + to->pickX * 8 - 4,
@@ -4311,16 +4331,31 @@ static bool8 MoveMapCursor(const ViewState *from, const ViewState *to)
     return TRUE;
 }
 
+static void BottomProfile(u32 frame, u8 mode, const uint64_t ticks[3], unsigned kind)
+{
+    static u32 last;
+    uint64_t end = CtrPlatform_Ticks();
+    float total = CtrPlatform_TickMs(end - ticks[0]);
+    if (total < 2.0f || (last && frame - last < 120)) return;
+    last = frame;
+    CtrLog_Write(CTR_LOG_VIDEO,
+                 "bottom slice mode=%u kind=%u total=%.2f control=%.2f snapshot=%.2f draw=%.2f ms",
+                 mode, kind, total, CtrPlatform_TickMs(ticks[1] - ticks[0]),
+                 CtrPlatform_TickMs(ticks[2] - ticks[1]), CtrPlatform_TickMs(end - ticks[2]));
+}
+
 void CtrBottom_Frame(void)
 {
     static u32 frames;
     static bool8 iconsPending, held;
     u8 mode, pressed;
     bool8 hold;
+    uint64_t ticks[3];
 
     if (!sRes.ready)
         return;
     ++frames;
+    ticks[0] = CtrPlatform_Ticks();
     sAsked = sAsk;
     sAsk.kind = ASK_NONE;
     if (sAsked.kind == ASK_NONE)
@@ -4356,6 +4391,7 @@ void CtrBottom_Frame(void)
             sForceRedraw = TRUE;
         navDrawn = drawn;
     }
+    ticks[1] = CtrPlatform_Ticks();
     Snapshot(&sState, mode, pressed);
 
     /* One RomFS read at most, and a single redraw once the icons are in. */
@@ -4367,9 +4403,11 @@ void CtrBottom_Frame(void)
         sForceRedraw = TRUE;
     }
 
+    ticks[2] = CtrPlatform_Ticks();
     if (!sForceRedraw && MapCursorOnlyMoved(&sState, &sShown) && MoveMapCursor(&sShown, &sState))
     {
         sShown = sState;
+        BottomProfile(frames, mode, ticks, 1);
         return;
     }
     if (sForceRedraw || memcmp(&sState, &sShown, sizeof(sState)) != 0)
@@ -4391,6 +4429,7 @@ void CtrBottom_Frame(void)
             CtrLog_Write(CTR_LOG_VIDEO, "bottom screen: redraw peak %.2f ms (mode %u screen %u)", ms, sShown.mode,
                          sShown.screen);
         }
+        BottomProfile(frames, mode, ticks, 2);
         return;
     }
     if (sAnimCount && (u8)((frames >> 4) & 1) != sAnimFrame)
@@ -4398,4 +4437,5 @@ void CtrBottom_Frame(void)
         sAnimFrame = (frames >> 4) & 1;
         AnimateIcons();
     }
+    BottomProfile(frames, mode, ticks, 0);
 }

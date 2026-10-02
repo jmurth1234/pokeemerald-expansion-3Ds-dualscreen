@@ -13,6 +13,8 @@ ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CPPFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -Iinclude -I$(CTRULIB)/include
 CFLAGS := $(ARCH) -O2 -g -std=gnu99 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
 LDFLAGS := $(ARCH) -L$(CTRULIB)/lib
+# Observe the public GX queue for upload admission; never start it early.
+LDFLAGS += -Wl,--wrap=GX_BindQueue
 LIBS := -lctru -lm
 TARGET := emerald3ds
 APP_TITLE := Pokemon Emerald 3Ds Dual Screen

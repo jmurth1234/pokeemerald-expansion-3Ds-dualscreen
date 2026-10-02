@@ -28,6 +28,11 @@ void Port_SetGfxPaletteDebug(u8 secondary, u8 nonzero, u8 resolved);
 void Port_SetGfxMetatileDebug(u16 id, u8 resolved, u16 first, u16 second);
 
 /* ── External resources ─────────────────────────────────────────────────── */
+/* Hardware profiling of a stretch of game code: logs the time since the last
+ * mark when it is a millisecond or more (rate limited). */
+void Port_ProfileMark(const char *label);
+void Port_ProfBegin(void);
+void Port_ProfAcc(const char *name);
 void Port_AssetPreload(void);
 void Port_TextPreload(void);
 bool Port_IsAssetStub(const void *ptr);

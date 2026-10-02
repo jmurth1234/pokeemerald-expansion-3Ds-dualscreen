@@ -75,6 +75,9 @@ unsigned VoxelWorld_NextLayouts(unsigned *layouts, unsigned max);
  * from others had them read off the card by the renderer, mid-frame.
  */
 unsigned VoxelWorld_NearbyPayloads(const void **payloads, unsigned max);
+/* Includes resolved dynamic object graphics, so a variable-driven NPC change
+ * invalidates the prefetch list even while the map set is unchanged. */
+uint32_t VoxelWorld_PayloadSignature(void);
 unsigned VoxelWorld_InstanceCount(void);
 const VoxelMapInstance *VoxelWorld_Instance(unsigned index);
 const VoxelMapInstance *VoxelWorld_GetInstanceAt(int worldX, int worldY);
@@ -146,6 +149,8 @@ unsigned Voxel_MetatileCount(const void *tileset, unsigned limit);
  * keeps an atlas rebuild a map-change hitch instead of a whole second of work:
  * a map typically references a couple of hundred of the 1024 ids.
  */
+/* NULL restores whole-map collection for offline callers. */
+void VoxelWorld_SetMaterialView(const int rect[4], int margin);
 void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *secondaryTileset,
                                   uint8_t *used);
 /*
@@ -153,6 +158,15 @@ void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *second
  * are LZ77-compressed, so the caller supplies the scratch buffer to expand
  * into. Returns false when the tileset has no usable tile data.
  */
+/* Re-resolves the payload each step; no asset-cache pointer survives a frame.
+ * Zero-initialize before use. A step writes at most `bytes` destination bytes. */
+typedef struct {
+    uint32_t source, written, size, packedSize, remaining, distance;
+    uint8_t flags, bits;
+    bool initialized, done, ok;
+} VoxelTileLoad;
+bool Voxel_LoadTilesStep(const void *tileset, uint8_t *dest, uint32_t destSize,
+                         VoxelTileLoad *load, unsigned bytes);
 bool Voxel_LoadTiles(const void *tileset, uint8_t *dest, uint32_t destSize);
 
 #endif

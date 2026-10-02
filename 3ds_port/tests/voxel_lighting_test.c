@@ -157,6 +157,18 @@ int main(void)
             for (int z = 0; z < 25; ++z)
                 for (int x = 0; x < 25; ++x)
                     assert(reference[h][z][x] == VoxelLighting_Sample(x * 0.31f - 1, h * 0.4f, z * 0.31f - 1));
+    /* Adjacent half-tile ground lattices should reuse their exact samples. */
+    VoxelLighting_Reset();
+    unsigned latticeStart = VoxelLighting_Rays();
+    for (int pass = 0; pass < 2; ++pass)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x)
+                for (int dz = 0; dz < 3; ++dz)
+                    for (int dx = 0; dx < 3; ++dx)
+                        (void)VoxelLighting_Sample(x + dx * 0.5f, 0, z + dz * 0.5f);
+    assert(VoxelLighting_Rays() - latticeStart <= 1200);
+    printf("Lighting ground lattice: %u rays for 1089 unique points, 4608 queries\n",
+           VoxelLighting_Rays() - latticeStart);
     /* Rays stop once they climb past the tallest caster on screen. With the
      * ceiling lifted out of reach every ray runs its full length, and must
      * reach the same answers. */

@@ -143,6 +143,7 @@ typedef struct
 typedef struct
 {
     C3D_Tex tex;
+    C3D_Tex extra[VOXEL_ATLAS_PAGES - 1u];
     const void *primaryTileset;
     const void *secondaryTileset;
     uint32_t stamp;
@@ -150,10 +151,29 @@ typedef struct
     /* Bumped when ids are added in place (an extending atlas job): old
      * UVs stay valid, only chunks that missed an id need building again. */
     uint32_t extension;
-    bool extendPending, uncoveredRetried;
+    bool extendPending;
     bool valid;
     VoxelAtlasMap map;
 } VoxelAtlasSlot;
+
+static C3D_Tex *AtlasTex(VoxelAtlasSlot *slot, unsigned page)
+{
+    return page == 0 ? &slot->tex : &slot->extra[page - 1u];
+}
+
+static void FreeAtlasTextures(VoxelAtlasSlot *slot)
+{
+    for (unsigned page = 0; page < VOXEL_ATLAS_PAGES; ++page)
+    {
+        C3D_Tex *tex = AtlasTex(slot, page);
+        if (tex->data != NULL)
+            C3D_TexDelete(tex);
+        memset(tex, 0, sizeof(*tex));
+    }
+    slot->valid = false;
+    ++slot->generation;
+}
+static bool sAtlasCapacityBlocked;
 
 static bool sReady;
 static DVLB_s *sDvlb;
@@ -192,27 +212,43 @@ static VoxelBuilder sBuilder;
 static VoxelCamera sCamera;
 static VoxelAtlasSlot sAtlases[VOXEL_ATLAS_SLOTS];
 static uint32_t sAtlasStamp;
+static unsigned sAtlasExtensionsSkipped;
 static bool sAtlasCapped;
 /* One atlas upload per frame: the queued copy still owns this source after
  * AcquireAtlas returns. Cache hits need no upload and remain unrestricted. */
 static uint16_t *sAtlasStaging;
 static bool sAtlasUploadPending;
-/* One CPU copy of the active atlas. Keeping all six would exhaust Old 3DS
- * memory; inactive atlases are rebased only when they become current again. */
-static uint16_t *sAnimShadow;
-static VoxelAtlasSlot *sAnimAtlas;
-/* The atlas the GPU is copying back into the shadow (QueueAnimReadback). */
-static VoxelAtlasSlot *sAnimReadback;
-static uint8_t sAnimDirty[128];
-static bool sAnimPending, sAnimEverDirty;
+/* The animated metatiles are redrawn a few at a time into this little linear
+ * buffer and copied into their page by the GPU (VoxelAtlas_AnimatedSlots). */
+#define VOXEL_ANIM_SLOTS 6u
+static VoxelAnimSlot *sAnimOut;
+static uint8_t sAnimDirty[VOXEL_ATLAS_PAGES][128];
+/* The pass in progress: the page (+1, 0 for none) of this atlas, the tiles it
+ * redraws for - taken from the dirty ones when it began, so what is written
+ * meanwhile waits for the next pass - and how far down the ids it is. */
+static unsigned sAnimWorkPage, sAnimCursor;
+static VoxelAtlasSlot *sAnimWorkAtlas;
+static uint8_t sAnimWork[128];
+/* Where the next pass starts looking for a page with dirty tiles. */
+static unsigned sAnimNext;
+static bool sAnimPending;
+static void AnimForget(VoxelAtlasSlot *slot)
+{
+    if (sAnimWorkAtlas == slot)
+    {
+        sAnimWorkAtlas = NULL;
+        sAnimWorkPage = 0;
+    }
+}
 
 void CtrVoxel_NotifyTilesetAnimWrite(unsigned firstTile, unsigned tileCount)
 {
     if (firstTile >= 1024) return;
     if (tileCount > 1024 - firstTile) tileCount = 1024 - firstTile;
     for (unsigned t = firstTile; t < firstTile + tileCount; ++t)
-        sAnimDirty[t >> 3] |= 1u << (t & 7);
-    sAnimPending = sAnimEverDirty = true;
+        for (unsigned page = 0; page < VOXEL_ATLAS_PAGES; ++page)
+            sAnimDirty[page][t >> 3] |= 1u << (t & 7);
+    sAnimPending = true;
 }
 static bool AtlasJobBusy(void);
 static void AtlasJobCancel(void);
@@ -542,6 +578,7 @@ typedef struct
     uint32_t atlasGeneration;
     VoxelGpuVertex *vram;
     unsigned bytes, count, terrainCount;
+    unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
     unsigned buildingFirst; /* trees are [terrainCount, buildingFirst) */
     int buildingPage;       /* texture page of [buildingFirst, count) */
     uint32_t stamp;         /* last frame the view or the prefetch ring saw it */
@@ -556,6 +593,9 @@ typedef struct
     /* Built with ids its atlas lacked, against this extension of it. */
     bool uncovered;
     uint32_t atlasExtension;
+    /* Only the draft of the square (DraftChunk): its ground laid flat, drawn
+     * until the real build replaces it. Always asked for again. */
+    bool draft;
 } VoxelChunk;
 
 static VoxelChunk sChunks[VOXEL_CHUNK_SLOTS];
@@ -629,6 +669,10 @@ static float sLeadX, sLeadZ;
  * already there. One chunk: the player never outwalks it.
  */
 #define VOXEL_PREFETCH VOXEL_CHUNK
+/* Tiles past the view whose metatiles an atlas is composed for: a whole route, not
+ * the 24 around the view, whose edge ids arrived by extension - a few frames of
+ * black cells each - as the player walked towards them. */
+#define VOXEL_MATERIAL_MARGIN 64
 
 /* The camera's matrices, as the draw uses them: `fit` folds in the logical
  * surface (FitToLogicalSurface), which the frustum must not see. */
@@ -883,20 +927,8 @@ static bool PageDroppable(const BuildingPageSlot *slot, uint32_t keep)
         && !(sStream.copyQueued && sStream.slot == slot);
 }
 
-/*
- * The worker also reads region layouts ahead of need (see
- * VoxelRegions_ReadDetached): one request at a time, handed over like a page
- * slice - the render thread writes the request, the worker the result.
- */
+/* Asset reads share the page worker; region roles are resident. */
 enum { AHEAD_IDLE, AHEAD_READING, AHEAD_DONE };
-
-static struct
-{
-    volatile int state;
-    unsigned layout;
-    void *result;
-    unsigned failed;    /* the last layout that would not read: not asked again */
-} sAhead;
 
 /* And, one at a time too, an asset payload of a map near the view (see
  * VoxelWorld_NearbyPayloads): its tilesets and border, read here instead of
@@ -929,12 +961,6 @@ static void StreamWorker(void *arg)
             __sync_synchronize();
             sStream.state = ok ? STREAM_DONE : STREAM_FAILED;
         }
-        if (sAhead.state == AHEAD_READING)
-        {
-            sAhead.result = VoxelRegions_ReadDetached(sAhead.layout);
-            __sync_synchronize();
-            sAhead.state = AHEAD_DONE;
-        }
         if (sAssetAhead.state == AHEAD_READING)
         {
             sAssetAhead.result = CtrAssets_PrefetchRead(&sAssetAhead.request);
@@ -944,16 +970,17 @@ static void StreamWorker(void *arg)
     }
 }
 
-/* Installs what the worker read, and asks it for the next asset payload and
- * the next region layout not held yet: of the maps on screen first (after a
- * warp nothing of their connections has been read), then of those one
- * crossing away. */
+/* Adopt completed asset reads and prefetch payloads near the view. */
 #define VOXEL_AHEAD_PAYLOADS 192u
 
 static void ReadAssetsAhead(void)
 {
-    const void *payloads[VOXEL_AHEAD_PAYLOADS];
-    unsigned count;
+    static const void *payloads[VOXEL_AHEAD_PAYLOADS];
+    static unsigned count, cursor;
+    static uint32_t signature, evictions;
+    static bool cached;
+    uint32_t now = VoxelWorld_PayloadSignature();
+    uint32_t retired = CtrAssets_GetStats()->evictions;
 
     if (sAssetAhead.state == AHEAD_DONE)
     {
@@ -964,11 +991,24 @@ static void ReadAssetsAhead(void)
         sAssetAhead.result = NULL;
         sAssetAhead.state = AHEAD_IDLE;
     }
+    if (!cached || signature != now)
+    {
+        count = VoxelWorld_NearbyPayloads(payloads, VOXEL_AHEAD_PAYLOADS);
+        cursor = 0;
+        signature = now;
+        cached = true;
+    }
+    if (evictions != retired)
+    {
+        evictions = retired;
+        cursor = 0;
+    }
     if (sAssetAhead.state != AHEAD_IDLE)
         return;
-    count = VoxelWorld_NearbyPayloads(payloads, VOXEL_AHEAD_PAYLOADS);
-    for (unsigned i = 0; i < count; ++i)
-        if (CtrAssets_PrefetchFind(payloads[i], &sAssetAhead.request)
+    /* Bounded residency checks; a fully resident list costs no more lookups
+     * until a map/graphics change or an asset eviction invalidates it. */
+    for (unsigned checked = 0; cursor < count && checked < 8; ++checked)
+        if (CtrAssets_PrefetchFind(payloads[cursor++], &sAssetAhead.request)
          && sAssetAhead.request.index != sAssetAhead.failed)
         {
             __sync_synchronize();
@@ -980,34 +1020,8 @@ static void ReadAssetsAhead(void)
 
 static void ReadAhead(void)
 {
-    unsigned layouts[16 + MAX_VOXEL_MAP_INSTANCES], count = 0;
-
-    if (sStream.thread == NULL)
-        return;
-    ReadAssetsAhead();
-    if (sAhead.state == AHEAD_DONE)
-    {
-        __sync_synchronize();
-        if (sAhead.result == NULL)
-            sAhead.failed = sAhead.layout;
-        VoxelRegions_Adopt(sAhead.result);
-        sAhead.result = NULL;
-        sAhead.state = AHEAD_IDLE;
-    }
-    if (sAhead.state != AHEAD_IDLE)
-        return;
-    for (unsigned i = 0; i < VoxelWorld_InstanceCount() && i < MAX_VOXEL_MAP_INSTANCES; ++i)
-        layouts[count++] = (unsigned)VoxelWorld_Instance(i)->layoutId;
-    count += VoxelWorld_NextLayouts(layouts + count, 16);
-    for (unsigned i = 0; i < count; ++i)
-        if (layouts[i] != sAhead.failed && VoxelRegions_Wanted(layouts[i]))
-        {
-            sAhead.layout = layouts[i];
-            __sync_synchronize();
-            sAhead.state = AHEAD_READING;
-            LightEvent_Signal(&sStream.wake);
-            return;
-        }
+    if (sStream.thread != NULL)
+        ReadAssetsAhead();
 }
 
 static void StreamStart(void)
@@ -1058,11 +1072,6 @@ static void StreamStop(void)
         threadJoin(sStream.thread, U64_MAX);
         threadFree(sStream.thread);
     }
-    /* A layout the worker finished reading is still installed; one it never
-     * started is simply not read. */
-    if (sAhead.state == AHEAD_DONE)
-        VoxelRegions_Adopt(sAhead.result);
-    memset(&sAhead, 0, sizeof(sAhead));
     if (sAssetAhead.state == AHEAD_DONE)
         CtrAssets_PrefetchAdopt(&sAssetAhead.request, sAssetAhead.result);
     memset(&sAssetAhead, 0, sizeof(sAssetAhead));
@@ -1265,7 +1274,7 @@ static void StreamPages(void)
         /* No buffer of its own: borrow the atlas staging on a frame that is
          * not uploading an atlas, and read here, one slice at a time. */
         if (sAtlasUploadPending || AtlasJobBusy() || sAtlasStaging == NULL
-         || (next = NextPageSlot()) == NULL)
+         || (next = NextPageSlot()) == NULL || !CtrVideo_TryVoxelUpload())
             return;
         if (!VoxelBuildings_ReadPage((unsigned)next->page, next->loaded, SliceOf(next),
                                      sAtlasStaging))
@@ -1293,6 +1302,8 @@ static void StreamPages(void)
         }
         else if (current)
         {
+            if (!CtrVideo_TryVoxelUpload())
+                return;
             QueuePageCopy(slot, sStream.buffer, sStream.count);
             sStream.copyQueued = true;
         }
@@ -1332,8 +1343,66 @@ static C3D_Tex *BuildingPage(int page)
 
 /* ── Chunk cache ────────────────────────────────────────────────────────── */
 
+/*
+ * Which slot holds a square, found without walking all of them: every frame
+ * asks after every square of the view and of the ring around it, and a linear
+ * search touched the whole 128-slot array (some 25 KiB, more than the data
+ * cache) for each, which was most of the time the visit itself took on
+ * hardware. A chain per bucket, by the slot number plus one (0 ends it). A
+ * slot is entered when a build gives it its square (JobFinish, DraftChunk) and
+ * left when it is released; nothing else changes who a slot is.
+ */
+#define VOXEL_CHUNK_BUCKETS 128u
+static uint8_t sChunkHead[VOXEL_CHUNK_BUCKETS];
+static uint8_t sChunkNext[VOXEL_CHUNK_SLOTS];
+
+static unsigned ChunkBucket(bool border, int a, int b, int cx, int cy)
+{
+    uint32_t h = (uint32_t)cx * 73856093u ^ (uint32_t)cy * 19349663u
+               ^ (uint32_t)a * 83492791u ^ (uint32_t)b * 2654435761u ^ (border ? 0x9E3779B1u : 0u);
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return h & (VOXEL_CHUNK_BUCKETS - 1u);
+}
+
+static unsigned ChunkBucketOf(const VoxelChunk *c)
+{
+    return c->border ? ChunkBucket(true, (int)c->beltGrid, 0, c->cx, c->cy)
+                     : ChunkBucket(false, c->mapGroup, c->mapNum, c->cx, c->cy);
+}
+
+static void ChunkUnindex(const VoxelChunk *chunk)
+{
+    unsigned slot = (unsigned)(chunk - sChunks);
+    uint8_t *link = &sChunkHead[ChunkBucketOf(chunk)];
+
+    while (*link != 0)
+    {
+        if ((unsigned)*link - 1u == slot)
+        {
+            *link = sChunkNext[slot];
+            sChunkNext[slot] = 0;
+            return;
+        }
+        link = &sChunkNext[*link - 1u];
+    }
+}
+
+static void ChunkIndex(const VoxelChunk *chunk)
+{
+    unsigned slot = (unsigned)(chunk - sChunks);
+    uint8_t *head = &sChunkHead[ChunkBucketOf(chunk)];
+
+    sChunkNext[slot] = *head;
+    *head = (uint8_t)(slot + 1u);
+}
+
 static void ReleaseChunk(VoxelChunk *chunk)
 {
+    if (chunk->used)
+        ChunkUnindex(chunk);
     VoxelArena_Free(&sChunkArena, chunk->vram);
     memset(chunk, 0, sizeof(*chunk));
 }
@@ -1347,15 +1416,19 @@ static void ReleaseAllChunks(void)
 
 static VoxelChunk *FindChunk(bool border, int mapGroup, int mapNum, int cx, int cy)
 {
-    for (unsigned i = 0; i < VOXEL_CHUNK_SLOTS; ++i)
+    unsigned link = sChunkHead[border ? ChunkBucket(true, (int)sBeltGrid, 0, cx, cy)
+                                      : ChunkBucket(false, mapGroup, mapNum, cx, cy)];
+
+    while (link != 0)
     {
-        const VoxelChunk *c = &sChunks[i];
+        VoxelChunk *c = &sChunks[link - 1u];
 
         /* A belt square is the grid's, whichever map's border it was built
          * from (VisitSite). */
         if (c->used && c->cx == cx && c->cy == cy && c->border == border
          && (border ? c->beltGrid == sBeltGrid : c->mapGroup == mapGroup && c->mapNum == mapNum))
-            return &sChunks[i];
+            return c;
+        link = sChunkNext[link - 1u];
     }
     return NULL;
 }
@@ -1569,11 +1642,13 @@ bool CtrVoxel_Init(void)
 
     /* Optional: animation only. Failure must not prevent the overworld from
      * loading when homebrew linear memory is tighter than on Azahar. */
-    sAnimShadow = linearAlloc(VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-    if (sAnimShadow == NULL)
-        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for animated atlas shadow");
-    sAnimAtlas = NULL;
+    sAnimOut = linearAlloc(VOXEL_ANIM_SLOTS * sizeof(VoxelAnimSlot));
+    if (sAnimOut == NULL)
+        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for the animated tiles");
+    sAnimWorkPage = 0;
+    sAnimWorkAtlas = NULL;
     sReady = true;
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL stream policy 7: drafts for holes, hashed chunk lookup");
     CtrLog_Write(CTR_LOG_VIDEO, "VOXEL lighting: %s",
                  CTR_VOXEL_LIGHTING ? "fixed sun + baked shadows + cast sprite shadows" : "disabled");
     CtrLog_Write(CTR_LOG_VIDEO,
@@ -1605,18 +1680,17 @@ void CtrVoxel_Shutdown(void)
     ReleaseAllChunks();
     VoxelRegions_Shutdown();
     VoxelSign_Shutdown();
-    linearFree(sAnimShadow);
-    sAnimShadow = NULL;
-    sAnimAtlas = NULL;
-    sAnimReadback = NULL;
+    linearFree(sAnimOut);
+    sAnimOut = NULL;
+    sAnimWorkPage = 0;
+    sAnimWorkAtlas = NULL;
     memset(sAnimDirty, 0, sizeof(sAnimDirty));
-    sAnimPending = sAnimEverDirty = false;
+    sAnimPending = false;
     linearFree(sAtlasStaging);
     sAtlasStaging = NULL;
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
     {
-        if (sAtlases[i].tex.data != NULL)
-            C3D_TexDelete(&sAtlases[i].tex);
+        FreeAtlasTextures(&sAtlases[i]);
         memset(&sAtlases[i], 0, sizeof(sAtlases[i]));
     }
     if (sSpriteAtlas.data != NULL)
@@ -1699,8 +1773,8 @@ static unsigned CountAllocatedAtlases(void)
     unsigned count = 0;
 
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
-        if (sAtlases[i].tex.data != NULL)
-            ++count;
+        for (unsigned p = 0; p < VOXEL_ATLAS_PAGES; ++p)
+            count += AtlasTex(&sAtlases[i], p)->data != NULL;
     return count;
 }
 
@@ -1716,12 +1790,14 @@ static unsigned CountAllocatedAtlases(void)
  */
 static uint32_t sRebuildStamp;
 
+static bool AtlasInView(const VoxelAtlasSlot *slot);
+
 static VoxelAtlasSlot *LeastRecentlyUsedAllocated(void)
 {
     VoxelAtlasSlot *lru = NULL;
 
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
-        if (sAtlases[i].tex.data != NULL && sAtlases[i].stamp <= sRebuildStamp
+        if (sAtlases[i].tex.data != NULL && sAtlases[i].stamp <= sRebuildStamp && !AtlasInView(&sAtlases[i])
          && (lru == NULL || sAtlases[i].stamp < lru->stamp))
             lru = &sAtlases[i];
     return lru;
@@ -1768,51 +1844,6 @@ static void AtlasJobCancel(void)
     sAtlasJob.ready = false;
 }
 
-/*
- * The animation shadow of an atlas that becomes current again: its CPU copy
- * went to another tileset pair meanwhile. It used to be recomposed as an
- * extension - the whole atlas, 8-38 ms of an Old 3DS, on every crossing into
- * a map of another pair and every return from a building - while the atlas in
- * VRAM already held every pixel of it. Now the GPU copies it back into the
- * shadow instead: queued in one frame, read from the next (FrameBegin has
- * waited for the copy by then). Tiles that animated while it was not current
- * are brought up to date by their next animation write, as they were after
- * the recomposition, which drew the tilesets' still frames.
- *
- * The frame of the copy counts as an atlas upload (sAtlasUploadPending):
- * nothing composes into, uploads from or animates the shadow until it lands.
- */
-static bool QueueAnimReadback(VoxelAtlasSlot *slot)
-{
-    if (sAnimShadow == NULL || slot->tex.data == NULL || sAnimReadback != NULL)
-        return false;
-    /* Nothing of the CPU's may be written back over what the GPU lands. */
-    GSPGPU_InvalidateDataCache(sAnimShadow, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-    C3D_SyncTextureCopy((u32 *)slot->tex.data, 0, (u32 *)sAnimShadow, 0,
-                        VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
-    sAnimReadback = slot;
-    sAnimAtlas = NULL;
-    sAtlasUploadPending = true;
-    return true;
-}
-
-/* At the top of an update: the copy queued last frame has landed. */
-static void FinishAnimReadback(void)
-{
-    VoxelAtlasSlot *slot = sAnimReadback;
-    const VoxelMapInstance *current = VoxelWorld_Instance(0);
-
-    if (slot == NULL)
-        return;
-    sAnimReadback = NULL;
-    GSPGPU_InvalidateDataCache(sAnimShadow, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-    /* Still that pair's atlas, and still the current map's. */
-    if (slot->valid && slot->tex.data != NULL && current != NULL
-     && slot->primaryTileset == current->primaryTileset
-     && slot->secondaryTileset == current->secondaryTileset)
-        sAnimAtlas = slot;
-}
-
 static void AtlasFailed(int mapGroup, int mapNum, const void *primary, const void *secondary)
 {
     ++sStats.errors;
@@ -1828,6 +1859,51 @@ static void AtlasFailed(int mapGroup, int mapNum, const void *primary, const voi
  * false for a map that is only in the prefetch ring: it may take an empty
  * slot, never the atlas of something else - which could be a map on screen.
  */
+/* Bound all atlas pages together to the original six-texture budget. */
+static bool AtlasInView(const VoxelAtlasSlot *slot)
+{
+    for (unsigned i = 0; i < VoxelWorld_InstanceCount(); ++i)
+    {
+        const VoxelMapInstance *m = VoxelWorld_Instance(i);
+        if (m->primaryTileset == slot->primaryTileset && m->secondaryTileset == slot->secondaryTileset
+         && (i == 0 || (m->originX < sViewRect[2] && m->originX + m->width > sViewRect[0]
+                    && m->originY < sViewRect[3] && m->originY + m->height > sViewRect[1])))
+            return true;
+    }
+    return false;
+}
+
+static bool AllocateAtlasPage(VoxelAtlasSlot *slot, unsigned page)
+{
+    C3D_Tex *tex = AtlasTex(slot, page);
+    if (tex->data != NULL)
+        return true;
+    for (;;)
+    {
+        if (CountAllocatedAtlases() < VOXEL_ATLAS_SLOTS
+         && C3D_TexInitVRAM(tex, VOXEL_ATLAS_W, VOXEL_ATLAS_H, GPU_RGBA5551))
+        {
+            C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
+            C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            return true;
+        }
+        VoxelAtlasSlot *victim = NULL;
+        for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
+        {
+            VoxelAtlasSlot *candidate = &sAtlases[i];
+            if (candidate == slot || candidate == sAtlasJob.slot || AtlasInView(candidate)
+             || candidate->tex.data == NULL)
+                continue;
+            if (victim == NULL || candidate->stamp < victim->stamp)
+                victim = candidate;
+        }
+        if (victim == NULL)
+            return false;
+        AnimForget(victim);
+        FreeAtlasTextures(victim);
+    }
+}
+
 static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 {
     VoxelAtlasSlot *victim = &sAtlases[0];
@@ -1836,18 +1912,6 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
     if (hit != NULL)
     {
         hit->stamp = ++sAtlasStamp;
-        /* A cached atlas has no current CPU shadow after another tileset pair
-         * used it: the GPU copies it back before live VRAM animations apply
-         * (QueueAnimReadback). Not while a job for this same pair is under
-         * way - its upload installs the shadow itself. */
-        const VoxelMapInstance *current = VoxelWorld_Instance(0);
-        if (sAnimShadow != NULL && sAnimEverDirty && sAnimAtlas != hit && sAnimReadback == NULL
-         && current != NULL && current->primaryTileset == inst->primaryTileset
-         && current->secondaryTileset == inst->secondaryTileset
-         && !(AtlasJobBusy() && sAtlasJob.job.primary == inst->primaryTileset
-              && sAtlasJob.job.secondary == inst->secondaryTileset)
-         && !sAtlasUploadPending)
-            QueueAnimReadback(hit);
         /*
          * A chunk met ids this atlas was not built with - a neighbour that
          * came into view, a metatile a script placed. The atlas grows in place
@@ -1858,12 +1922,13 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
          && sAtlasStaging != NULL)
         {
             hit->extendPending = false;
-            hit->uncoveredRetried = true;
             if (VoxelAtlas_JobBegin(&sAtlasJob.job, inst, sAtlasStaging, &hit->map))
             {
                 sAtlasJob.slot = hit;
                 sAtlasJob.forView = true; /* its chunks are missing tiles */
             }
+            else if (sAtlasJob.job.ok)
+                ++sAtlasExtensionsSkipped;
         }
         return hit;
     }
@@ -1906,11 +1971,14 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 
     if (!mayEvict && victim->valid)
         return NULL;
-    if (victim->valid && victim->stamp > sRebuildStamp)
+    if (victim->valid && (victim->stamp > sRebuildStamp || AtlasInView(victim)))
     {
         victim = LeastRecentlyUsedAllocated();
         if (victim == NULL)
+        {
+            sAtlasCapacityBlocked = mayEvict;
             return NULL;
+        }
     }
 
     /*
@@ -1920,7 +1988,7 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
      * copy does (and faults outright on hardware).
      */
     if (victim->tex.data == NULL
-     && !C3D_TexInitVRAM(&victim->tex, VOXEL_ATLAS_W, VOXEL_ATLAS_H, GPU_RGBA5551))
+     && !AllocateAtlasPage(victim, 0))
     {
         /* Still not a failure: the cache simply holds fewer atlases and
          * recycles the least recently used one. */
@@ -1943,6 +2011,7 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
              */
             static bool sReported;
 
+            sAtlasCapacityBlocked = true;
             CtrVideo_RequestPlaneRelease();
             if (!sReported)
             {
@@ -1962,10 +2031,18 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
     }
     if (victim->primaryTileset != inst->primaryTileset
      || victim->secondaryTileset != inst->secondaryTileset)
-        victim->uncoveredRetried = false;
+    {
+        /* Retain page zero for reuse, release the old pair's extra pages. */
+        for (unsigned p = 1; p < VOXEL_ATLAS_PAGES; ++p)
+        {
+            C3D_Tex *tex = AtlasTex(victim, p);
+            if (tex->data != NULL) C3D_TexDelete(tex);
+            memset(tex, 0, sizeof(*tex));
+        }
+    }
     /* Out of use from now on: what it held is being replaced. */
     victim->valid = false;
-    if (sAnimAtlas == victim) sAnimAtlas = NULL;
+    AnimForget(victim);
     victim->primaryTileset = inst->primaryTileset;
     victim->secondaryTileset = inst->secondaryTileset;
     victim->stamp = ++sAtlasStamp;
@@ -1986,13 +2063,27 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
  * a budget at all, a map on screen gets at least one step, so that it always
  * arrives.
  */
+/*
+ * The last frame the atlas job, and a hole on screen, made any progress.
+ * Composing and building run in the time a frame leaves after FrameEnd; on a
+ * map whose frames leave none - a heavy route on an Old 3DS, frame after
+ * frame - an atlas waited for that time for ever: its map's chunks were
+ * never built, and with the current map's missing the overworld fell back
+ * to 2D. Past VOXEL_STARVE_FRAMES without progress either is given
+ * VOXEL_STARVE_MS inside the frame, however the frame is going: a dropped
+ * frame now and then while it arrives, never a map that does not.
+ */
+#define VOXEL_STARVE_FRAMES 4u
+#define VOXEL_STARVE_MS 2.0f
+static uint32_t sAtlasProgressFrame;
+
 static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
 {
     VoxelAtlasJob *job = &sAtlasJob.job;
     VoxelAtlasSlot *slot = sAtlasJob.slot;
     unsigned steps = 0;
 
-    if (!AtlasJobBusy())
+    if (!AtlasJobBusy() || sAtlasUploadPending)
         return;
     /* The slot must still be the one the job is for. */
     if (slot == NULL || slot->primaryTileset != job->primary
@@ -2001,25 +2092,46 @@ static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
         AtlasJobCancel();
         return;
     }
+    if (!sAtlasJob.ready && job->pageReady)
+        VoxelAtlas_JobNextPage(job);
     while (!sAtlasJob.ready)
     {
         if (MsSince(started) >= budget && !(sAtlasJob.forView && steps == 0 && budget > 0.0f))
             return;
+        uint64_t stepStart = svcGetSystemTick();
+        unsigned phase = job->phase;
         sAtlasJob.ready = VoxelAtlas_JobStep(job, 24);
+        float stepMs = MsSince(stepStart);
+        static uint32_t lastSlow;
+        if (stepMs > 2.0f && (!lastSlow || sFrame - lastSlow >= 120))
+        {
+            lastSlow = sFrame;
+            CtrLog_Write(CTR_LOG_VIDEO, "VOXEL atlas slice phase=%u %.2fms view=%u",
+                         phase, stepMs, (unsigned)sAtlasJob.forView);
+        }
         ++steps;
+        sAtlasProgressFrame = sFrame;
     }
     /* One upload a frame from the staging, and the frame's own. */
     if (!inFrame || sAtlasUploadPending)
         return;
 
-    sAtlasJob.ready = false;
-    sAtlasJob.slot = NULL;
     if (!job->ok)
     {
+        AtlasJobCancel();
         if (!job->extend)
             AtlasFailed(job->mapGroup, job->mapNum, job->primary, job->secondary);
         return;
     }
+    if (!AllocateAtlasPage(slot, job->page))
+    {
+        sAtlasCapacityBlocked = sAtlasJob.forView;
+        CtrVideo_RequestPlaneRelease();
+        return; /* Keep the completed page: retry without recomposing it. */
+    }
+    if (!CtrVideo_TryVoxelUpload())
+        return;
+    sAtlasJob.ready = false;
     /*
      * Staging to VRAM, by the GPU. The atlas is already in the swizzled layout
      * the PICA samples, so this is a straight byte copy - flags 8 is the raw
@@ -2028,24 +2140,21 @@ static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
      * drawn with the pixels it replaced.
      */
     GSPGPU_FlushDataCache(sAtlasStaging, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-    C3D_SyncTextureCopy((u32 *)sAtlasStaging, 0, (u32 *)slot->tex.data, 0,
+    C3D_SyncTextureCopy((u32 *)sAtlasStaging, 0, (u32 *)AtlasTex(slot, job->page)->data, 0,
                         VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
     sAtlasUploadPending = true;
+    /* A page replaced whole starts the animation over from its still frames. */
+    AnimForget(slot);
+    if (job->active)
+        return; /* Other pages still own the job; publish only when all landed. */
+    sAtlasJob.slot = NULL;
+    bool changed = memcmp(&slot->map, &job->map, sizeof(slot->map)) != 0;
     slot->map = job->map;
-    {
-        const VoxelMapInstance *current = VoxelWorld_Instance(0);
-        if (sAnimShadow != NULL && current != NULL
-         && current->primaryTileset == job->primary
-         && current->secondaryTileset == job->secondary)
-        {
-            memcpy(sAnimShadow, sAtlasStaging, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-            sAnimAtlas = slot;
-        }
-    }
     if (job->extend)
     {
-        /* Nothing new placed - a full atlas - leaves every chunk as it is. */
-        if (job->added != 0)
+        /* Any new assignment, including a confirmed absence, repairs chunks
+         * that were waiting for this extension; existing UVs stay valid. */
+        if (changed)
             ++slot->extension;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL atlas for %d:%d extended to %u/%u slots%s",
                      job->mapGroup, job->mapNum, slot->map.used, VOXEL_ATLAS_MAX_SLOTS,
@@ -2135,7 +2244,7 @@ enum
 {
     JOB_GROUND, JOB_TREES, JOB_MODELS, /* map chunks */
     JOB_BORDER, JOB_BORDER_TREES,      /* belt chunks */
-    JOB_PACK,                          /* into the GPU's vertex format */
+    JOB_SORT, JOB_PACK,                          /* into the GPU's vertex format */
     JOB_DONE
 };
 
@@ -2153,7 +2262,11 @@ static struct
     bool forView;
     bool hole;              /* on screen with nothing drawn in its place */
     int phase, row, col;
+    unsigned waitIndex;
+    bool overdue;
     unsigned terrainCount, buildingFirst;
+    unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
+    unsigned sortPage, sortScan, sortWrite;
     VoxelBuildingCursor models;
     uint64_t ticks;         /* spent on it, over every frame it took */
     /* ... and by phase, for the slow chunk log: where a chunk's time goes on
@@ -2169,8 +2282,16 @@ static struct
     float gy0, gy1;
 } sJob;
 
+static unsigned sJobStarts, sJobCancels;
+static float sCancelledBuildMs;
+
 static void JobCancel(void)
 {
+    if (sJob.active)
+    {
+        ++sJobCancels;
+        sCancelledBuildMs += TicksMs(sJob.ticks);
+    }
     sJob.active = false;
 }
 
@@ -2179,6 +2300,7 @@ static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash
 {
     const VoxelMapInstance *inst = site->inst;
 
+    ++sJobStarts;
     memset(&sJob, 0, sizeof(sJob));
     sJob.active = true;
     sJob.site = *site;
@@ -2232,12 +2354,40 @@ static bool JobValid(void)
  * rest, rather than inside the frame at the upload - for a dense chunk it is
  * a few milliseconds the GPU would have waited for.
  */
-#define VOXEL_PACK_SLICE 1536u
-#define VOXEL_GROUND_SLICE_CELLS 2
+#define VOXEL_PACK_SLICE 256u
+#define VOXEL_GROUND_SLICE_CELLS 1
 
 /* Floor and ceiling of a packed coordinate, in whole tiles. */
 static int PackedFloor(int32_t q) { return q >> 9; }
 static int PackedCeil(int32_t q) { return -((-q) >> 9); }
+
+/* Partition triangles in bounded slices, without another vertex buffer.
+ * U carries page*2 until packing; the gap avoids ambiguity at texture edges. */
+static bool JobSort(void)
+{
+    unsigned budget = 128;
+    while (sJob.sortPage < VOXEL_ATLAS_PAGES && budget--)
+    {
+        if (sJob.sortScan >= sJob.terrainCount)
+        {
+            sJob.terrainFirst[++sJob.sortPage] = sJob.sortWrite;
+            sJob.sortScan = sJob.sortWrite;
+            continue;
+        }
+        VoxelVertex *v = sScratch + sJob.sortScan;
+        unsigned page = (unsigned)(v[0].u * 0.5f);
+        if (page == sJob.sortPage)
+        {
+            VoxelVertex temp[3];
+            memcpy(temp, v, sizeof(temp));
+            memcpy(v, sScratch + sJob.sortWrite, sizeof(temp));
+            memcpy(sScratch + sJob.sortWrite, temp, sizeof(temp));
+            sJob.sortWrite += 3;
+        }
+        sJob.sortScan += 3;
+    }
+    return sJob.sortPage == VOXEL_ATLAS_PAGES;
+}
 
 /* A slice of the packing; true once the whole scratch is packed. */
 static bool JobPack(void)
@@ -2253,6 +2403,8 @@ static bool JobPack(void)
         }
     if (count > VOXEL_PACK_SLICE)
         count = VOXEL_PACK_SLICE;
+    for (unsigned i = first; i < first + count && i < sJob.terrainCount; ++i)
+        sScratch[i].u -= 2.0f * (unsigned)(sScratch[i].u * 0.5f);
     PackRange(sScratch, first, count, &sJob.bounds);
     sJob.packed += count;
     if (sJob.packed < sBuilder.count)
@@ -2303,34 +2455,50 @@ static void JobStep(void)
         break;
     }
     case JOB_TREES:
-        if (sJob.row == site->y0)
+        if (sJob.row == site->y0 && sJob.col == site->x0)
             sJob.terrainCount = sBuilder.count;
-        VoxelTree_EmitInstance(&sBuilder, inst, site->x0, sJob.row, site->x1, sJob.row + 1);
+        VoxelTree_EmitInstance(&sBuilder, inst, sJob.col, sJob.row, sJob.col + 1, sJob.row + 1);
+        if (++sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
         if (++sJob.row < site->y1)
             return;
         sJob.row = site->y0;
         sJob.buildingFirst = sBuilder.count;
-        sJob.phase = sHaveBuildings ? JOB_MODELS : JOB_PACK;
+        sJob.phase = sHaveBuildings ? JOB_MODELS : JOB_SORT;
         return;
     case JOB_MODELS:
         /* A few dozen lit triangles a slice: one large model is thousands. */
         if (VoxelBuildings_EmitSome(&sBuilder, inst, site->x0, site->y0, site->x1, site->y1,
                                     &sJob.models, VOXEL_MODEL_SLICE_TRIANGLES))
-            sJob.phase = JOB_PACK;
+            sJob.phase = JOB_SORT;
         return;
     case JOB_BORDER:
-        VoxelMesh_EmitBorder(&sBuilder, site->x0, site->y0, site->x1, site->y1);
+        VoxelMesh_EmitBorder(&sBuilder, sJob.col, sJob.row, sJob.col + 1, sJob.row + 1);
+        if (++sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
+        if (++sJob.row < site->y1)
+            return;
+        sJob.row = site->y0;
         sJob.terrainCount = sBuilder.count;
         sJob.phase = JOB_BORDER_TREES;
         return;
     case JOB_BORDER_TREES:
-        /* A row at a time: a belt of lit crowns is several milliseconds. */
-        VoxelTree_EmitBorder(&sBuilder, site->x0, sJob.row, site->x1, sJob.row + 1);
+        /* One lit crown cell: a row can exceed the whole post-submit budget. */
+        VoxelTree_EmitBorder(&sBuilder, sJob.col, sJob.row, sJob.col + 1, sJob.row + 1);
+        if (++sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
         if (++sJob.row < site->y1)
             return;
         sJob.row = site->y0;
         sJob.buildingFirst = sBuilder.count;
-        sJob.phase = JOB_PACK;
+        sJob.phase = JOB_SORT;
+        return;
+    case JOB_SORT:
+        if (JobSort())
+            sJob.phase = JOB_PACK;
         return;
     case JOB_PACK:
         if (JobPack())
@@ -2362,6 +2530,8 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     if (sStagingUsed + sBuilder.count > VOXEL_STAGING_VERTICES)
         return BUILD_NO_STAGING; /* next frame, with the pool rewound */
     bytes = (sBuilder.count * sizeof(VoxelGpuVertex) + 15u) & ~15u;
+    if (bytes != 0 && !CtrVideo_TryVoxelUpload())
+        return BUILD_NO_STAGING;
     if (bytes != 0 && (chunk->vram == NULL || chunk->bytes < bytes))
     {
         /*
@@ -2408,6 +2578,8 @@ static BuildResult JobFinish(VoxelChunk *chunk)
         ++sChunkUploads;
     }
 
+    if (chunk->used)
+        ChunkUnindex(chunk);
     chunk->used = true;
     chunk->border = site->border;
     chunk->mapGroup = inst->mapGroup;
@@ -2415,6 +2587,8 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     chunk->cx = site->cx;
     chunk->cy = site->cy;
     chunk->beltGrid = sBeltGrid;
+    chunk->draft = false;
+    ChunkIndex(chunk);
     if (site->border)
     {
         chunk->openTiles = OpenTiles(site);
@@ -2434,6 +2608,7 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     chunk->count = sBuilder.count;
     chunk->terrainCount = sJob.terrainCount;
     chunk->buildingFirst = sJob.buildingFirst;
+    memcpy(chunk->terrainFirst, sJob.terrainFirst, sizeof(chunk->terrainFirst));
     chunk->gx0 = sJob.gx0;
     chunk->gz0 = sJob.gz0;
     chunk->gx1 = sJob.gx1;
@@ -2448,7 +2623,7 @@ static BuildResult JobFinish(VoxelChunk *chunk)
         WantPage(chunk->buildingPage, sJob.forView ? VOXEL_PAGE_KEEP_VIEW : VOXEL_PAGE_KEEP_RING,
                  !sJob.forView);
     /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
-    if (sBuilder.uncovered != 0 && !atlas->uncoveredRetried)
+    if (sBuilder.uncovered != 0)
         atlas->extendPending = true;
     if (CTR_VOXEL_TRACE && sStats.meshRebuilds < 48)
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL chunk %d,%d of %d:%d%s tiles %d,%d..%d,%d -> %u verts",
@@ -2457,6 +2632,197 @@ static BuildResult JobFinish(VoxelChunk *chunk)
                      sBuilder.count);
     ++sStats.meshRebuilds;
     return BUILD_OK;
+}
+
+/*
+ * ── The draft of a square ──────────────────────────────────────────────────
+ *
+ * A square the view needs and has not got is a hole, and a hole is black. Its
+ * real build is 10-30 ms of lighting rays, trees and models on an Old 3DS - a
+ * dozen frames of the time the frames can spare - so on a crossing, or round a
+ * bend at a run, the player was on the ground before the ground was.
+ *
+ * The draft is what the square looks like without any of that: every cell's
+ * own drawing, flat, unlit (VoxelMesh_DraftCell). A few hundred microseconds,
+ * packed straight into the frame's staging and uploaded in the same frame the
+ * hole is found, so nothing is ever drawn black where there is a map. It is
+ * marked, and asked for again as an ordinary stale square: the real build
+ * replaces it as soon as the frames have the time, drawn meanwhile as it is.
+ *
+ * It reads nothing of the build that may be running - the scratch, the
+ * builder, the classification window are that job's - so it never waits for
+ * it and never cancels it.
+ */
+#define VOXEL_DRAFT_PER_FRAME 4u
+#define VOXEL_DRAFT_CELLS (VOXEL_CHUNK * VOXEL_CHUNK)
+
+static unsigned sDrafts;
+static float sDraftMs;
+
+/* The draft's vertices a cell at a time, by the fast packing where the console
+ * has proved it (PackSelfTest) and measuring them as it goes. */
+static void PackDraft(const VoxelVertex *src, unsigned count, VoxelGpuVertex *dst,
+                      PackBounds *bounds)
+{
+#ifdef VOXEL_HAVE_FAST_PACK
+    if (sFastPack)
+    {
+        PackFloor(src, count, dst, bounds);
+        return;
+    }
+#endif
+    Pack(src, count, dst);
+    for (unsigned i = 0; i < count; ++i)
+        GrowBounds(bounds, &dst[i]);
+}
+
+static VoxelChunk *DraftChunk(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *chunk)
+{
+    const VoxelMapInstance *inst = site->inst;
+    int16_t slotOf[VOXEL_DRAFT_CELLS];
+    unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
+    unsigned uncovered = 0, total = 0, bytes, written = 0, width, height;
+    VoxelVertex quad[6];
+    VoxelBuilder b;
+    VoxelGpuVertex *staging;
+    PackBounds bounds;
+
+    if (site->border)
+        return NULL;
+    width = (unsigned)(site->x1 - site->x0);
+    height = (unsigned)(site->y1 - site->y0);
+    if (width > VOXEL_CHUNK || height > VOXEL_CHUNK)
+        return NULL;
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x)
+        {
+            int slot = VoxelMesh_DraftSlot(inst, &atlas->map, site->x0 + (int)x, site->y0 + (int)y,
+                                           &uncovered);
+
+            if (slot >= (int)(VOXEL_ATLAS_PAGES * VOXEL_ATLAS_MAX_SLOTS))
+                slot = -1;
+            slotOf[y * VOXEL_CHUNK + x] = (int16_t)slot;
+            total += slot >= 0 ? 6u : 0u;
+        }
+    bytes = total * (unsigned)sizeof(VoxelGpuVertex);
+    if (sStagingUsed + total > VOXEL_STAGING_VERTICES || sChunkUploads >= VOXEL_CHUNK_UPLOADS_MAX)
+        return NULL;
+    if (bytes != 0 && !CtrVideo_TryVoxelUpload())
+        return NULL;
+
+    if (chunk == NULL)
+    {
+        chunk = FreeChunkSlot(true);
+        if (chunk == NULL)
+            return NULL;
+        ReleaseChunk(chunk);
+    }
+    if (bytes != 0 && (chunk->vram == NULL || chunk->bytes < bytes))
+    {
+        VoxelGpuVertex *block;
+
+        if (chunk->used)
+            chunk->stamp = chunk->viewStamp = sFrame;
+        /* Small pieces from the top of the block, the real meshes from the
+         * bottom: the drafts come and go and must not strand the big gaps. */
+        block = VoxelArena_Alloc(&sChunkArena, bytes, true);
+        if (block == NULL)
+            block = ChunkVram(bytes, true);
+        if (block == NULL)
+            return NULL;
+        VoxelArena_Free(&sChunkArena, chunk->vram);
+        chunk->vram = block;
+        chunk->bytes = bytes;
+    }
+
+    VoxelBuilder_Init(&b, quad, 6);
+    VoxelBuilder_SetAtlas(&b, &atlas->map);
+    VoxelBuilder_SetOrigin(&b, site->baseX, site->baseY);
+    b.base = VoxelRelief_Base(inst);
+    b.lighting = false;
+    staging = sStaging + sStagingUsed;
+    for (int a = 0; a < 3; ++a)
+    {
+        bounds.lo[a] = INT32_MAX;
+        bounds.hi[a] = INT32_MIN;
+    }
+    /* By atlas page, as the draw takes them (JobSort does the same for a
+     * real build): one pass over the cells for each page. */
+    for (unsigned page = 0; page < VOXEL_ATLAS_PAGES; ++page)
+    {
+        terrainFirst[page] = written;
+        for (unsigned y = 0; y < height; ++y)
+            for (unsigned x = 0; x < width; ++x)
+            {
+                int slot = slotOf[y * VOXEL_CHUNK + x];
+
+                if (slot < 0 || (unsigned)slot / VOXEL_ATLAS_MAX_SLOTS != page)
+                    continue;
+                b.count = 0;
+                VoxelMesh_DraftCell(&b, inst, site->x0 + (int)x, site->y0 + (int)y, slot);
+                /* U carries page*2 until packed: the draw binds the page. */
+                for (unsigned k = 0; k < 6; ++k)
+                    quad[k].u -= 2.0f * (float)page;
+                PackDraft(quad, 6, staging + written, &bounds);
+                written += 6;
+            }
+    }
+    terrainFirst[VOXEL_ATLAS_PAGES] = written;
+    ReportPackErrors("draft chunk", site->cx, site->cy, inst->mapGroup, inst->mapNum);
+    if (bytes != 0)
+    {
+        GSPGPU_FlushDataCache(staging, bytes);
+        C3D_SyncTextureCopy((u32 *)staging, 0, (u32 *)chunk->vram, 0, bytes, 8);
+        sStagingUsed += total;
+        ++sChunkUploads;
+    }
+
+    if (chunk->used)
+        ChunkUnindex(chunk);
+    chunk->used = true;
+    chunk->border = false;
+    chunk->mapGroup = inst->mapGroup;
+    chunk->mapNum = inst->mapNum;
+    chunk->cx = site->cx;
+    chunk->cy = site->cy;
+    chunk->beltGrid = sBeltGrid;
+    chunk->draft = true;
+    ChunkIndex(chunk);
+    /* Never the signature of anything: asked for again at once. */
+    chunk->hash = chunk->epoch = 0;
+    chunk->staleHash = chunk->staleEpoch = 0;
+    chunk->primary = inst->primaryTileset;
+    chunk->secondary = inst->secondaryTileset;
+    chunk->layout = inst->layout;
+    chunk->atlas = atlas;
+    chunk->atlasGeneration = atlas->generation;
+    chunk->atlasExtension = atlas->extension;
+    chunk->uncovered = uncovered != 0;
+    chunk->count = chunk->terrainCount = chunk->buildingFirst = total;
+    memcpy(chunk->terrainFirst, terrainFirst, sizeof(chunk->terrainFirst));
+    chunk->gx0 = chunk->gz0 = 0;
+    chunk->gx1 = chunk->gz1 = VOXEL_CHUNK;
+    chunk->gy0 = chunk->gy1 = 0.0f;
+    if (total != 0)
+    {
+        int lx = PackedFloor(bounds.lo[0]), lz = PackedFloor(bounds.lo[2]);
+        int hx = PackedCeil(bounds.hi[0]), hz = PackedCeil(bounds.hi[2]);
+
+        if (lx < chunk->gx0) chunk->gx0 = lx;
+        if (lz < chunk->gz0) chunk->gz0 = lz;
+        if (hx > chunk->gx1) chunk->gx1 = hx;
+        if (hz > chunk->gz1) chunk->gz1 = hz;
+        chunk->gy0 = (float)bounds.lo[1] / VOXEL_POS_SCALE;
+        chunk->gy1 = (float)bounds.hi[1] / VOXEL_POS_SCALE;
+    }
+    chunk->buildingPage = -1;
+    chunk->buildMs = 0.0f;
+    chunk->stamp = chunk->viewStamp = sFrame;
+    /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
+    if (uncovered != 0)
+        atlas->extendPending = true;
+    ++sDrafts;
+    return chunk;
 }
 
 /* ── The view ───────────────────────────────────────────────────────────── */
@@ -2485,10 +2851,96 @@ typedef struct
     bool hashKnown;     /* else computed if and when it is built */
     bool done;          /* taken as a job, or being built by the running one */
     unsigned key;       /* class, then distance */
+    unsigned need, waitIndex;
 } BuildRequest;
 
 static BuildRequest sRequests[VOXEL_REQUESTS_MAX];
 static unsigned sRequestCount;
+
+/* Retain progress across the frame-local request list, recycling its oldest
+ * entry when full. Map identity never uses a mutable instance pointer. */
+static struct
+{
+    int group, map, cx, cy;
+    bool border, used;
+    uint32_t seen, progress;
+} sRequestWait[VOXEL_REQUESTS_MAX];
+
+/* The wait table is looked up once per request, every frame: chained by hash
+ * of the square, like the chunks (the entry number plus one; 0 ends a chain). */
+static uint8_t sWaitHead[128];
+static uint8_t sWaitNext[VOXEL_REQUESTS_MAX];
+
+static unsigned WaitBucket(int group, int map, int cx, int cy, bool border)
+{
+    uint32_t h = (uint32_t)cx * 73856093u ^ (uint32_t)cy * 19349663u
+               ^ (uint32_t)group * 83492791u ^ (uint32_t)map * 2654435761u
+               ^ (border ? 0x9E3779B1u : 0u);
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return h & (sizeof(sWaitHead) - 1u);
+}
+
+static unsigned RequestWait(const ChunkSite *site)
+{
+    unsigned bucket = WaitBucket(site->inst->mapGroup, site->inst->mapNum, site->cx, site->cy,
+                                 site->border);
+    unsigned oldest = 0, link;
+
+    for (link = sWaitHead[bucket]; link != 0; link = sWaitNext[link - 1u])
+    {
+        unsigned i = link - 1u;
+
+        if (sRequestWait[i].used && sRequestWait[i].group == site->inst->mapGroup
+         && sRequestWait[i].map == site->inst->mapNum && sRequestWait[i].border == site->border
+         && sRequestWait[i].cx == site->cx && sRequestWait[i].cy == site->cy)
+        {
+            sRequestWait[i].seen = sFrame;
+            return i;
+        }
+    }
+    for (unsigned i = 0; i < VOXEL_REQUESTS_MAX; ++i)
+        if (!sRequestWait[i].used || sRequestWait[i].seen < sRequestWait[oldest].seen)
+            oldest = i;
+    if (sRequestWait[oldest].used)
+    {
+        /* Out of its chain before it names another square. */
+        uint8_t *prev = &sWaitHead[WaitBucket(sRequestWait[oldest].group, sRequestWait[oldest].map,
+                                              sRequestWait[oldest].cx, sRequestWait[oldest].cy,
+                                              sRequestWait[oldest].border)];
+
+        while (*prev != 0 && (unsigned)*prev - 1u != oldest)
+            prev = &sWaitNext[*prev - 1u];
+        if (*prev != 0)
+            *prev = sWaitNext[oldest];
+    }
+    sRequestWait[oldest].group = site->inst->mapGroup;
+    sRequestWait[oldest].map = site->inst->mapNum;
+    sRequestWait[oldest].cx = site->cx;
+    sRequestWait[oldest].cy = site->cy;
+    sRequestWait[oldest].border = site->border;
+    sRequestWait[oldest].used = true;
+    sRequestWait[oldest].seen = sRequestWait[oldest].progress = sFrame;
+    sWaitNext[oldest] = sWaitHead[bucket];
+    sWaitHead[bucket] = (uint8_t)(oldest + 1u);
+    return oldest;
+}
+
+/* A square held by its draft (DraftChunk) is on screen already: it is built
+ * for real at the pace the frames allow, and only rescued once it has waited
+ * this long. */
+#define VOXEL_DRAFT_STARVE_FRAMES 90u
+
+static bool RequestOverdue(const BuildRequest *r)
+{
+    unsigned limit = r->chunk != NULL && r->chunk->draft ? VOXEL_DRAFT_STARVE_FRAMES
+                                                          : VOXEL_STARVE_FRAMES;
+
+    return r->need <= NEED_STALE && sFrame - sRequestWait[r->waitIndex].progress >= limit;
+}
+
 
 static bool IsChunkOf(const VoxelChunk *chunk, const ChunkSite *site)
 {
@@ -2533,6 +2985,7 @@ static void Draw(const VoxelChunk *chunk, int worldX, int worldZ)
     sDraws[sDrawCount].worldZ = worldZ;
     ++sDrawCount;
     sStats.vertices += chunk->count;
+    sStats.draftsVisible += chunk->draft;
 }
 
 static void Request(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *chunk,
@@ -2551,6 +3004,8 @@ static void Request(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *ch
     r->hashKnown = hash != NULL;
     r->done = false;
     r->hash = hash != NULL ? *hash : 0;
+    r->need = need;
+    r->waitIndex = RequestWait(site);
     r->key = need * 100000u + (unsigned)(dx * dx + dz * dz);
 }
 
@@ -2576,6 +3031,10 @@ static bool BeltCoverSame(VoxelChunk *chunk, const ChunkSite *site)
     }
     return chunk->openSame;
 }
+
+/* Signatures VisitSite may compute this frame (see there); set by UpdateView. */
+#define VOXEL_HASHES_PER_FRAME 10u
+static unsigned sHashesLeft;
 
 /*
  * One square of the view or of the ring around it: drawn if it can be, asked
@@ -2631,6 +3090,8 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas,
         stale = true;
     else if (chunk->atlas != atlas)
         stale = true; /* a belt square drawn from another pair's atlas */
+    else if (chunk->draft)
+        stale = true; /* only its draft stands (DraftChunk); drawable meanwhile */
     else if (chunk->uncovered && chunk->atlasExtension != atlas->extension)
         stale = true; /* the atlas grew the ids it was missing; still drawable */
     else if (chunk->staleEpoch == sEpoch)
@@ -2638,10 +3099,14 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas,
         stale = hashKnown = true;
         hash = chunk->staleHash;
     }
-    else if (chunk->epoch != sEpoch)
+    else if (chunk->epoch != sEpoch && sHashesLeft != 0)
     {
         /* The world moved since this chunk was last verified: the one time
-         * its signature is worth computing. */
+         * its signature is worth computing. A crossing moves it for every
+         * chunk at once, and verifying them all in the frame after it was
+         * 3-4 ms on top of the frame that loaded the map: a few a frame
+         * instead, the others drawn as they are until their turn. */
+        --sHashesLeft;
         hash = SiteHash(site);
         hashKnown = true;
         if (hash == chunk->hash)
@@ -2784,7 +3249,19 @@ static void VisitView(float playerX, float playerZ, unsigned *missing, bool atla
 
 static int CompareRequests(const void *a, const void *b)
 {
-    unsigned ka = ((const BuildRequest *)a)->key, kb = ((const BuildRequest *)b)->key;
+    const BuildRequest *ra = a, *rb = b;
+    /* A drawable stale mesh must not outrank a missing visible chunk merely
+     * because it waited four frames. Age resolves fairness within a class. */
+    if (ra->need != rb->need) return ra->need < rb->need ? -1 : 1;
+    bool oa = RequestOverdue(ra), ob = RequestOverdue(rb);
+    if (oa != ob) return oa ? -1 : 1;
+    if (oa)
+    {
+        uint32_t aa = sFrame - sRequestWait[ra->waitIndex].progress;
+        uint32_t ab = sFrame - sRequestWait[rb->waitIndex].progress;
+        if (aa != ab) return aa > ab ? -1 : 1;
+    }
+    unsigned ka = ra->key, kb = rb->key;
 
     return ka < kb ? -1 : ka > kb;
 }
@@ -2830,9 +3307,15 @@ static int CompareRequests(const void *a, const void *b)
  * ordinary frame allowed, the CPU came back to the VBlank late: a dropped
  * frame on every crossing. While the player heads for an edge of the map
  * that close (VOXEL_CROSSING_NEAR tiles), the builds leave that much free.
+ *
+ * Only the last step: the frame that loads the neighbour is lost to the game
+ * itself (the load and the audio alone fill it), and held back over the whole
+ * approach - two and a half tiles, with the reserve at 8 ms - the builds
+ * stopped for nearly a second just before every crossing, which is exactly
+ * when the map beyond it is the one that has to be built.
  */
-#define VOXEL_CROSSING_RESERVE_MS 8.0f
-#define VOXEL_CROSSING_NEAR 1.5f
+#define VOXEL_CROSSING_RESERVE_MS 5.0f
+#define VOXEL_CROSSING_NEAR 0.5f
 static bool sCrossingSoon;
 /*
  * Inside any other frame, for a hole on screen (see sHolesOnly): what the
@@ -2856,7 +3339,7 @@ static uint32_t sAheadBackoff;
  * until they had - the plain GBA picture flashing up before the 3D one.
  * Ends once the view has no hole left, or after a few seconds regardless.
  */
-#define VOXEL_WARMUP_MS 250.0f
+#define VOXEL_WARMUP_MS 4.0f
 #define VOXEL_WARMUP_FRAMES 180u
 static uint32_t sWarmupUntil;
 /* Set when atlases were given back to the 2D compositor: the overworld warms
@@ -2921,24 +3404,35 @@ static float SpareMs(void)
 }
 
 /*
- * What one slice of each phase is expected to cost, and at JOB_DONE the
- * upload. Per phase because they differ several times over: a row of ground
- * against a dense chunk's models. Each rises at once to an expensive slice and
- * forgets it slowly. Capped below the ahead budget (VOXEL_AHEAD_MAX_MS): an
- * estimate at that budget would never let an ahead-of-time slice run again,
- * and so never come down - one slice that waited on the card would freeze the
- * prefetch ring for good.
+ * Estimate each phase independently and admit slices within the remaining
+ * budget. Recent expensive samples take effect immediately; idle estimates
+ * decay with frame age, allowing prefetch to recover without a visible rescue.
  */
 static float sPhaseMs[JOB_DONE + 1];
+static uint32_t sPhaseFrame[JOB_DONE + 1];
 #define VOXEL_SLICE_CAP_MS 5.0f
+
+/* An idle phase must age without executing: otherwise a 5 ms outlier
+ * permanently excludes prefetch from the usual 1-4 ms post-submit window.
+ * Retain recent measurements; discount old ones before the next sample. */
+static float PhaseCost(int phase)
+{
+    uint32_t age = sFrame - sPhaseFrame[phase];
+    float cost = sPhaseMs[phase];
+    if (age > VOXEL_STARVE_FRAMES)
+        cost *= (float)VOXEL_STARVE_FRAMES / (float)age;
+    return cost;
+}
 
 static void NotePhaseCost(int phase, float ms)
 {
     float *estimate = &sPhaseMs[phase];
+    float previous = PhaseCost(phase);
 
     if (ms > VOXEL_SLICE_CAP_MS)
         ms = VOXEL_SLICE_CAP_MS;
-    *estimate = ms > *estimate ? ms : *estimate * 0.95f + ms * 0.05f;
+    *estimate = ms > previous ? ms : previous * 0.75f + ms * 0.25f;
+    sPhaseFrame[phase] = sFrame;
 }
 
 static bool SameSite(const ChunkSite *a, const ChunkSite *b)
@@ -2970,13 +3464,13 @@ static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
     {
         BuildRequest *r = &sRequests[i];
         const VoxelMapInstance *inst = r->site.inst;
-        unsigned need = r->key / 100000u;
+        unsigned need = r->need;
         bool forView = need == NEED_HOLE || need == NEED_STALE;
 
         if (r->done)
             continue;
-        if (sHolesOnly && need != NEED_HOLE)
-            return false; /* sorted: holes come first */
+        if (sHolesOnly && need != NEED_HOLE && !RequestOverdue(r))
+            continue; /* sorted: holes come first */
         if (elapsed >= (forView ? holeMs : aheadMs))
             return false; /* sorted: nothing after it is more urgent */
         /* The slot may have been recycled for another tileset this update. */
@@ -2987,6 +3481,8 @@ static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
             r->hash = SiteHash(&r->site);
         r->done = true;
         JobStart(&r->site, r->atlas, r->hash, r->chunk, forView, need == NEED_HOLE);
+        sJob.waitIndex = r->waitIndex;
+        sJob.overdue = RequestOverdue(r);
         return true;
     }
     return false;
@@ -3010,29 +3506,46 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
         float elapsed = MsSince(started);
         float budget;
 
-        if (!sJob.active && !StartNextJob(elapsed, holeMs, aheadMs))
+        if (!sJob.active && !StartNextJob(forceHole && slices == 0 ? 0.0f : elapsed, holeMs, aheadMs))
             break;
-        budget = sHolesOnly && !sJob.hole ? 0.0f : sJob.forView ? holeMs : aheadMs;
+        budget = sHolesOnly && !sJob.hole && !sJob.overdue ? 0.0f : sJob.forView ? holeMs : aheadMs;
         if (sJob.phase != JOB_DONE)
         {
             int phase = sJob.phase;
             uint64_t sliceStart, ticks;
-            unsigned rays;
+            unsigned rays, misses;
+            int cellX = sJob.col, cellY = sJob.row;
 
             /*
              * A slice starts only if it should also end inside the budget,
              * save for the one a hole may be owed.
              */
-            if (!(forceHole && sJob.forView && slices == 0) && elapsed + sPhaseMs[phase] > budget)
+            if (!(forceHole && sJob.forView && slices == 0 && budget > 0.0f)
+             && (elapsed >= budget || elapsed + PhaseCost(phase) > budget))
                 break;
             sliceStart = svcGetSystemTick();
             rays = LightRays();
+            misses = CtrAssets_GetStats()->misses;
             JobStep();
+            if (sJob.forView)
+                sRequestWait[sJob.waitIndex].progress = sFrame;
             ticks = svcGetSystemTick() - sliceStart;
             sJob.rays += LightRays() - rays;
             sJob.ticks += ticks;
             sJob.phaseTicks[phase] += ticks;
             NotePhaseCost(phase, TicksMs(ticks));
+            /* Keep diagnosing beyond the initial 64 chunks, including routes
+             * reached minutes into play. At most one line every two seconds. */
+            static uint32_t lastSlowSlice;
+            if (TicksMs(ticks) > 2.0f && sFrame - lastSlowSlice >= 120u)
+            {
+                static const char *names[] = {"ground", "trees", "models", "border", "border-trees", "sort", "pack", "upload"};
+                lastSlowSlice = sFrame;
+                CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slice %s of %d:%d cell=%d,%d: %.2fms remaining=%.2f view=%d rays=%u misses=%u",
+                             names[phase], sJob.site.inst->mapGroup, sJob.site.inst->mapNum,
+                             cellX, cellY, TicksMs(ticks), budget - elapsed, sJob.forView,
+                             LightRays() - rays, (unsigned)(CtrAssets_GetStats()->misses - misses));
+            }
             ++slices;
             continue;
         }
@@ -3051,6 +3564,10 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
              * rebuilding, and even handed its slot to another square. */
             if (chunk != NULL && !IsChunkOf(chunk, &sJob.site))
                 chunk = NULL;
+            /* A draft may have been made for the square since the job began. */
+            if (chunk == NULL)
+                chunk = FindChunk(sJob.site.border, sJob.site.inst->mapGroup,
+                                  sJob.site.inst->mapNum, sJob.site.cx, sJob.site.cy);
             if (chunk == NULL)
             {
                 chunk = FreeChunkSlot(sJob.forView);
@@ -3108,7 +3625,7 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
  * ring one chunk deep was outrun, and chunks were built in its trail as
  * readily as ahead of it.
  */
-#define VOXEL_LEAD_FRAMES 45.0f
+#define VOXEL_LEAD_FRAMES 90.0f
 #define VOXEL_LEAD_MAX 16.0f
 static float sVelocityX, sVelocityZ;
 /* Where the player stood last frame; moved with the coordinates on a crossing
@@ -3132,13 +3649,62 @@ static void TrackMotion(float x, float z, bool reset)
     sLeadZ = Clamp(sVelocityZ * VOXEL_LEAD_FRAMES, -VOXEL_LEAD_MAX, VOXEL_LEAD_MAX);
 }
 
+/*
+ * Every hole of the view the frame can afford to draft, nearest first (the
+ * requests are sorted): a hole is on screen, so none is left for the real
+ * build to find. It becomes an ordinary stale square - drawn as it is, built
+ * for real after the frame - and joins this frame's draw list. A few at a
+ * time and within VOXEL_DRAFT_MS, but always one.
+ */
+#define VOXEL_DRAFT_MS 1.2f
+
+static bool DraftHoles(unsigned *missing)
+{
+    uint64_t start = svcGetSystemTick();
+    unsigned made = 0;
+
+    for (unsigned i = 0; i < sRequestCount && sRequests[i].need == NEED_HOLE; ++i)
+    {
+        BuildRequest *r = &sRequests[i];
+        const VoxelMapInstance *inst = r->site.inst;
+        VoxelChunk *chunk;
+
+        if (r->done || r->site.border)
+            continue;
+        if (made >= VOXEL_DRAFT_PER_FRAME || (made != 0 && MsSince(start) >= VOXEL_DRAFT_MS))
+            break;
+        /* The running job is for this square: let it finish. */
+        if (sJob.active && SameSite(&r->site, &sJob.site))
+            continue;
+        if (!r->atlas->valid || r->atlas->primaryTileset != inst->primaryTileset
+         || r->atlas->secondaryTileset != inst->secondaryTileset)
+            continue;
+        chunk = DraftChunk(&r->site, r->atlas, r->chunk);
+        if (chunk == NULL)
+            break; /* no room in the frame's uploads or in VRAM: next frame */
+        ++made;
+        r->chunk = chunk;
+        r->hashKnown = false;
+        r->need = NEED_STALE;
+        r->key += 100000u;
+        if (!IsDrawn(chunk) && SiteVisible(&r->site, chunk))
+        {
+            Draw(chunk, r->site.baseX, r->site.baseY);
+            if (missing != NULL && *missing > 0)
+                --*missing;
+        }
+    }
+    return made != 0;
+}
+
 static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
 {
     uint64_t started = svcGetSystemTick();
+    (void)crossed; /* a crossing is covered by the drafts like any other hole */
     float spare = SpareMs();
-    float holeMs = 0.0f, aheadMs = 0.0f;
+    float holeMs = 0.0f, aheadMs = 0.0f, visitMs = 0.0f;
     unsigned missing = 0, built;
-    bool holes = false;
+    bool holes = false, starved = false;
     bool warmup;
 
     if (cut || sResumeWarmup)
@@ -3152,59 +3718,109 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
                 : Clamp(spare - VOXEL_AHEAD_MARGIN_MS, 0.0f, VOXEL_AHEAD_MAX_MS);
     }
     UpdateFrustum();
+    VoxelWorld_SetMaterialView(sViewRect, VOXEL_MATERIAL_MARGIN);
     /* The atlas: what was composed after the last FrameEnd is uploaded now;
      * composing inside the frame is for the warm-up alone. No chunk of its
      * map can be built before it, and a map on screen without one is a hole
      * of its own. */
-    RunAtlasJob(started, warmup ? holeMs : 0.0f, true);
-    for (unsigned pass = 0;; ++pass)
     {
-        sRebuildStamp = sAtlasStamp;
-        sDrawCount = 0;
-        sRequestCount = 0;
-        sStats.vertices = 0;
-        missing = 0;
-        /* A ring map's atlas is begun ahead of time into an empty slot; it is
-         * composed after FrameEnd, like the chunks. */
-        VisitView(playerX + sLeadX, playerZ + sLeadZ, &missing,
-                  warmup ? aheadMs > 0.0f : sFrame >= sAheadBackoff);
-        /* Warming up, an atlas the visit has just asked for is composed now,
-         * and the view visited again with it - one per pass, one job at a
-         * time, for each tileset pair on screen. */
-        if (!warmup || !AtlasJobBusy() || !sAtlasJob.forView || pass >= 4)
-            break;
-        RunAtlasJob(started, 1000.0f, true);
+        float atlasMs = warmup ? holeMs : 0.0f;
+
+        if (!warmup && AtlasJobBusy() && sAtlasJob.forView && !sAtlasJob.ready
+         && sFrame - sAtlasProgressFrame >= VOXEL_STARVE_FRAMES)
+            atlasMs = VOXEL_STARVE_MS;
+        RunAtlasJob(started, atlasMs, true);
     }
+    sRebuildStamp = sAtlasStamp;
+    sDrawCount = 0;
+    sRequestCount = 0;
+    sStats.vertices = 0;
+    sStats.draftsVisible = 0;
+    sStats.draftMs = 0.0f;
+    /* Behind the warm-up's fade every signature is checked at once, as the
+     * view is built in full anyway. */
+    sHashesLeft = warmup ? UINT_MAX : VOXEL_HASHES_PER_FRAME;
+    VisitView(playerX + sLeadX, playerZ + sLeadZ, &missing,
+              warmup ? aheadMs > 0.0f : sFrame >= sAheadBackoff);
     sStats.atlasMs = MsSince(started);
     if (sRequestCount > 1)
         qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
+    /*
+     * Holes are covered at once with the draft of their square, except behind
+     * the warm-up's fade, where the real thing is built before it lifts.
+     */
+    if (!warmup && sRequestCount != 0 && sRequests[0].need == NEED_HOLE)
+    {
+        uint64_t draftStart = svcGetSystemTick();
+        unsigned before = sDrafts;
+
+        if (DraftHoles(&missing) && sRequestCount > 1)
+            qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
+        sStats.draftMs = MsSince(draftStart);
+        sDraftMs += sStats.draftMs;
+        static uint32_t lastDraftLog;
+        if (sFrame - lastDraftLog >= 120u && sDrafts != before)
+        {
+            lastDraftLog = sFrame;
+            CtrLog_Write(CTR_LOG_VIDEO, "VOXEL drafts: %u this frame, %u in all, %.1fms in all, "
+                         "%u holes left, pending=%u", sDrafts - before, sDrafts, sDraftMs,
+                         missing, sRequestCount);
+        }
+    }
     for (unsigned i = 0; i < sRequestCount; ++i)
     {
-        holes = holes || sRequests[i].key / 100000u == NEED_HOLE;
-        /* The square the running job is building is not asked for again. */
+        /* Outside the warm-up a hole is one the draft could not cover: the
+         * border belt, which has none. The others wait for their frame. */
+        holes = holes || (sRequests[i].need == NEED_HOLE && (warmup || sRequests[i].site.border));
+        starved = starved || RequestOverdue(&sRequests[i]);
+    }
+    /* Cancel first, then mark the surviving request consumed. */
+    if (sJob.active && !JobValid())
+        JobCancel();
+    if (sJob.active)
+    {
+        bool found = false;
+        for (unsigned i = 0; i < sRequestCount; ++i)
+            if (SameSite(&sRequests[i].site, &sJob.site))
+            {
+                found = true;
+                sJob.hole = sRequests[i].need == NEED_HOLE;
+                sJob.forView = sRequests[i].need <= NEED_STALE;
+                sJob.overdue = sJob.overdue || RequestOverdue(&sRequests[i]);
+                sJob.waitIndex = sRequests[i].waitIndex;
+                break;
+            }
+        /* Once geometry is complete, finish its bounded sort/pack/upload
+         * instead of discarding all the CPU work for a newly visible hole. */
+        if (!found || (holes && !sJob.hole && !sJob.overdue && sJob.phase < JOB_SORT))
+            JobCancel();
+    }
+    for (unsigned i = 0; i < sRequestCount; ++i)
         if (sJob.active && SameSite(&sRequests[i].site, &sJob.site))
             sRequests[i].done = true;
-    }
 
-    /* A job that no longer matches the world is dropped; one working ahead
-     * of time gives way the moment the view has a hole. */
-    if (sJob.active && (!JobValid() || (!sJob.forView && holes)))
-        sJob.active = false;
-
-    /* A crossing is a frame like any other since the belt and the next maps
-     * stand ready before it (VoxelWorld_BuildInstances, sBeltGrid). */
     sHolesOnly = !warmup;
-    if (sHolesOnly && holes)
-        holeMs = InFrameBudget();
+    if (!warmup)
+    {
+        holeMs = holes || starved ? InFrameBudget() : 0.0f;
+        if (starved && holeMs < VOXEL_STARVE_MS)
+            holeMs = VOXEL_STARVE_MS;
+    }
+    /* InFrameBudget removes the previous mesh work from the present cost:
+     * the remaining fixed cost already includes visiting the scene/atlases.
+     * Start the mesh clock here, or that visit is charged a second time.
+     * Warm-up instead keeps its total update deadline, including the visit.
+     * A forced rescue can overrun by one bounded slice. */
     {
         uint64_t buildStart = svcGetSystemTick();
-
-        built = RunJobs(buildStart, holeMs, aheadMs, true, warmup || crossed, &missing);
+        visitMs = TicksMs(buildStart - started);
+        built = RunJobs(warmup ? started : buildStart, holeMs, aheadMs, true,
+                        warmup || starved, &missing);
         sInFrameBuildMs = MsSince(buildStart);
     }
     sHolesOnly = false;
 
-    if (warmup && missing == 0 && !AtlasJobBusy())
+    if (sWarmupUntil != 0 && missing == 0 && !AtlasJobBusy())
         sWarmupUntil = 0;
     sLastBuildMs = MsSince(started);
     sStats.meshMs = sLastBuildMs;
@@ -3214,6 +3830,18 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
     sStats.visibleChunks = sDrawCount;
     sStats.frameBuilds = built;
     sStats.pendingBuilds = sRequestCount;
+    sStats.draftsMade = sDrafts;
+    static uint32_t lastMissingLog;
+    if (missing != 0 && sFrame - lastMissingLog >= 120u)
+    {
+        lastMissingLog = sFrame;
+        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL stream frame=%lu missing=%u pending=%u phase=%d age=%lu estimate=%.2fms starts=%u cancels=%u wasted=%.1fms mesh=%.2f/%.2f visit=%.2fms atlasSkip=%u drafts=%u",
+                     (unsigned long)sFrame, missing, sRequestCount, sJob.active ? sJob.phase : -1,
+                     (unsigned long)(sJob.active ? sFrame - sJob.firstFrame : 0),
+                     sJob.active ? PhaseCost(sJob.phase) : 0.0f,
+                     sJobStarts, sJobCancels, sCancelledBuildMs, sInFrameBuildMs, holeMs, visitMs,
+                     sAtlasExtensionsSkipped, sDrafts);
+    }
     sViewReady = true;
 }
 
@@ -3248,7 +3876,7 @@ void CtrVoxel_AfterSubmit(uint64_t frameBeginTick)
     VoxelWorld_BeginBatch();
     RunAtlasJob(started, sAtlasJob.forView ? budget : aheadMs, false);
     if (sJob.active && !JobValid())
-        sJob.active = false;
+        JobCancel();
     RunJobs(started, budget, aheadMs, false, false, NULL);
     sStats.afterMs = MsSince(started);
     sLastBuildMs += sStats.afterMs;
@@ -3360,6 +3988,201 @@ static uint32_t InstanceSignature(void)
 
 /* ── Frame update ───────────────────────────────────────────────────────── */
 
+/* ── The 3D battle ──────────────────────────────────────────────────────── */
+
+/*
+ * A battle's scenery is the world itself (3ds_video.c, RenderBattleWorld),
+ * seen from a camera of its own: on the stage voxel_battle.c chooses near the
+ * player, lower and closer than the field's (VOXEL_BATTLE_PITCH, _DISTANCE),
+ * with nobody in it - the battle draws its own Pokemon and trainers, and the
+ * sprites the billboards are decoded from are the battle's now. The camera
+ * glides in from where the field left it while the intro slides its scenery
+ * in, which is what that slide was on the GBA.
+ */
+#define VOXEL_BATTLE_GLIDE_FRAMES 80u
+/* An intro that never starts (a battle resumed without one): glide anyway. */
+#define VOXEL_BATTLE_INTRO_WAIT 150u
+/* The stage search's slice per frame (VoxelBattle_StepStage): 1023 cells,
+ * then 169 spots. */
+#define VOXEL_BATTLE_STAGE_CELLS 32u
+#define VOXEL_BATTLE_STAGE_SPOTS 8u
+
+static struct
+{
+    bool on, begun, chosen, sliding, glided;
+    uint32_t frames, glide, searchFrames;
+    float searchMs, searchWorstMs;
+    VoxelCamera field;
+    float targetX, targetZ, ground;
+    float shakeX, shakeY;
+} sBattle;
+
+bool CtrVoxel_IsAvailableForBattle(void)
+{
+    return sReady && VoxelWorld_IsBattleMapAvailable();
+}
+
+void CtrVoxel_BeginBattle(void)
+{
+    if (!sReady || sBattle.on)
+        return;
+    memset(&sBattle, 0, sizeof(sBattle));
+    sBattle.on = true;
+    sBattle.field = sCamera;
+}
+
+void CtrVoxel_EndBattle(void)
+{
+    if (!sBattle.on)
+        return;
+    sBattle.on = false;
+    sCamera = sBattle.field;
+    TrackMotion(sLastX, sLastZ, true);
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL battle over: the field's camera back");
+}
+
+bool CtrVoxel_InBattle(void)
+{
+    return sBattle.on;
+}
+
+void CtrVoxel_SetBattleFrame(bool introSliding, float shakeX, float shakeY)
+{
+    sBattle.sliding = introSliding;
+    sBattle.shakeX = shakeX;
+    sBattle.shakeY = shakeY;
+}
+
+static float Smooth(float t)
+{
+    t = Clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/* The battle camera this frame: on its way from the field's to the stage
+ * until the glide is over, moved by the scenery's shake. */
+static void BattleCamera(void)
+{
+    const VoxelCamera *from = &sBattle.field;
+    float t, k, x, z, ground, pitch, distance;
+
+    if (sBattle.sliding || sBattle.frames >= VOXEL_BATTLE_INTRO_WAIT)
+        sBattle.glided = true;
+    ++sBattle.frames;
+    /* Where to is not known yet: still where the field left it. */
+    if (sBattle.chosen && sBattle.glided && sBattle.glide < VOXEL_BATTLE_GLIDE_FRAMES)
+        ++sBattle.glide;
+    t = Smooth((float)sBattle.glide / (float)VOXEL_BATTLE_GLIDE_FRAMES);
+    x = from->targetX + (sBattle.targetX - from->targetX) * t;
+    z = from->targetZ + (sBattle.targetZ - from->targetZ) * t;
+    ground = from->ground + (sBattle.ground - from->ground) * t;
+    pitch = from->pitch + (VOXEL_BATTLE_PITCH - from->pitch) * t;
+    distance = from->distance + (VOXEL_BATTLE_DISTANCE - from->distance) * t;
+    /*
+     * BG3's scroll moves the scenery: a GBA pixel is CTR_BATTLE_ZOOM screen
+     * pixels, and a screen pixel at the target this many tiles - across, and
+     * along the ground foreshortened by the pitch.
+     */
+    k = CTR_BATTLE_ZOOM * 2.0f * distance * tanf(sCamera.fov * 0.5f * 3.14159265f / 180.0f)
+      / (float)CTR_GAME_HEIGHT;
+    x += sBattle.shakeX * k;
+    z += sBattle.shakeY * k / sinf(pitch * 3.14159265f / 180.0f);
+    VoxelCamera_Frame(&sCamera, x, z, ground, pitch, distance);
+}
+
+/*
+ * The animated tiles (water, flowers) of the current map's atlas. A pass takes
+ * the tiles written since the last one for one page and redraws the metatiles
+ * that show them, a few a frame (VoxelAtlas_AnimatedSlots), each copied by the
+ * GPU into its two runs of the page. Nothing of the page is read back and
+ * nothing but those 512 bytes a slot is flushed or copied: the page used to be
+ * read back into a CPU copy, recomposed and written out whole, which was 6-7 ms
+ * of a frame whenever it came round.
+ */
+static void AnimateTiles(const VoxelMapInstance *inst)
+{
+    VoxelAtlasSlot *active;
+    unsigned pages, page, room, count;
+
+    if (!sAnimPending || sAnimOut == NULL || sAtlasUploadPending || AtlasJobBusy())
+        return;
+    active = FindAtlas(inst);
+    if (active == NULL || !active->valid)
+        return;
+    if (sAnimWorkPage != 0 && sAnimWorkAtlas != active)
+        sAnimWorkPage = 0; /* the map changed pair mid-pass: its next write redraws */
+    pages = VoxelAtlas_PageCount(&active->map);
+    if (sAnimWorkPage == 0)
+    {
+        bool any = false;
+
+        page = 0;
+        for (unsigned step = 0; step < pages && !any; ++step)
+        {
+            unsigned p = (sAnimNext + step) % pages;
+
+            for (unsigned i = 0; i < sizeof(sAnimDirty[p]); ++i)
+            {
+                sAnimDirty[p][i] &= active->map.tileMask[p][i];
+                any = any || sAnimDirty[p][i] != 0;
+            }
+            if (any)
+                page = p;
+        }
+        if (!any)
+        {
+            sAnimPending = false;
+            return;
+        }
+        memcpy(sAnimWork, sAnimDirty[page], sizeof(sAnimWork));
+        memset(sAnimDirty[page], 0, sizeof(sAnimDirty[page]));
+        sAnimWorkPage = page + 1u;
+        sAnimWorkAtlas = active;
+        sAnimCursor = 0;
+        sAnimNext = (page + 1u) % pages;
+    }
+    page = sAnimWorkPage - 1u;
+    room = CtrVideo_VoxelUploadsLeft() / 2u; /* a slot is two copies */
+    if (room > VOXEL_ANIM_SLOTS)
+        room = VOXEL_ANIM_SLOTS;
+    if (room == 0 || AtlasTex(active, page)->data == NULL)
+        return;
+    count = VoxelAtlas_AnimatedSlots(inst, &active->map, page, CtrVideo_GetBgVram(), sAnimWork,
+                                     &sAnimCursor, sAnimOut, room);
+    if (count != 0)
+    {
+        uint8_t *dest = (uint8_t *)AtlasTex(active, page)->data;
+
+        GSPGPU_FlushDataCache(sAnimOut, count * sizeof(VoxelAnimSlot));
+        for (unsigned i = 0; i < count; ++i)
+        {
+            /* block (2c, 2r) of 64 to a row, 128 bytes each; the second run is
+             * the block row below */
+            unsigned c = sAnimOut[i].slot % VOXEL_ATLAS_COLUMNS, r = sAnimOut[i].slot / VOXEL_ATLAS_COLUMNS;
+            unsigned first = (2u * r * (VOXEL_ATLAS_W / 8u) + 2u * c) * 128u;
+            unsigned second = first + (VOXEL_ATLAS_W / 8u) * 128u;
+
+            if (!CtrVideo_TryVoxelUpload() || !CtrVideo_TryVoxelUpload())
+            {
+                /* The room was counted; if the queue still refuses, the rest
+                 * is redrawn by a later pass. */
+                sAnimCursor = 0;
+                break;
+            }
+            C3D_SyncTextureCopy((u32 *)sAnimOut[i].pixels, 0, (u32 *)(dest + first), 0, 256, 8);
+            C3D_SyncTextureCopy((u32 *)(sAnimOut[i].pixels + 128), 0, (u32 *)(dest + second), 0, 256, 8);
+        }
+        ++sStats.animationUploads;
+        sStats.animatedMetatiles += count;
+        sAtlasUploadPending = true;
+    }
+    if (sAnimCursor >= VOXEL_METATILE_IDS)
+    {
+        sAnimWorkPage = 0;
+        sAnimWorkAtlas = NULL;
+    }
+}
+
 bool CtrVoxel_Update(void)
 {
     const VoxelMapInstance *inst;
@@ -3382,6 +4205,7 @@ bool CtrVoxel_Update(void)
     sStagingUsed = 0;
     sChunkUploads = 0;
     sAtlasUploadPending = false;
+    sAtlasCapacityBlocked = false;
     sViewReady = false;
     /* Nothing retires an asset payload between here and the end of the
      * update, so resolved pointers may be reused throughout. */
@@ -3395,7 +4219,6 @@ bool CtrVoxel_Update(void)
         sStatus = "nomap";
         return false;
     }
-    FinishAnimReadback();
 
     {
         uint32_t digest = VoxelWorld_LiveDigest(), signature = InstanceSignature();
@@ -3424,7 +4247,7 @@ bool CtrVoxel_Update(void)
     if (mapChanged)
     {
         for (unsigned a = 0; a < VOXEL_ATLAS_SLOTS; ++a)
-            sAtlases[a].uncoveredRetried = false;
+            sAtlases[a].extendPending = false;
         cut = !HandleMapChange(mapGroup, mapNum, smoothX, smoothZ);
     }
     else
@@ -3454,7 +4277,17 @@ bool CtrVoxel_Update(void)
     sMeshMapNum = mapNum;
 
     sStats.worldMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
-    UpdateView(playerX, playerZ, mapChanged && !cut, cut);
+    {
+        uint64_t streamStart = svcGetSystemTick();
+
+        StreamPages();
+        sStats.streamMs = MsSince(streamStart);
+    }
+    /* The view is visited around what is looked at: the stage, in a battle. */
+    if (sBattle.on)
+        UpdateView(sCamera.targetX, sCamera.targetZ, false, cut);
+    else
+        UpdateView(playerX, playerZ, mapChanged && !cut, cut);
     /* The pages drawn from first, then those of every map in view - built
      * or not yet - and last, if there is room, of the maps in the ring. */
     for (unsigned d = 0; d < sDrawCount; ++d)
@@ -3479,30 +4312,11 @@ bool CtrVoxel_Update(void)
                 WantPage(VoxelBuildings_PageOf(map), ring ? VOXEL_PAGE_KEEP_RING : VOXEL_PAGE_KEEP_VIEW,
                          true);
             }
-    StreamPages();
-    /* Animation writes arrived during the game's VBlank. Recompose only the
-     * metatiles that reference those 8x8 tiles and upload once, never per tile. */
-    if (sAnimPending && sAnimShadow != NULL && !sAtlasUploadPending
-     && !AtlasJobBusy())
     {
-        VoxelAtlasSlot *active = FindAtlas(inst);
-        if (active != NULL && active == sAnimAtlas)
-        {
-            unsigned changed = VoxelAtlas_RefreshAnimated(inst, &active->map,
-                                                            sAnimShadow, CtrVideo_GetBgVram(),
-                                                            sAnimDirty);
-            if (changed != 0)
-            {
-                ++sStats.animationUploads;
-                sStats.animatedMetatiles += changed;
-                GSPGPU_FlushDataCache(sAnimShadow, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-                C3D_SyncTextureCopy((u32 *)sAnimShadow, 0, (u32 *)active->tex.data, 0,
-                                    VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
-                sAtlasUploadPending = true;
-            }
-            memset(sAnimDirty, 0, sizeof(sAnimDirty));
-            sAnimPending = false;
-        }
+        uint64_t animStart = svcGetSystemTick();
+
+        AnimateTiles(inst);
+        sStats.animMs = MsSince(animStart);
     }
 
     /*
@@ -3576,8 +4390,11 @@ bool CtrVoxel_Update(void)
     sStats.updateMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
     if (sStats.updateMs > sStats.updatePeakMs)
         sStats.updatePeakMs = sStats.updateMs;
-    sStatus = sDrawCount != 0 ? "on" : "nomesh";
-    return sDrawCount != 0;
+    sStatus = sAtlasCapacityBlocked ? "capacity"
+            : sWarmupUntil != 0 && sStats.chunksMissing != 0 ? "loading"
+            : sDrawCount != 0 ? "on" : "nomesh";
+    return sDrawCount != 0 && !sAtlasCapacityBlocked
+        && !(sWarmupUntil != 0 && sStats.chunksMissing != 0);
 }
 
 /*
@@ -3588,7 +4405,7 @@ bool CtrVoxel_Update(void)
  */
 bool CtrVoxel_IsWarmingUp(void)
 {
-    return sReady && sFrame < sWarmupUntil;
+    return sReady && sFrame < sWarmupUntil && !sAtlasCapacityBlocked;
 }
 
 unsigned long CtrVoxel_ReleaseIdleVram(void)
@@ -3608,12 +4425,14 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
         if (current != NULL && slot->valid && slot->primaryTileset == current->primaryTileset
          && slot->secondaryTileset == current->secondaryTileset)
             continue;
-        C3D_TexDelete(&slot->tex);
-        if (sAnimAtlas == slot) sAnimAtlas = NULL;
-        if (sAnimReadback == slot) sAnimReadback = NULL;
+        unsigned pages = 0;
+        for (unsigned p = 0; p < VOXEL_ATLAS_PAGES; ++p)
+            pages += AtlasTex(slot, p)->data != NULL;
+        FreeAtlasTextures(slot);
+        AnimForget(slot);
         memset(&slot->tex, 0, sizeof(slot->tex));
         slot->valid = false;
-        freed += VOXEL_ATLAS_PIXELS * sizeof(uint16_t);
+        freed += pages * VOXEL_ATLAS_PIXELS * sizeof(uint16_t);
     }
     if (freed != 0)
     {
@@ -4532,32 +5351,33 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     SetGrade(&light);
 
     /*
-     * Ordinary terrain first, then the tree material with alpha test, then
-     * the modelled buildings. The transparent corners of the crowns must write
-     * neither colour nor depth. Each chunk keeps all three ranges in the same
+     * Ordinary terrain first, then the tree material, then the modelled
+     * buildings, all alpha tested: the transparent corners of the crowns and
+     * the clear background of a cut tile's rock must write neither colour nor
+     * depth. Each chunk keeps all three ranges in the same
      * static VRAM buffer, measured from its own corner, so every draw carries
      * that corner's place in the world in its model-view.
      */
-    for (unsigned pass = 0; pass < 3; ++pass)
+    for (unsigned pass = 0; pass < VOXEL_ATLAS_PAGES + 2u; ++pass)
     {
         const C3D_Tex *boundTex = NULL;
 
-        C3D_AlphaTest(pass != 0, GPU_GREATER, 0);
+        C3D_AlphaTest(true, GPU_GREATER, 0);
 
         for (unsigned i = 0; i < sDrawCount; ++i)
         {
             const VoxelChunk *chunk = sDraws[i].chunk;
-            unsigned first = pass == 0 ? 0
-                           : pass == 1 ? chunk->terrainCount : chunk->buildingFirst;
-            unsigned count = pass == 0 ? chunk->terrainCount
-                           : pass == 1 ? chunk->buildingFirst - chunk->terrainCount
-                           : chunk->count - chunk->buildingFirst;
+            unsigned first = pass < VOXEL_ATLAS_PAGES ? chunk->terrainFirst[pass]
+                           : pass == VOXEL_ATLAS_PAGES ? chunk->terrainCount : chunk->buildingFirst;
+            unsigned count = pass < VOXEL_ATLAS_PAGES ? chunk->terrainFirst[pass + 1u] - first
+                           : pass == VOXEL_ATLAS_PAGES ? chunk->buildingFirst - first
+                           : chunk->count - first;
             C3D_Tex *tex;
 
             if (count == 0)
                 continue;
-            tex = pass == 0 ? &chunk->atlas->tex
-                : pass == 1 ? &sTreeAtlas : BuildingPage(chunk->buildingPage);
+            tex = pass < VOXEL_ATLAS_PAGES ? AtlasTex(chunk->atlas, pass)
+                : pass == VOXEL_ATLAS_PAGES ? &sTreeAtlas : BuildingPage(chunk->buildingPage);
             if (tex == NULL)
                 continue;
 

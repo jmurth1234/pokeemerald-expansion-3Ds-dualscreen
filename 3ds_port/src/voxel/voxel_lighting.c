@@ -45,6 +45,9 @@ typedef struct
     uint32_t generation;
 } LightSample;
 static LightSample sSamples[SAMPLE_CACHE_SIZE];
+#define SAMPLE_WAYS 4u
+#define SAMPLE_SETS (SAMPLE_CACHE_SIZE / SAMPLE_WAYS)
+static uint8_t sSampleNext[SAMPLE_SETS];
 static uint32_t sGeneration;
 static unsigned sRays;
 
@@ -254,18 +257,20 @@ static bool CellOccludes(const LightCell *cell, float x, float y, float z)
     {
         /* Half the large proxy across, kept on its own cell: in a wood the
          * cell to the north is the next small tree and carries its own. */
-        float dx = (x - ((float)cell->x + 0.5f)) / 0.48f;
-        float dz = (z - ((float)cell->z + 0.35f)) / 0.55f;
-        float dy = (y - 0.80f) / 0.62f;
+        /* Reciprocals: a division is some twenty cycles on the VFP and
+         * three of them were taken at every point of a ray over a wood. */
+        float dx = (x - ((float)cell->x + 0.5f)) * (1.0f / 0.48f);
+        float dz = (z - ((float)cell->z + 0.35f)) * (1.0f / 0.55f);
+        float dy = (y - 0.80f) * (1.0f / 0.62f);
         return dx * dx + dz * dz + dy * dy < 1.0f;
     }
     if (cell->crownPart >= 0)
     {
         float crownX = (float)(cell->x - (cell->crownPart & 1)) + 1.0f;
         float crownZ = (float)(cell->z - (cell->crownPart >> 1)) + 0.65f;
-        float dx = (x - crownX) / 0.95f;
-        float dz = (z - crownZ) / 0.65f;
-        float dy = (y - 0.95f) / 0.67f;
+        float dx = (x - crownX) * (1.0f / 0.95f);
+        float dz = (z - crownZ) * (1.0f / 0.65f);
+        float dy = (y - 0.95f) * (1.0f / 0.67f);
         return dx * dx + dz * dz + dy * dy < 1.0f;
     }
     return true;
@@ -339,16 +344,22 @@ static bool Lit(float x, float y, float z)
          * drops below the cell's corner. The estimate starts a step short
          * of the crossing and the exact points settle it. */
         {
-            float ex = (x - (float)tx) / (VOXEL_SUN_DX * 0.25f);
-            float ez = (z - (float)tz) / (VOXEL_SUN_DZ * 0.25f);
+            /* Reciprocals, not divisions: the guess is a step short of the
+             * crossing anyway, far more than their rounding. */
+            float ex = (x - (float)tx) * (1.0f / (VOXEL_SUN_DX * 0.25f));
+            float ez = (z - (float)tz) * (1.0f / (VOXEL_SUN_DZ * 0.25f));
             int guess = (int)(ex < ez ? ex : ez) - 1;
+            const float left = (float)tx, top = (float)tz;
 
             if (guess > step)
                 step = guess;
+            /* rx and rz only fall and the first point was inside the cell,
+             * so it is left exactly when either drops under its corner:
+             * Tile(r) != t, without computing Tile. */
             for (; step <= VOXEL_LIGHT_REACH * 4; ++step)
             {
                 RayPoint(x, y, z, step, &rx, &ry, &rz);
-                if (Tile(rx) != tx || Tile(rz) != tz || ry >= ceiling)
+                if (rx < left || rz < top || ry >= ceiling)
                     break;
             }
         }
@@ -380,16 +391,35 @@ static float Contact(float x, float y, float z)
  */
 static const LightSample *CachedSample(float x, float y, float z)
 {
-    unsigned key = ((uint32_t)Tile(x * 8.0f) * 73856093u
+    uint32_t hash = (uint32_t)Tile(x * 8.0f) * 73856093u
                   ^ (uint32_t)Tile(z * 8.0f) * 19349663u
-                  ^ (uint32_t)Tile(y * 16.0f) * 83492791u) & (SAMPLE_CACHE_SIZE - 1);
-    LightSample *sample = &sSamples[key];
+                  ^ (uint32_t)Tile(y * 16.0f) * 83492791u;
+    /* Lattice coordinates have common low zero bits. Fold high bits before
+     * selecting a set, then keep four exact samples per set at the same
+     * total sample capacity. Collisions never approximate the lighting. */
+    hash ^= hash >> 16;
+    hash *= 0x7feb352du;
+    hash ^= hash >> 15;
+    unsigned set = hash & (SAMPLE_SETS - 1u);
+    LightSample *ways = &sSamples[set * SAMPLE_WAYS], *sample = NULL;
 
     if (sGeneration == 0)
         VoxelLighting_Reset();
-    if (sample->generation == sGeneration
-     && sample->x == x && sample->y == y && sample->z == z)
-        return sample;
+    for (unsigned i = 0; i < SAMPLE_WAYS; ++i)
+    {
+        if (ways[i].generation == sGeneration)
+        {
+            if (ways[i].x == x && ways[i].y == y && ways[i].z == z)
+                return &ways[i];
+        }
+        else if (sample == NULL)
+            sample = &ways[i];
+    }
+    if (sample == NULL)
+    {
+        sample = &ways[sSampleNext[set]];
+        sSampleNext[set] = (sSampleNext[set] + 1u) & (SAMPLE_WAYS - 1u);
+    }
     ++sRays;
     sample->lit = Lit(x, y, z);
     sample->contact = Contact(x, y, z);
@@ -673,6 +703,9 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
 #define MODEL_SHADE_WEST 0.80f
 #define MODEL_SHADE_EAST 0.72f
 #define MODEL_SHADE_BACK 0.66f
+/* A face wound with its outside first (a rock's back, turned every way):
+ * its normal is its winding's, no side's rule (voxel_building.py SHADE_WOUND). */
+#define MODEL_SHADE_WOUND 0.90f
 
 void VoxelLighting_ModelTri(VoxelBuilder *builder, const VoxelVertex *a,
                             const VoxelVertex *b, const VoxelVertex *c, float drawnShade)
@@ -684,7 +717,9 @@ void VoxelLighting_ModelTri(VoxelBuilder *builder, const VoxelVertex *a,
     float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     bool flip;
 
-    if (fabsf(drawnShade - MODEL_SHADE_WEST) < 0.02f)
+    if (fabsf(drawnShade - MODEL_SHADE_WOUND) < 0.02f)
+        flip = false;
+    else if (fabsf(drawnShade - MODEL_SHADE_WEST) < 0.02f)
         flip = nx > 0.0f;
     else if (fabsf(drawnShade - MODEL_SHADE_EAST) < 0.02f)
         flip = nx < 0.0f;
