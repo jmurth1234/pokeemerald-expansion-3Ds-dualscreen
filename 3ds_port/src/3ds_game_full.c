@@ -19,6 +19,8 @@
 #include "m4a.h"
 #include "scanline_effect.h"
 #include "item_menu.h"
+#include "party_menu.h"
+#include "constants/party_menu.h"
 #include "port_platform.h"
 #include "port_log.h"
 
@@ -202,6 +204,14 @@ void CtrCentredBag_SetVBlankCallback(IntrCallback callback)
 {
     SetCentredCallback(callback, gBagPosition.location == ITEMMENULOCATION_FIELD ? CTR_CENTRED_BAG
                                                                                   : CTR_CENTRED_BAG_WHOLE);
+}
+
+/* The party menu from the field goes left of the column, from a battle, a
+ * contest or a facility over the whole bottom screen. */
+void CtrCentredParty_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, !gMain.inBattle && gPartyMenu.menuType == PARTY_MENU_TYPE_FIELD
+                                     ? CTR_CENTRED_PARTY : CTR_CENTRED_PARTY_WHOLE);
 }
 
 /* The Pokédex's own callback. The page it shows for a mon just caught puts

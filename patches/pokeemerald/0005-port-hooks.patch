@@ -8256,56 +8256,301 @@ index 09a4b91ebda42cf2be405742d77ef4412c31f7e2..c7181c8a07c140fe5bd7c8cf64928f46
 diff --git a/src/party_menu.c b/src/party_menu.c
 old mode 100755
 new mode 100644
-index 7cde1a018c33c86da6ede1b0e7d3259869774cb0..1868e100ff212460f6912e5bbe59a5d36a2bd0e4
+index 7cde1a018c33c86da6ede1b0e7d3259869774cb0..933fdad459798eead64daeeffb82fdcd37618612
 --- a/src/party_menu.c
 +++ b/src/party_menu.c
-@@ -2563,8 +2563,15 @@ static u8 DisplaySelectionWindow(u8 windowType)
-     return sPartyMenuInternal->windowId[0];
+@@ -485,11 +485,38 @@ static bool8 SetUpFieldMove_Dive(void);
+ #include "data/pokemon/tutor_learnsets.h"
+ #include "data/party_menu.h"
+ 
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
++
++#ifdef PLATFORM_3DS
++// The party menu is shown on the 3DS bottom screen as the game draws it
++// (CTR_CENTRED_PARTY) and takes touch directly: a tap is the one action it
++// stands for, never a string of presses. menu.c holds the tap.
++bool8 CtrMenu_TakeAck(void);
++bool8 CtrMenu_TakeTap(s16 *x, s16 *y);
++s8 CtrMenu_YesNoInput(void);
++s8 CtrMenu_EntryAt(s16 x, s16 y);
++s8 CtrMenu_Choose(s8 entry, bool8 sound);
++// A message waiting for A or B goes on with a tap.
++#define PARTY_AB_NEW() (JOY_NEW(A_BUTTON | B_BUTTON) || CtrMenu_TakeAck())
++// A yes/no box: YES or NO tapped is chosen, a tap away from it is B.
++#define Menu_ProcessInputNoWrapClearOnChoose CtrMenu_YesNoInput
++// The column asked the party menu to close (CtrParty_Close): B once, or B
++// every time the mon list takes input until the menu is gone (leaving).
++static bool8 sCtrCloseAsked, sCtrLeaving;
++#else
++#define PARTY_AB_NEW() JOY_NEW(A_BUTTON | B_BUTTON)
++#endif
++
+ // code
+ static void InitPartyMenu(u8 menuType, u8 layout, u8 partyAction, bool8 keepCursorPos, u8 messageId, TaskFunc task, MainCallback callback)
+ {
+     u16 i;
+ 
++#ifdef PLATFORM_3DS
++    sCtrCloseAsked = sCtrLeaving = FALSE;
++#endif
+     ResetPartyMenu();
+     sPartyMenuInternal = Alloc(sizeof(struct PartyMenuInternal));
+     if (sPartyMenuInternal == NULL)
+@@ -1198,8 +1225,19 @@ static bool8 PartyBoxPal_ParnterOrDisqualifiedInArena(u8 slot)
+ 
+ static void DrawCancelConfirmButtons(void)
+ {
++#ifdef PORT_BRIDGE
++    // Read from the loaded tilemaps, not from the INCBINs' stubs.
++    const void *confirm = Port_ResolveAssetPointerSized(sConfirmButton_Tilemap, 7 * 2 * sizeof(u16));
++    const void *cancel = Port_ResolveAssetPointerSized(sCancelButton_Tilemap, 7 * 2 * sizeof(u16));
++
++    if (confirm == NULL || cancel == NULL)
++        return;
++    CopyToBgTilemapBufferRect_ChangePalette(1, confirm, 23, 16, 7, 2, 17);
++    CopyToBgTilemapBufferRect_ChangePalette(1, cancel, 23, 18, 7, 2, 17);
++#else
+     CopyToBgTilemapBufferRect_ChangePalette(1, sConfirmButton_Tilemap, 23, 16, 7, 2, 17);
+     CopyToBgTilemapBufferRect_ChangePalette(1, sCancelButton_Tilemap, 23, 18, 7, 2, 17);
++#endif
+     ScheduleBgCopyTilemapToVram(1);
+ }
+ 
+@@ -1256,13 +1294,126 @@ u8 GetPartyMenuType(void)
+     return gPartyMenu.menuType;
  }
  
 +#ifdef PLATFORM_3DS
-+static const u8 *sCtrMessage;
-+#endif
-+
- static void PrintMessage(const u8 *text)
- {
-+#ifdef PLATFORM_3DS
-+    sCtrMessage = text;
-+#endif
-     DrawStdFrameWithCustomTileAndPalette(WIN_MSG, FALSE, 0x4F, 13);
-     gTextFlags.canABSpeedUpPrint = TRUE;
-     AddTextPrinterParameterized2(WIN_MSG, FONT_NORMAL, text, GetPlayerTextSpeedDelay(), 0, TEXT_COLOR_DARK_GRAY, TEXT_COLOR_WHITE, TEXT_COLOR_LIGHT_GRAY);
-@@ -6428,3 +6435,30 @@ void IsLastMonThatKnowsSurf(void)
-             gSpecialVar_Result = TRUE;
-     }
- }
-+
-+#ifdef PLATFORM_3DS
-+// The 3DS bottom screen shows the open selection menu (SUMMARY, SWITCH, ITEM,
-+// field moves...) as touch buttons. It only reads what is on screen: the
-+// entries are chosen by pressing buttons, like any other input.
-+u8 CtrPartyMenu_GetActions(const u8 **names, u8 max)
++// The party slot whose box holds the pixel (x, y) of the screen, or -1.
++static s8 CtrParty_SlotAt(s16 x, s16 y)
 +{
 +    u8 i;
 +
-+    if (sPartyMenuInternal == NULL || !FuncIsActiveTask(Task_HandleSelectionMenuInput))
++    for (i = 0; i < PARTY_SIZE; i++)
++    {
++        u8 windowId = sPartyMenuBoxes[i].windowId;
++        s16 left, top;
++
++        if (GetMonData(&gPlayerParty[i], MON_DATA_SPECIES) == SPECIES_NONE || windowId == WINDOW_NONE)
++            continue;
++        left = GetWindowAttribute(windowId, WINDOW_TILEMAP_LEFT) * 8;
++        top = GetWindowAttribute(windowId, WINDOW_TILEMAP_TOP) * 8;
++        if (x >= left && x < left + (s16)GetWindowAttribute(windowId, WINDOW_WIDTH) * 8
++         && y >= top && y < top + (s16)GetWindowAttribute(windowId, WINDOW_HEIGHT) * 8)
++            return i;
++    }
++    return -1;
++}
++
++// What the mon list takes from the bottom screen this frame, as the key it
++// stands for: a mon's box moves the cursor there (without a sound of its
++// own) and is A, the Confirm button is A on it, Cancel is B. 0 when nothing
++// was tapped, and then the buttons are read as always.
++static u16 CtrParty_Touch(s8 *slotPtr)
++{
++    s16 x, y;
++    s8 slot;
++
++    if (sCtrCloseAsked)
++    {
++        sCtrCloseAsked = sCtrLeaving;
++        return B_BUTTON;
++    }
++    if (!CtrMenu_TakeTap(&x, &y))
 +        return 0;
-+    for (i = 0; i < sPartyMenuInternal->numActions && i < max; i++)
-+        names[i] = sCursorOptions[sPartyMenuInternal->actions[i]].text;
-+    return i;
++    slot = CtrParty_SlotAt(x, y);
++    if (slot < 0)
++    {
++        // The buttons at the bottom right: Confirm over Cancel when both
++        // are there, Cancel alone lower otherwise.
++        if (gPartyMenu.menuType == PARTY_MENU_TYPE_MULTI_SHOWCASE || x < 184)
++            return 0;
++        if (sPartyMenuInternal->chooseHalf)
++        {
++            if (y >= 128 && y < 144)
++                slot = PARTY_SIZE;
++            else if (y >= 144)
++                return B_BUTTON;
++        }
++        else if (y >= 136)
++        {
++            return B_BUTTON;
++        }
++        if (slot < 0)
++            return 0;
++    }
++    if (slot != *slotPtr)
++    {
++        AnimatePartySlot(*slotPtr, 0);
++        *slotPtr = slot;
++        AnimatePartySlot(slot, 1);
++    }
++    return A_BUTTON;
++}
++
++// The column's POKéMON button closes the party menu as B does; any other
++// button leaves it for its own screen (leaving: B every time the list takes
++// input, through the menus on the way, until it is gone). FALSE when the
++// menu is not where B can do that.
++bool8 CtrParty_Close(bool8 leaving)
++{
++    if (sPartyMenuInternal == NULL || gPaletteFade.active || gMain.callback2 != CB2_UpdatePartyMenu)
++        return FALSE;
++    if (leaving && gPartyMenu.action != PARTY_ACTION_CHOOSE_MON)
++        return FALSE;
++    sCtrCloseAsked = TRUE;
++    sCtrLeaving = leaving;
++    return TRUE;
++}
++
++// A tap on the open menu of the party menu (the mon's actions, the moves to
++// choose among): the entry tapped, as A chooses it; anywhere else B.
++// MENU_NOTHING_CHOSEN without one.
++static s8 CtrParty_MenuTouch(void)
++{
++    s16 x, y;
++    s8 entry;
++
++    if (!CtrMenu_TakeTap(&x, &y))
++    {
++        if (!sCtrCloseAsked)
++            return MENU_NOTHING_CHOSEN;
++        sCtrCloseAsked = sCtrLeaving;
++        return MENU_B_PRESSED;
++    }
++    entry = CtrMenu_EntryAt(x, y);
++    if (entry < 0)
++        return MENU_B_PRESSED;
++    CtrMenu_Choose(entry, TRUE);
++    return entry;
 +}
 +#endif
 +
+ void Task_HandleChooseMonInput(u8 taskId)
+ {
+     if (!gPaletteFade.active && MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
+         s8 *slotPtr = GetCurrentPartySlotPtr();
 +#ifdef PLATFORM_3DS
-+// The message the party menu last printed in its message box, for the 3DS
-+// bottom screen, or NULL while the menu is back to choosing a mon.
-+const u8 *CtrPartyMenu_GetMessage(void)
-+{
-+    if (sPartyMenuInternal == NULL || FuncIsActiveTask(Task_HandleChooseMonInput))
-+        sCtrMessage = NULL;
-+    return sCtrMessage;
-+}
++        u16 touch = CtrParty_Touch(slotPtr);
 +#endif
+ 
++#ifdef PLATFORM_3DS
++        switch (touch ? touch : PartyMenuButtonHandler(slotPtr))
++#else
+         switch (PartyMenuButtonHandler(slotPtr))
++#endif
+         {
+         case A_BUTTON: // Selected mon
+             HandleChooseMonSelection(taskId, slotPtr);
+@@ -2152,6 +2303,15 @@ static void BlitBitmapToPartyWindow(u8 windowId, const u8 *b, u8 c, u8 x, u8 y,
+     u8 *pixels = AllocZeroed(height * width * 32);
+     u8 i, j;
+ 
++#ifdef PORT_BRIDGE
++    // Read from the loaded tilemap, not from the INCBIN's stub.
++    b = Port_ResolveAssetPointerSized(b, (y + height) * c);
++    if (b == NULL)
++    {
++        Free(pixels);
++        return;
++    }
++#endif
+     if (pixels != NULL)
+     {
+         for (i = 0; i < height; i++)
+@@ -2744,10 +2904,16 @@ static void Task_HandleSelectionMenuInput(u8 taskId)
+         s8 input;
+         s16 *data = gTasks[taskId].data;
+ 
+-        if (sPartyMenuInternal->numActions <= 3)
+-            input = Menu_ProcessInputNoWrapAround_other();
+-        else
+-            input = ProcessMenuInput_other();
++#ifdef PLATFORM_3DS
++        input = CtrParty_MenuTouch();
++        if (input == MENU_NOTHING_CHOSEN)
++#endif
++        {
++            if (sPartyMenuInternal->numActions <= 3)
++                input = Menu_ProcessInputNoWrapAround_other();
++            else
++                input = ProcessMenuInput_other();
++        }
+ 
+         data[0] = Menu_GetCursorPos();
+         switch (input)
+@@ -3837,7 +4003,7 @@ static u16 GetFieldMoveMonSpecies(void)
+ 
+ static void Task_CancelAfterAorBPress(u8 taskId)
+ {
+-    if ((JOY_NEW(A_BUTTON)) || (JOY_NEW(B_BUTTON)))
++    if (PARTY_AB_NEW())
+         CursorCb_Cancel1(taskId);
+ }
+ 
+@@ -4590,7 +4756,14 @@ static void ShowMoveSelectWindow(u8 slot)
+ 
+ static void Task_HandleWhichMoveInput(u8 taskId)
+ {
++#ifdef PLATFORM_3DS
++    s8 input = CtrParty_MenuTouch();
++
++    if (input == MENU_NOTHING_CHOSEN)
++        input = Menu_ProcessInput();
++#else
+     s8 input = Menu_ProcessInput();
++#endif
+ 
+     if (input != MENU_NOTHING_CHOSEN)
+     {
+@@ -4797,7 +4970,7 @@ static void Task_DoLearnedMoveFanfareAfterText(u8 taskId)
+ 
+ static void Task_LearnNextMoveOrClosePartyMenu(u8 taskId)
+ {
+-    if (IsFanfareTaskInactive() && ((JOY_NEW(A_BUTTON)) || (JOY_NEW(B_BUTTON))))
++    if (IsFanfareTaskInactive() && (PARTY_AB_NEW()))
+     {
+         if (gPartyMenu.learnMoveState == 1)
+         {
+@@ -5008,7 +5181,7 @@ static void UpdateMonDisplayInfoAfterRareCandy(u8 slot, struct Pokemon *mon)
+ 
+ static void Task_DisplayLevelUpStatsPg1(u8 taskId)
+ {
+-    if (WaitFanfare(FALSE) && IsPartyMenuTextPrinterActive() != TRUE && ((JOY_NEW(A_BUTTON)) || (JOY_NEW(B_BUTTON))))
++    if (WaitFanfare(FALSE) && IsPartyMenuTextPrinterActive() != TRUE && (PARTY_AB_NEW()))
+     {
+         PlaySE(SE_SELECT);
+         DisplayLevelUpStatsPg1(taskId);
+@@ -5018,7 +5191,7 @@ static void Task_DisplayLevelUpStatsPg1(u8 taskId)
+ 
+ static void Task_DisplayLevelUpStatsPg2(u8 taskId)
+ {
+-    if ((JOY_NEW(A_BUTTON)) || (JOY_NEW(B_BUTTON)))
++    if (PARTY_AB_NEW())
+     {
+         PlaySE(SE_SELECT);
+         DisplayLevelUpStatsPg2(taskId);
+@@ -5049,7 +5222,7 @@ static void Task_TryLearnNewMoves(u8 taskId)
+ {
+     u16 learnMove;
+ 
+-    if (WaitFanfare(FALSE) && ((JOY_NEW(A_BUTTON)) || (JOY_NEW(B_BUTTON))))
++    if (WaitFanfare(FALSE) && (PARTY_AB_NEW()))
+     {
+         RemoveLevelUpStatsWindow();
+         learnMove = MonTryLearningNewMove(&gPlayerParty[gPartyMenu.slotId], TRUE);
+@@ -5686,7 +5859,7 @@ static void Task_ValidateChosenHalfParty(u8 taskId)
+ 
+ static void Task_ContinueChoosingHalfParty(u8 taskId)
+ {
+-    if ((JOY_NEW(A_BUTTON)) || (JOY_NEW(B_BUTTON)))
++    if (PARTY_AB_NEW())
+     {
+         PlaySE(SE_SELECT);
+         DisplayPartyMenuStdMessage(PARTY_MSG_CHOOSE_MON);
 diff --git a/src/player_pc.c b/src/player_pc.c
 index 43239582ce6cb1653a489f55cf9048c0eb9bc018..50f6fd4e7a2b60efd5f5b2878bc208db5197fd75 100644
 --- a/src/player_pc.c
@@ -9723,10 +9968,20 @@ index 8058074ef4b4465a98cd357b03825357b0269f2f..0ab025fd9311569779ca0e0c330e3d1e
          var7 = 0;
  
 diff --git a/src/pokemon_icon.c b/src/pokemon_icon.c
-index caed0bcdc38163bbe7d5291411b244fa635c7ae4..e91ecb8656314ac1a30ad1132754a09c86b65b8b 100644
+index caed0bcdc38163bbe7d5291411b244fa635c7ae4..1d4a83a39a02b2e6a03eef33e5d3bf1e0e39e4a0 100644
 --- a/src/pokemon_icon.c
 +++ b/src/pokemon_icon.c
-@@ -1185,12 +1185,22 @@ void SpriteCB_MonIcon(struct Sprite *sprite)
+@@ -5,6 +5,9 @@
+ #include "pokemon_icon.h"
+ #include "sprite.h"
+ #include "constants/pokemon_icon.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ #define INVALID_ICON_SPECIES SPECIES_OLD_UNOWN_J // Oddly specific, used when an icon should be a ?. Any of the 'old unown' would work
+ 
+@@ -1185,12 +1188,22 @@ void SpriteCB_MonIcon(struct Sprite *sprite)
      UpdateMonIconFrame(sprite);
  }
  
@@ -9749,6 +10004,32 @@ index caed0bcdc38163bbe7d5291411b244fa635c7ae4..e91ecb8656314ac1a30ad1132754a09c
      }
      return iconSprite;
  }
+@@ -1243,6 +1256,17 @@ u8 UpdateMonIconFrame(struct Sprite *sprite)
+             sprite->animCmdIndex = 0;
+             break;
+         default:
++#ifdef PORT_BRIDGE
++        {
++            // The icon is an INCBIN's stub: its second frame is read from the
++            // loaded asset, not from whatever lies after the stub.
++            u32 size = sSpriteImageSizes[sprite->oam.shape][sprite->oam.size];
++            const u8 *src = Port_ResolveSpriteFramePointer(sprite->images, size, size * frame);
++
++            if (src != NULL)
++                RequestSpriteCopy(src, (u8 *)(OBJ_VRAM0 + sprite->oam.tileNum * TILE_SIZE_4BPP), size);
++        }
++#else
+             RequestSpriteCopy(
+                 // pointer arithmetic is needed to get the correct pointer to perform the sprite copy on.
+                 // because sprite->images is a struct def, it has to be casted to (u8 *) before any
+@@ -1250,6 +1274,7 @@ u8 UpdateMonIconFrame(struct Sprite *sprite)
+                 (u8 *)sprite->images + (sSpriteImageSizes[sprite->oam.shape][sprite->oam.size] * frame),
+                 (u8 *)(OBJ_VRAM0 + sprite->oam.tileNum * TILE_SIZE_4BPP),
+                 sSpriteImageSizes[sprite->oam.shape][sprite->oam.size]);
++#endif
+             sprite->animDelayCounter = sprite->anims[sprite->animNum][sprite->animCmdIndex].frame.duration & 0xFF;
+             sprite->animCmdIndex++;
+             result = sprite->animCmdIndex;
 diff --git a/src/pokemon_size_record.c b/src/pokemon_size_record.c
 index 7c88e5bf10434d9df4186197f7eb096aaed6feda..dce52b9793bdcef23561b1626b739e9d5f813ffe 100644
 --- a/src/pokemon_size_record.c
@@ -10632,10 +10913,20 @@ index 19541d88d810356d59f29b0029babb7da6dc9415..696f799fb0c0b8a4fa8cdc6326fb7e4a
      for (i = 0; i < sTilemapUtil[id].cur.height; i++)
      {
 diff --git a/src/pokemon_summary_screen.c b/src/pokemon_summary_screen.c
-index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb735187f45 100644
+index 21109f9c3cb325fa4da3d05145833f7341c26f65..c247d7d73e04e8b4e7a847a8e3f1bfa5b3b6d792 100644
 --- a/src/pokemon_summary_screen.c
 +++ b/src/pokemon_summary_screen.c
-@@ -143,7 +143,7 @@ static EWRAM_DATA struct PokemonSummaryScreenData
+@@ -46,6 +46,9 @@
+ #include "constants/region_map_sections.h"
+ #include "constants/rgb.h"
+ #include "constants/songs.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ enum {
+     PSS_PAGE_INFO,
+@@ -143,7 +146,7 @@ static EWRAM_DATA struct PokemonSummaryScreenData
          u8 ribbonCount; // 0x6
          u8 ailment; // 0x7
          u8 abilityNum; // 0x8
@@ -10644,7 +10935,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          u8 metLevel; // 0xA
          u8 metGame; // 0xB
          u32 pid; // 0xC
-@@ -228,12 +228,12 @@ static bool8 CanReplaceMove(void);
+@@ -228,12 +231,12 @@ static bool8 CanReplaceMove(void);
  static void ShowCantForgetHMsWindow(u8);
  static void Task_HandleInputCantForgetHMsMoves(u8);
  static void DrawPagination(void);
@@ -10663,7 +10954,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
  static void TilemapFiveMovesDisplay(u16 *, u16, bool8);
  static void DrawPokerusCuredSymbol(struct Pokemon *);
  static void DrawExperienceProgressBar(struct Pokemon *);
-@@ -356,52 +356,32 @@ static const struct BgTemplate sBgTemplates[] =
+@@ -356,52 +359,32 @@ static const struct BgTemplate sBgTemplates[] =
      },
  };
  
@@ -10734,7 +11025,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
  };
  static const s8 sMultiBattleOrder[] = {0, 2, 3, 1, 4, 5};
  static const struct WindowTemplate sSummaryTemplate[] =
-@@ -735,7 +715,7 @@ static void (*const sTextPrinterFunctions[])(void) =
+@@ -735,7 +718,7 @@ static void (*const sTextPrinterFunctions[])(void) =
      [PSS_PAGE_CONTEST_MOVES] = PrintContestMoves
  };
  
@@ -10743,7 +11034,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
  {
      [PSS_PAGE_INFO] = Task_PrintInfoPage,
      [PSS_PAGE_SKILLS] = Task_PrintSkillsPage,
-@@ -1475,8 +1455,8 @@ static void SetDefaultTilemaps(void)
+@@ -1475,8 +1458,8 @@ static void SetDefaultTilemaps(void)
  {
      if (sMonSummaryScreen->currPageIndex != PSS_PAGE_BATTLE_MOVES && sMonSummaryScreen->currPageIndex != PSS_PAGE_CONTEST_MOVES)
      {
@@ -10754,7 +11045,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      }
      else
      {
-@@ -1491,7 +1471,7 @@ static void SetDefaultTilemaps(void)
+@@ -1491,7 +1474,7 @@ static void SetDefaultTilemaps(void)
      }
  
      if (sMonSummaryScreen->summary.ailment == AILMENT_NONE)
@@ -10763,7 +11054,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      else if (sMonSummaryScreen->currPageIndex != PSS_PAGE_BATTLE_MOVES && sMonSummaryScreen->currPageIndex != PSS_PAGE_CONTEST_MOVES)
          PutWindowTilemap(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS);
  
-@@ -1529,10 +1509,69 @@ static void CloseSummaryScreen(u8 taskId)
+@@ -1529,10 +1512,197 @@ static void CloseSummaryScreen(u8 taskId)
      }
  }
  
@@ -10786,14 +11077,129 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
 +    sCtrTap.frame = gMain.vblankCounter1;
 +}
 +
-+static bool8 CtrSummary_TouchInput(u8 taskId)
++// The tap waiting, if it is still fresh and on the picture.
++static bool8 CtrSummary_TakeTap(s16 *x, s16 *y)
 +{
-+    s16 x = sCtrTap.x, y = sCtrTap.y;
-+
 +    if (!sCtrTap.pending)
 +        return FALSE;
 +    sCtrTap.pending = FALSE;
-+    if (gMain.vblankCounter1 - sCtrTap.frame > 30 || x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT)
++    if (gMain.vblankCounter1 - sCtrTap.frame > 30 || sCtrTap.x < 0 || sCtrTap.x >= DISPLAY_WIDTH
++     || sCtrTap.y < 0 || sCtrTap.y >= DISPLAY_HEIGHT)
++        return FALSE;
++    *x = sCtrTap.x;
++    *y = sCtrTap.y;
++    return TRUE;
++}
++
++// The five rows of the moves pages, as the move selector sits on them (the
++// fifth is the new move, or CANCEL), and the CANCEL corner.
++#define CTR_MOVE_LEFT 88
++#define CTR_MOVE_TOP  32
++#define CTR_MOVE_ROW  16
++
++static bool8 CtrSummary_OnCancel(s16 x, s16 y)
++{
++    return y < 16 && x >= 176;
++}
++
++static s8 CtrSummary_MoveRowAt(s16 x, s16 y)
++{
++    s16 row;
++
++    if (x < CTR_MOVE_LEFT || y < CTR_MOVE_TOP)
++        return -1;
++    row = (y - CTR_MOVE_TOP) / CTR_MOVE_ROW;
++    return row <= MAX_MON_MOVES ? row : -1;
++}
++
++enum {
++    CTR_TOUCH_NONE,
++    CTR_TOUCH_HANDLED, // acted on already (the selector moved)
++    CTR_TOUCH_A,
++    CTR_TOUCH_B,
++};
++
++// A tap while a move is being chosen or moved (maxIndex 4: the new move or
++// CANCEL can be chosen; 3: only the four moves). A row moves the selector
++// there, with its one sound; a tap on the row it is on is A. The CANCEL
++// corner is B; elsewhere nothing happens, so a stray touch does not give up
++// a move being learned.
++static u8 CtrSummary_MoveTouch(s16 *data, u8 *indexPtr, u8 maxIndex)
++{
++    s16 x, y;
++    s8 row;
++
++    if (!CtrSummary_TakeTap(&x, &y))
++        return CTR_TOUCH_NONE;
++    if (CtrSummary_OnCancel(x, y))
++        return CTR_TOUCH_B;
++    row = CtrSummary_MoveRowAt(x, y);
++    if (row < 0 || row > maxIndex)
++        return CTR_TOUCH_NONE;
++    if (row != MAX_MON_MOVES && sMonSummaryScreen->summary.moves[row] == MOVE_NONE)
++        return CTR_TOUCH_NONE;
++    if (row == *indexPtr)
++        return CTR_TOUCH_A;
++    data[0] = maxIndex;
++    ChangeSelectedMove(data, row - *indexPtr, indexPtr);
++    return CTR_TOUCH_HANDLED;
++}
++
++// The page dots, in the modes where the moves pages can be turned.
++static bool8 CtrSummary_PageTouch(u8 taskId, s16 x, s16 y)
++{
++    s16 page;
++
++    if (y >= 16 || x < 86)
++        return FALSE;
++    page = (x - 86) / 16;
++    if (page != sMonSummaryScreen->currPageIndex)
++        ChangePage(taskId, page > sMonSummaryScreen->currPageIndex ? 1 : -1);
++    return TRUE;
++}
++
++// Choosing the move to forget: the moves as in the selection, and the page
++// dots turn the page between the battle moves and the contest moves.
++static u8 CtrSummary_ReplaceTouch(u8 taskId, s16 *data)
++{
++    s16 x, y;
++    s8 row;
++
++    if (!CtrSummary_TakeTap(&x, &y))
++        return CTR_TOUCH_NONE;
++    if (CtrSummary_OnCancel(x, y))
++        return CTR_TOUCH_B;
++    if (CtrSummary_PageTouch(taskId, x, y))
++        return CTR_TOUCH_HANDLED;
++    row = CtrSummary_MoveRowAt(x, y);
++    if (row < 0)
++        return CTR_TOUCH_NONE;
++    if (row != MAX_MON_MOVES && sMonSummaryScreen->summary.moves[row] == MOVE_NONE)
++        return CTR_TOUCH_NONE;
++    if (row == sMonSummaryScreen->firstMoveIndex)
++        return CTR_TOUCH_A;
++    data[0] = MAX_MON_MOVES;
++    ChangeSelectedMove(data, row - sMonSummaryScreen->firstMoveIndex, &sMonSummaryScreen->firstMoveIndex);
++    return CTR_TOUCH_HANDLED;
++}
++
++static bool8 CtrSummary_AnyTap(void)
++{
++    s16 x, y;
++
++    return CtrSummary_TakeTap(&x, &y);
++}
++#define CTR_ANY_TAP() CtrSummary_AnyTap()
++#else
++#define CTR_ANY_TAP() FALSE
++#endif
++#ifdef PLATFORM_3DS
++
++static bool8 CtrSummary_TouchInput(u8 taskId)
++{
++    s16 x, y;
++
++    if (!CtrSummary_TakeTap(&x, &y))
 +        return FALSE;
 +
 +    if (y < 16 && x >= 176)
@@ -10809,6 +11215,19 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
 +
 +        if (x >= 86 && page != sMonSummaryScreen->currPageIndex)
 +            ChangePage(taskId, page > sMonSummaryScreen->currPageIndex ? 1 : -1);
++    }
++    else if (x >= CTR_MOVE_LEFT && (sMonSummaryScreen->currPageIndex == PSS_PAGE_BATTLE_MOVES
++          || sMonSummaryScreen->currPageIndex == PSS_PAGE_CONTEST_MOVES)
++          && CtrSummary_MoveRowAt(x, y) >= 0 && CtrSummary_MoveRowAt(x, y) < MAX_MON_MOVES
++          && sMonSummaryScreen->summary.moves[CtrSummary_MoveRowAt(x, y)] != MOVE_NONE)
++    {
++        // A move: its selection opens, and the tap goes on to choose it.
++        PlaySE(SE_SELECT);
++        SwitchToMoveSelection(taskId);
++        sCtrTap.pending = TRUE;
++        sCtrTap.x = x;
++        sCtrTap.y = y;
++        sCtrTap.frame = gMain.vblankCounter1;
 +    }
 +    else if (x < 88)
 +    {
@@ -10833,7 +11252,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          if (JOY_NEW(DPAD_UP))
          {
              ChangeSummaryPokemon(taskId, -1);
-@@ -1616,7 +1655,7 @@ static void ChangeSummaryPokemon(u8 taskId, s8 delta)
+@@ -1616,7 +1786,7 @@ static void ChangeSummaryPokemon(u8 taskId, s8 delta)
                  SetSpriteInvisibility(SPRITE_ARR_ID_STATUS, TRUE);
                  ClearWindowTilemap(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS);
                  ScheduleBgCopyTilemapToVram(0);
@@ -10842,7 +11261,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
              }
              sMonSummaryScreen->curMonIndex = monId;
              gTasks[taskId].data[0] = 0;
-@@ -1657,7 +1696,7 @@ static void Task_ChangeSummaryMon(u8 taskId)
+@@ -1657,7 +1827,7 @@ static void Task_ChangeSummaryMon(u8 taskId)
          break;
      case 7:
          if (sMonSummaryScreen->summary.ailment != AILMENT_NONE)
@@ -10851,7 +11270,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          DrawPokerusCuredSymbol(&sMonSummaryScreen->currentMon);
          data[1] = 0;
          break;
-@@ -1683,7 +1722,7 @@ static void Task_ChangeSummaryMon(u8 taskId)
+@@ -1683,7 +1853,7 @@ static void Task_ChangeSummaryMon(u8 taskId)
          gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_MON]].data[2] = 0;
          break;
      default:
@@ -10860,7 +11279,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          {
              data[0] = 0;
              gTasks[taskId].func = Task_HandleInput;
-@@ -1889,8 +1928,8 @@ static void SwitchToMoveSelection(u8 taskId)
+@@ -1889,8 +2059,8 @@ static void SwitchToMoveSelection(u8 taskId)
      ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_SPECIES);
      if (!gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_STATUS]].invisible)
          ClearWindowTilemap(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS);
@@ -10871,7 +11290,49 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      if (!sMonSummaryScreen->lockMovesFlag)
      {
          ClearWindowTilemap(PSS_LABEL_WINDOW_PROMPT_INFO);
-@@ -1996,8 +2035,8 @@ static void ChangeSelectedMove(s16 *taskData, s8 direction, u8 *moveIndexPtr)
+@@ -1914,6 +2084,17 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+ 
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
++#ifdef PLATFORM_3DS
++        u8 touch = CtrSummary_MoveTouch(data, &sMonSummaryScreen->firstMoveIndex, MAX_MON_MOVES);
++
++        if (touch == CTR_TOUCH_HANDLED)
++            return;
++#define CTR_A (touch == CTR_TOUCH_A)
++#define CTR_B (touch == CTR_TOUCH_B)
++#else
++#define CTR_A FALSE
++#define CTR_B FALSE
++#endif
+         if (JOY_NEW(DPAD_UP))
+         {
+             data[0] = 4;
+@@ -1924,7 +2105,7 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+             data[0] = 4;
+             ChangeSelectedMove(data, 1, &sMonSummaryScreen->firstMoveIndex);
+         }
+-        else if (JOY_NEW(A_BUTTON))
++        else if (JOY_NEW(A_BUTTON) || CTR_A)
+         {
+             if (sMonSummaryScreen->lockMovesFlag == TRUE
+              || (sMonSummaryScreen->newMove == MOVE_NONE && sMonSummaryScreen->firstMoveIndex == MAX_MON_MOVES))
+@@ -1942,11 +2123,13 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+                 PlaySE(SE_FAILURE);
+             }
+         }
+-        else if (JOY_NEW(B_BUTTON))
++        else if (JOY_NEW(B_BUTTON) || CTR_B)
+         {
+             PlaySE(SE_SELECT);
+             CloseMoveSelectMode(taskId);
+         }
++#undef CTR_A
++#undef CTR_B
+     }
+ }
+ 
+@@ -1996,8 +2179,8 @@ static void ChangeSelectedMove(s16 *taskData, s8 direction, u8 *moveIndexPtr)
          if (!gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_STATUS]].invisible)
              ClearWindowTilemap(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS);
          ScheduleBgCopyTilemapToVram(0);
@@ -10882,7 +11343,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      }
      if (*moveIndexPtr != MAX_MON_MOVES
          && newMoveIndex == MAX_MON_MOVES
-@@ -2006,8 +2045,8 @@ static void ChangeSelectedMove(s16 *taskData, s8 direction, u8 *moveIndexPtr)
+@@ -2006,8 +2189,8 @@ static void ChangeSelectedMove(s16 *taskData, s8 direction, u8 *moveIndexPtr)
          ClearWindowTilemap(PSS_LABEL_WINDOW_MOVES_POWER_ACC);
          ClearWindowTilemap(PSS_LABEL_WINDOW_MOVES_APPEAL_JAM);
          ScheduleBgCopyTilemapToVram(0);
@@ -10893,7 +11354,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      }
  
      *moveIndexPtr = newMoveIndex;
-@@ -2031,8 +2070,8 @@ static void CloseMoveSelectMode(u8 taskId)
+@@ -2031,8 +2214,8 @@ static void CloseMoveSelectMode(u8 taskId)
      {
          ClearWindowTilemap(PSS_LABEL_WINDOW_MOVES_POWER_ACC);
          ClearWindowTilemap(PSS_LABEL_WINDOW_MOVES_APPEAL_JAM);
@@ -10904,7 +11365,92 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      }
      ScheduleBgCopyTilemapToVram(0);
      ScheduleBgCopyTilemapToVram(1);
-@@ -2258,8 +2297,8 @@ static void ShowCantForgetHMsWindow(u8 taskId)
+@@ -2054,6 +2237,17 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+ 
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
++#ifdef PLATFORM_3DS
++        u8 touch = CtrSummary_MoveTouch(data, &sMonSummaryScreen->secondMoveIndex, MAX_MON_MOVES - 1);
++
++        if (touch == CTR_TOUCH_HANDLED)
++            return;
++#define CTR_A (touch == CTR_TOUCH_A)
++#define CTR_B (touch == CTR_TOUCH_B)
++#else
++#define CTR_A FALSE
++#define CTR_B FALSE
++#endif
+         if (JOY_NEW(DPAD_UP))
+         {
+             data[0] = 3;
+@@ -2064,17 +2258,19 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+             data[0] = 3;
+             ChangeSelectedMove(&data[0], 1, &sMonSummaryScreen->secondMoveIndex);
+         }
+-        else if (JOY_NEW(A_BUTTON))
++        else if (JOY_NEW(A_BUTTON) || CTR_A)
+         {
+             if (sMonSummaryScreen->firstMoveIndex == sMonSummaryScreen->secondMoveIndex)
+                 ExitMovePositionSwitchMode(taskId, FALSE);
+             else
+                 ExitMovePositionSwitchMode(taskId, TRUE);
+         }
+-        else if (JOY_NEW(B_BUTTON))
++        else if (JOY_NEW(B_BUTTON) || CTR_B)
+         {
+             ExitMovePositionSwitchMode(taskId, FALSE);
+         }
++#undef CTR_A
++#undef CTR_B
+     }
+ }
+ 
+@@ -2197,6 +2393,17 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+     {
+         if (gPaletteFade.active != TRUE)
+         {
++#ifdef PLATFORM_3DS
++            u8 touch = CtrSummary_ReplaceTouch(taskId, data);
++
++            if (touch == CTR_TOUCH_HANDLED)
++                return;
++#define CTR_A (touch == CTR_TOUCH_A)
++#define CTR_B (touch == CTR_TOUCH_B)
++#else
++#define CTR_A FALSE
++#define CTR_B FALSE
++#endif
+             if (JOY_NEW(DPAD_UP))
+             {
+                 data[0] = 4;
+@@ -2215,7 +2422,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+             {
+                 ChangePage(taskId, 1);
+             }
+-            else if (JOY_NEW(A_BUTTON))
++            else if (JOY_NEW(A_BUTTON) || CTR_A)
+             {
+                 if (CanReplaceMove() == TRUE)
+                 {
+@@ -2231,7 +2438,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+                     ShowCantForgetHMsWindow(taskId);
+                 }
+             }
+-            else if (JOY_NEW(B_BUTTON))
++            else if (JOY_NEW(B_BUTTON) || CTR_B)
+             {
+                 StopPokemonAnimations();
+                 PlaySE(SE_SELECT);
+@@ -2239,6 +2446,8 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+                 gSpecialVar_0x8005 = MAX_MON_MOVES;
+                 BeginCloseSummaryScreen(taskId);
+             }
++#undef CTR_A
++#undef CTR_B
+         }
+     }
+ }
+@@ -2258,8 +2467,8 @@ static void ShowCantForgetHMsWindow(u8 taskId)
      ClearWindowTilemap(PSS_LABEL_WINDOW_MOVES_POWER_ACC);
      ClearWindowTilemap(PSS_LABEL_WINDOW_MOVES_APPEAL_JAM);
      ScheduleBgCopyTilemapToVram(0);
@@ -10915,7 +11461,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      PrintHMMovesCantBeForgotten();
      gTasks[taskId].func = Task_HandleInputCantForgetHMsMoves;
  }
-@@ -2269,7 +2308,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+@@ -2269,7 +2478,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
  {
      s16 *data = gTasks[taskId].data;
      u16 move;
@@ -10924,7 +11470,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
      {
          if (JOY_NEW(DPAD_UP))
          {
-@@ -2297,8 +2336,8 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+@@ -2297,8 +2506,8 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
                  move = sMonSummaryScreen->summary.moves[sMonSummaryScreen->firstMoveIndex];
                  gTasks[taskId].func = Task_HandleReplaceMoveInput;
                  ChangePage(taskId, -1);
@@ -10935,7 +11481,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
              }
          }
          else if (JOY_NEW(DPAD_RIGHT) || GetLRKeysPressed() == MENU_R_PRESSED)
-@@ -2311,8 +2350,8 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+@@ -2311,11 +2520,11 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
                  move = sMonSummaryScreen->summary.moves[sMonSummaryScreen->firstMoveIndex];
                  gTasks[taskId].func = Task_HandleReplaceMoveInput;
                  ChangePage(taskId, 1);
@@ -10945,8 +11491,12 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
 +                HandleAppealJamTilemap(9, -2, move);
              }
          }
-         else if (JOY_NEW(A_BUTTON | B_BUTTON))
-@@ -2323,8 +2362,8 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+-        else if (JOY_NEW(A_BUTTON | B_BUTTON))
++        else if (JOY_NEW(A_BUTTON | B_BUTTON) || CTR_ANY_TAP())
+         {
+             ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_SPECIES);
+             if (!gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_STATUS]].invisible)
+@@ -2323,8 +2532,8 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
              move = sMonSummaryScreen->summary.moves[sMonSummaryScreen->firstMoveIndex];
              PrintMoveDetails(move);
              ScheduleBgCopyTilemapToVram(0);
@@ -10957,7 +11507,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
              gTasks[taskId].func = Task_HandleReplaceMoveInput;
          }
      }
-@@ -2402,69 +2441,65 @@ static void DrawPagination(void) // Updates the pagination dots at the top of th
+@@ -2402,69 +2611,75 @@ static void DrawPagination(void) // Updates the pagination dots at the top of th
      Free(tilemap);
  }
  
@@ -10969,23 +11519,33 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
 -    CpuFill16(slidingWindow->defaultTile, alloced, slidingWindow->width * 2 * slidingWindow->height);
 -    if (slidingWindow->width != visibleColumns)
 +    u16 *alloced = Alloc(unkStruct->field_6 * 2 * unkStruct->field_7);
-+    CpuFill16(unkStruct->field_4, alloced, unkStruct->field_6 * 2 * unkStruct->field_7);
-+    if (unkStruct->field_6 != c)
++    const u16 *gfx = unkStruct->gfx;
++#ifdef PORT_BRIDGE
++    // Read from the loaded tilemap, not from the INCBIN's stub.
++    gfx = Port_ResolveAssetPointerSized(gfx, unkStruct->field_6 * 2 * unkStruct->field_7);
++    if (gfx == NULL)
      {
 -        if (!isOpeningToTheLeft)
++        Free(alloced);
++        return;
++    }
++#endif
++    CpuFill16(unkStruct->field_4, alloced, unkStruct->field_6 * 2 * unkStruct->field_7);
++    if (unkStruct->field_6 != c)
++    {
 +        if (!d)
          {
 -            for (i = 0; i < slidingWindow->height; i++)
 -                CpuCopy16(&slidingWindow->gfx[visibleColumns + slidingWindow->width * i], &alloced[slidingWindow->width * i], (slidingWindow->width - visibleColumns) * 2);
 +            for (i = 0; i < unkStruct->field_7; i++)
-+                CpuCopy16(&unkStruct->gfx[c + unkStruct->field_6 * i], &alloced[unkStruct->field_6 * i], (unkStruct->field_6 - c) * 2);
++                CpuCopy16(&gfx[c + unkStruct->field_6 * i], &alloced[unkStruct->field_6 * i], (unkStruct->field_6 - c) * 2);
          }
          else
          {
 -            for (i = 0; i < slidingWindow->height; i++)
 -                CpuCopy16(&slidingWindow->gfx[slidingWindow->width * i], &alloced[visibleColumns + slidingWindow->width * i], (slidingWindow->width - visibleColumns) * 2);
 +            for (i = 0; i < unkStruct->field_7; i++)
-+                CpuCopy16(&unkStruct->gfx[unkStruct->field_6 * i], &alloced[c + unkStruct->field_6 * i], (unkStruct->field_6 - c) * 2);
++                CpuCopy16(&gfx[unkStruct->field_6 * i], &alloced[c + unkStruct->field_6 * i], (unkStruct->field_6 - c) * 2);
          }
      }
  
@@ -11056,7 +11616,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          {
              if (sMonSummaryScreen->currPageIndex == PSS_PAGE_BATTLE_MOVES)
                  PutWindowTilemap(PSS_LABEL_WINDOW_MOVES_POWER_ACC);
-@@ -2482,46 +2517,46 @@ static void Task_SlidePowerAccWindow(u8 taskId)
+@@ -2482,46 +2697,46 @@ static void Task_SlidePowerAccWindow(u8 taskId)
      ScheduleBgCopyTilemapToVram(2);
  }
  
@@ -11123,7 +11683,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          }
          else
          {
-@@ -2538,37 +2573,37 @@ static void Task_SlideAppealJamWindow(u8 taskId)
+@@ -2538,37 +2753,37 @@ static void Task_SlideAppealJamWindow(u8 taskId)
      ScheduleBgCopyTilemapToVram(2);
  }
  
@@ -11180,7 +11740,7 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
          {
              CreateSetStatusSprite();
              PutWindowTilemap(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS);
-@@ -2578,10 +2613,6 @@ static void Task_SlideStatusWindow(u8 taskId)
+@@ -2578,33 +2793,36 @@ static void Task_SlideStatusWindow(u8 taskId)
      }
  }
  
@@ -11191,6 +11751,42 @@ index 21109f9c3cb325fa4da3d05145833f7341c26f65..eb42715acdec5850d50e19b4775f9bb7
  // Toggles the "Cancel" window that appears when selecting a move
  static void TilemapFiveMovesDisplay(u16 *dst, u16 palette, bool8 remove)
  {
+     u16 i, id;
++    const u16 *cancel = gSummaryScreen_MoveEffect_Cancel_Tilemap;
+ 
++#ifdef PORT_BRIDGE
++    // Read from the loaded tilemap, not from the INCBIN's stub.
++    cancel = Port_ResolveAssetPointerSized(cancel, 60 * sizeof(u16));
++    if (cancel == NULL)
++        return;
++#endif
+     palette *= 0x1000;
+     id = 0x56A;
+     if (!remove)
+     {
+         for (i = 0; i < 20; i++)
+         {
+-            dst[id + i] = gSummaryScreen_MoveEffect_Cancel_Tilemap[i] + palette;
+-            dst[id + i + 0x20] = gSummaryScreen_MoveEffect_Cancel_Tilemap[i] + palette;
+-            dst[id + i + 0x40] = gSummaryScreen_MoveEffect_Cancel_Tilemap[i + 20] + palette;
++            dst[id + i] = cancel[i] + palette;
++            dst[id + i + 0x20] = cancel[i] + palette;
++            dst[id + i + 0x40] = cancel[i + 20] + palette;
+         }
+     }
+     else // Remove
+     {
+         for (i = 0; i < 20; i++)
+         {
+-            dst[id + i] = gSummaryScreen_MoveEffect_Cancel_Tilemap[i + 20] + palette;
+-            dst[id + i + 0x20] = gSummaryScreen_MoveEffect_Cancel_Tilemap[i + 40] + palette;
+-            dst[id + i + 0x40] = gSummaryScreen_MoveEffect_Cancel_Tilemap[i + 40] + palette;
++            dst[id + i] = cancel[i + 20] + palette;
++            dst[id + i + 0x20] = cancel[i + 40] + palette;
++            dst[id + i + 0x40] = cancel[i + 40] + palette;
+         }
+     }
+ }
 diff --git a/src/pokenav.c b/src/pokenav.c
 index 03f48ee3669c3411f124ebeaf5fa936809cccf6c..c93bc0d002a8f736cf1a4b718c7a11285fa7ebde 100644
 --- a/src/pokenav.c

@@ -173,6 +173,12 @@ build/root/src/pokemon_storage_system.o: compat/ctr_gba_centred.h $(ROOT)/includ
 build/root/src/item_menu.o: FULLCFLAGS += -DCTR_GBA_STAGE -DCTR_CENTRED_BAG \
 	-include $(abspath compat/ctr_gba_centred.h)
 build/root/src/item_menu.o: compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h
+# The party menu as the game draws it, on the bottom screen: left of the
+# column from the field, over the whole screen from a battle, a contest or a
+# facility.
+build/root/src/party_menu.o: FULLCFLAGS += -DCTR_GBA_STAGE -DCTR_CENTRED_PARTY \
+	-include $(abspath compat/ctr_gba_centred.h)
+build/root/src/party_menu.o: compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h
 # The Pokédex as the game draws it, left of the column: its list, search,
 # entries, area, cry and size screens. pokedex.c installs their VBlank
 # callbacks.

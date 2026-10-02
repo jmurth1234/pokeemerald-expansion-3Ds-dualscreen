@@ -1608,6 +1608,9 @@ static const CentredFill sCentredFills[CTR_CENTRED_SCREENS] =
     /* The Pokédex: a tile its screen on show names (CentredFillOf), or else
      * whatever is at the back of it. */
     [CTR_CENTRED_POKEDEX] = {.backmost = true},
+    /* The party menu's olive frame colour: tile 2 of its palette 1, on BG1. */
+    [CTR_CENTRED_PARTY] = {.layers = 1u << 1, .tile = true, .entry = true, .tileEntry = 0x1002},
+    [CTR_CENTRED_PARTY_WHOLE] = {.layers = 1u << 1, .tile = true, .entry = true, .tileEntry = 0x1002},
 };
 
 int CtrPokenavList_Bg(void);
@@ -3626,14 +3629,15 @@ bool CtrVideo_BottomInUse(void) { return sBottomInUse; }
 /* The screens drawn over the whole bottom screen, rather than left of the column. */
 static bool BottomWhole(unsigned screen)
 {
-    return screen == CTR_CENTRED_STORAGE || screen == CTR_CENTRED_SUMMARY || screen == CTR_CENTRED_BAG_WHOLE;
+    return screen == CTR_CENTRED_STORAGE || screen == CTR_CENTRED_SUMMARY || screen == CTR_CENTRED_BAG_WHOLE
+        || screen == CTR_CENTRED_PARTY_WHOLE;
 }
 
 /* The screens drawn on the bottom screen at all. */
 static bool BottomScreen(unsigned screen)
 {
     return screen == CTR_CENTRED_POKENAV || screen == CTR_CENTRED_BAG || screen == CTR_CENTRED_POKEDEX
-        || BottomWhole(screen);
+        || screen == CTR_CENTRED_PARTY || BottomWhole(screen);
 }
 
 bool CtrVideo_BottomWhole(void) { return sBottomInUse && BottomWhole(sCentredScreen); }
@@ -3777,7 +3781,8 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     {
         if (target != sBottom) Compose();
         else if (BottomWhole(sCentredScreen)) StorageCompose(STORAGE_MARGIN_X);
-        else if (sCentredScreen == CTR_CENTRED_BAG || sCentredScreen == CTR_CENTRED_POKEDEX) StorageCompose(0);
+        else if (sCentredScreen == CTR_CENTRED_BAG || sCentredScreen == CTR_CENTRED_POKEDEX
+                 || sCentredScreen == CTR_CENTRED_PARTY) StorageCompose(0);
         else NavCompose();
     }
     sLayerExclude = 0;

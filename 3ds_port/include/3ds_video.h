@@ -116,6 +116,14 @@ enum
     CTR_CENTRED_BAG_WHOLE,
     /* The Pokédex, opened from the field: left of the column as the bag. */
     CTR_CENTRED_POKEDEX,
+    /*
+     * The party menu: opened from the field (the start menu, an item used or
+     * given from the bag) left of the column, the picture in its middle;
+     * from a battle, a contest or a facility over the whole bottom screen.
+     * Its olive frame is carried on around it.
+     */
+    CTR_CENTRED_PARTY,
+    CTR_CENTRED_PARTY_WHOLE,
     CTR_CENTRED_SCREENS
 };
 void CtrVideo_SetCentred(unsigned screen);
