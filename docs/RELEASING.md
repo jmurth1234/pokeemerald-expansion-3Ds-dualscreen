@@ -18,6 +18,90 @@ between the two is `builder/emerald3ds_builder/webmanifest.py`; keep asset
 names as they are, or bump the manifest's `schemaVersion` together with the
 website.
 
+## Release checklist (with the website)
+
+The website (`ZallaxDev/emerald-3ds-website`) builds the game in the player's
+browser from the assets of the **latest published release**. Since the
+release after v0.1.2 every release must follow this list; skipping a step
+leaves the site without a web builder or without Quick Update for that
+version.
+
+1. **Code and version.** The release is made from `main` with the web-payload
+   tooling merged (`builder/emerald3ds_builder/web.py`, `webmanifest.py`,
+   `tools/build_web_payload.py`). Set `__version__` in
+   `builder/emerald3ds_builder/__init__.py` and move `## Unreleased` in
+   `CHANGELOG.md` to `## X.Y.Z — YYYY-MM-DD` (the site links changelog
+   headings to releases by that version).
+2. **Build all assets** with `tools/build_release.py` (see *Steps* below).
+   `dist/` must then contain exactly:
+
+   | File | Used by the site for |
+   |---|---|
+   | `Emerald3DS-WebPayload.zip` | the web builder (downloaded by the browser) |
+   | `web-manifest.json` | knowing, without downloading the payload, that the release can be built on the web, which ROM it accepts, its data ABI |
+   | `Emerald3DS.3dsx` | Quick Update (path 2: players who keep their `emerald3ds.pak`) |
+   | `Emerald3DS.smdh` | listed with the 3DSX |
+   | `Emerald3DS-vX.Y.Z-Windows.zip` | the Windows builder (not linked by the site) |
+   | `SHA256SUMS.txt` | checksums of everything above |
+
+   Never rename these files: the site recognises assets by name. The
+   manifest's `releaseTag` must equal the Git tag (`vX.Y.Z`), which
+   `build_release.py` guarantees.
+3. **Audit** (already run by `build_release.py`; to repeat it):
+   `python tools/release_audit.py --zip dist/Emerald3DS-WebPayload.zip --strict --web-payload`.
+4. **Test before publishing**, with the real ROM:
+   - Windows ZIP: clean machine, build, install, boot (as before).
+   - Web builder: open the website's `/build?payload=local` (local
+     `npm run dev` or any deployed copy of the site), choose
+     `dist/Emerald3DS-WebPayload.zip` and the ROM, build, copy the ZIP to the SD
+     card and boot the game. Use the payload from `dist/`, not the synthetic
+     test payload.
+   - Optional, once per change to the voxel generators: compare the packs of
+     both runners (they must be byte-identical):
+
+     ```
+     python -c "import sys; sys.path.insert(0, 'builder'); from pathlib import Path; \
+     from emerald3ds_builder.build import Payload, build_pack; \
+     p = Payload(Path('dist/Emerald3DS-vX.Y.Z-Windows/payload')); \
+     build_pack(Path('baserom.gba'), p, Path('/tmp/sub.pak')); \
+     build_pack(Path('baserom.gba'), p, Path('/tmp/inp.pak'), runner='inprocess')"
+     cmp /tmp/sub.pak /tmp/inp.pak
+     ```
+5. **Publish the GitHub release**: tag `vX.Y.Z`, **published** (drafts are
+   invisible to the site), not marked pre-release unless it really is one (a
+   pre-release is not offered as the latest version while a normal release
+   exists). Attach every file of step 2, for example:
+
+   ```
+   gh release create vX.Y.Z --title "Alpha X.Y.Z" --notes-file notes.md \
+       dist/Emerald3DS-WebPayload.zip dist/web-manifest.json \
+       dist/Emerald3DS.3dsx dist/Emerald3DS.smdh \
+       dist/Emerald3DS-vX.Y.Z-Windows.zip dist/SHA256SUMS.txt
+   ```
+
+   The release notes' bullet lists become the highlights on the site's home
+   page.
+6. **Check the website** (within 5 minutes, its cache time):
+   `/api/releases/latest` shows the new tag with `"manifestStatus": "ok"`,
+   `"capabilities": {"webBuilder": true, "standalone3dsx": true, ...}` and a
+   `quickUpdate` status; `/build` offers only the ROM picker; a real build on
+   the deployed site boots.
+
+### Quick Update (path 2)
+
+The site offers "download only `Emerald3DS.3dsx`" to players of the previous
+release when both releases' `web-manifest.json` have the same `dataAbi` and
+`packSchema`. The data ABI is computed from the pack contents, so it changes by
+itself whenever a release changes the game data: nothing to set by hand, just
+always attach `web-manifest.json`. Consequences:
+
+- First release with a web payload: v0.1.2 has no manifest, so the site cannot
+  prove compatibility; it offers players a local check of their own
+  `emerald3ds.pak` header instead (or the full build).
+- From then on, a release that keeps the data gets a direct 3DSX download; one
+  that changes it sends everyone to the web builder. The game itself also
+  refuses an incompatible pack on start-up.
+
 ## Prerequisites (maintainer machine)
 
 - A tree from `tools/bootstrap.py --make` (or the maintainer's workspace).
