@@ -8,6 +8,8 @@ paths = [
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
     "Emerald3DS-v*-Windows/payload/Emerald3DS.3dsx",
     "patches/pokeemerald-expansion/0001-port.patch",
+    # the same executable inside Emerald3DS-WebPayload.zip
+    "payload/Emerald3DS.3dsx",
 ]
 
 [media]
