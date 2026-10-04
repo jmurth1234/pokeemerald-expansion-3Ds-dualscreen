@@ -4155,7 +4155,7 @@ static float BattleScenerySway(unsigned reg)
     return (float)((int)((Reg(reg) + 128) & 255) - 128);
 }
 
-static void RenderBattleWorld(uint32_t clear)
+static void RenderBattleWorld(uint32_t clear, C3D_RenderTarget *target, float eyeOffset)
 {
     const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
@@ -4166,7 +4166,7 @@ static void RenderBattleWorld(uint32_t clear)
     /* The world is BG3: its brightness is BG3's. */
     CtrVoxel_SetBrightness((control & 0x08) ? bright : 0.0f, 0.0f, effect == 2);
     C2D_TargetClear(sLogical, clear);
-    CtrVoxel_Draw(sLogical, 0.0f);
+    CtrVoxel_Draw(sLogical, eyeOffset);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     GpuSplit();
 
@@ -4177,8 +4177,8 @@ static void RenderBattleWorld(uint32_t clear)
     bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
     if (bloom > 0.005f)
         VoxelBloomPrepare();
-    C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
-    C2D_SceneBegin(sTop);
+    C2D_TargetClear(target, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(target);
     C2D_ViewReset();
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
@@ -4216,7 +4216,7 @@ static void RenderBattleWorld(uint32_t clear)
     GpuSplit();
 
     BlendForget();
-    C2D_SceneBegin(sTop);
+    C2D_SceneBegin(target);
     C2D_ViewReset();
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
@@ -5449,7 +5449,13 @@ void CtrVideo_Present(void)
     else if (sBattleWorld)
     {
         sPlanes = 0;
-        RenderBattleWorld(clear);
+        if (stereo)
+        {
+            RenderBattleWorld(clear, sTop, -slider);
+            RenderBattleWorld(clear, sTopRight, slider);
+        }
+        else
+            RenderBattleWorld(clear, sTop, 0.0f);
     }
 #endif
     else if (!stereo)

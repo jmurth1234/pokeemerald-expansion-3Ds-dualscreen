@@ -25313,10 +25313,20 @@ index 034c187e1f..4f5dfc97a9 100644
      {
          if (JOY_NEW(A_BUTTON))
 diff --git c/src/pokemon_summary_screen.c w/src/pokemon_summary_screen.c
-index 801dfe07ed..7b42781612 100644
+index 801dfe07ed..04d42a4aac 100644
 --- c/src/pokemon_summary_screen.c
 +++ w/src/pokemon_summary_screen.c
-@@ -1736,10 +1736,71 @@ static void HandleMoveRelearnerInput(u8 taskId)
+@@ -51,6 +51,9 @@
+ #include "constants/region_map_sections.h"
+ #include "constants/rgb.h"
+ #include "constants/songs.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ // Screen titles (upper left)
+ #define PSS_LABEL_WINDOW_POKEMON_INFO_TITLE 0
+@@ -1736,10 +1739,189 @@ static void HandleMoveRelearnerInput(u8 taskId)
      }
  }
  
@@ -25340,6 +25350,124 @@ index 801dfe07ed..7b42781612 100644
 +    sCtrTap.y = y;
 +    sCtrTap.frame = gMain.vblankCounter1;
 +}
++
++// The tap waiting, if it is still fresh and on the picture.
++static bool8 CtrSummary_TakeTap(s16 *x, s16 *y)
++{
++    if (!sCtrTap.pending)
++        return FALSE;
++    sCtrTap.pending = FALSE;
++    if (gMain.vblankCounter1 - sCtrTap.frame > 30 || sCtrTap.x < 0 || sCtrTap.x >= DISPLAY_WIDTH
++     || sCtrTap.y < 0 || sCtrTap.y >= DISPLAY_HEIGHT)
++        return FALSE;
++    *x = sCtrTap.x;
++    *y = sCtrTap.y;
++    return TRUE;
++}
++
++// The five rows of the moves pages, as the move selector sits on them (the
++// fifth is the new move, or CANCEL), and the CANCEL corner.
++#define CTR_MOVE_LEFT 88
++#define CTR_MOVE_TOP  32
++#define CTR_MOVE_ROW  16
++
++static bool8 CtrSummary_OnCancel(s16 x, s16 y)
++{
++    return y < 16 && x >= 176;
++}
++
++static s8 CtrSummary_MoveRowAt(s16 x, s16 y)
++{
++    s16 row;
++
++    if (x < CTR_MOVE_LEFT || y < CTR_MOVE_TOP)
++        return -1;
++    row = (y - CTR_MOVE_TOP) / CTR_MOVE_ROW;
++    return row <= MAX_MON_MOVES ? row : -1;
++}
++
++enum {
++    CTR_TOUCH_NONE,
++    CTR_TOUCH_HANDLED, // acted on already (the selector moved)
++    CTR_TOUCH_A,
++    CTR_TOUCH_B,
++};
++
++// A tap while a move is being chosen or moved (maxIndex 4: the new move or
++// CANCEL can be chosen; 3: only the four moves). A row moves the selector
++// there, with its one sound; a tap on the row it is on is A. The CANCEL
++// corner is B; elsewhere nothing happens, so a stray touch does not give up
++// a move being learned.
++static u8 CtrSummary_MoveTouch(s16 *data, u8 *indexPtr, u8 maxIndex)
++{
++    s16 x, y;
++    s8 row;
++
++    if (!CtrSummary_TakeTap(&x, &y))
++        return CTR_TOUCH_NONE;
++    if (CtrSummary_OnCancel(x, y))
++        return CTR_TOUCH_B;
++    row = CtrSummary_MoveRowAt(x, y);
++    if (row < 0 || row > maxIndex)
++        return CTR_TOUCH_NONE;
++    if (row != MAX_MON_MOVES && sMonSummaryScreen->summary.moves[row] == MOVE_NONE)
++        return CTR_TOUCH_NONE;
++    if (row == *indexPtr)
++        return CTR_TOUCH_A;
++    data[0] = maxIndex;
++    ChangeSelectedMove(data, row - *indexPtr, indexPtr);
++    return CTR_TOUCH_HANDLED;
++}
++
++// The page dots, in the modes where the moves pages can be turned.
++static bool8 CtrSummary_PageTouch(u8 taskId, s16 x, s16 y)
++{
++    s16 page;
++
++    if (y >= 16 || x < 86)
++        return FALSE;
++    page = (x - 86) / 16;
++    if (page != sMonSummaryScreen->currPageIndex)
++        ChangePage(taskId, page > sMonSummaryScreen->currPageIndex ? 1 : -1);
++    return TRUE;
++}
++
++// Choosing the move to forget: the moves as in the selection, and the page
++// dots turn the page between the battle moves and the contest moves.
++static u8 CtrSummary_ReplaceTouch(u8 taskId, s16 *data)
++{
++    s16 x, y;
++    s8 row;
++
++    if (!CtrSummary_TakeTap(&x, &y))
++        return CTR_TOUCH_NONE;
++    if (CtrSummary_OnCancel(x, y))
++        return CTR_TOUCH_B;
++    if (CtrSummary_PageTouch(taskId, x, y))
++        return CTR_TOUCH_HANDLED;
++    row = CtrSummary_MoveRowAt(x, y);
++    if (row < 0)
++        return CTR_TOUCH_NONE;
++    if (row != MAX_MON_MOVES && sMonSummaryScreen->summary.moves[row] == MOVE_NONE)
++        return CTR_TOUCH_NONE;
++    if (row == sMonSummaryScreen->firstMoveIndex)
++        return CTR_TOUCH_A;
++    data[0] = MAX_MON_MOVES;
++    ChangeSelectedMove(data, row - sMonSummaryScreen->firstMoveIndex, &sMonSummaryScreen->firstMoveIndex);
++    return CTR_TOUCH_HANDLED;
++}
++
++static bool8 CtrSummary_AnyTap(void)
++{
++    s16 x, y;
++
++    return CtrSummary_TakeTap(&x, &y);
++}
++#define CTR_ANY_TAP() CtrSummary_AnyTap()
++#else
++#define CTR_ANY_TAP() FALSE
++#endif
++#ifdef PLATFORM_3DS
 +
 +static bool8 CtrSummary_TouchInput(u8 taskId)
 +{
@@ -25388,6 +25516,142 @@ index 801dfe07ed..7b42781612 100644
          if (JOY_NEW(DPAD_UP))
          {
              ChangeSummaryPokemon(taskId, -1);
+@@ -2325,6 +2507,17 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+ 
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
++#ifdef PLATFORM_3DS
++        u8 touch = CtrSummary_MoveTouch(data, &sMonSummaryScreen->firstMoveIndex, MAX_MON_MOVES);
++
++        if (touch == CTR_TOUCH_HANDLED)
++            return;
++#define CTR_A (touch == CTR_TOUCH_A)
++#define CTR_B (touch == CTR_TOUCH_B)
++#else
++#define CTR_A FALSE
++#define CTR_B FALSE
++#endif
+         if (JOY_NEW(DPAD_UP))
+         {
+             data[0] = 4;
+@@ -2335,7 +2528,7 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+             data[0] = 4;
+             ChangeSelectedMove(data, 1, &sMonSummaryScreen->firstMoveIndex);
+         }
+-        else if (JOY_NEW(A_BUTTON))
++        else if (JOY_NEW(A_BUTTON) || CTR_A)
+         {
+             if (sMonSummaryScreen->lockMovesFlag == TRUE
+                 || (sMonSummaryScreen->newMove == MOVE_NONE && sMonSummaryScreen->firstMoveIndex == MAX_MON_MOVES))
+@@ -2355,11 +2548,13 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+                 PlaySE(SE_FAILURE);
+             }
+         }
+-        else if (JOY_NEW(B_BUTTON))
++        else if (JOY_NEW(B_BUTTON) || CTR_B)
+         {
+             PlaySE(SE_SELECT);
+             CloseMoveSelectMode(taskId);
+         }
++#undef CTR_A
++#undef CTR_B
+     }
+ }
+ 
+@@ -2471,6 +2666,17 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+ 
+     if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
+     {
++#ifdef PLATFORM_3DS
++        u8 touch = CtrSummary_MoveTouch(data, &sMonSummaryScreen->secondMoveIndex, MAX_MON_MOVES - 1);
++
++        if (touch == CTR_TOUCH_HANDLED)
++            return;
++#define CTR_A (touch == CTR_TOUCH_A)
++#define CTR_B (touch == CTR_TOUCH_B)
++#else
++#define CTR_A FALSE
++#define CTR_B FALSE
++#endif
+         if (JOY_NEW(DPAD_UP))
+         {
+             data[0] = 3;
+@@ -2481,17 +2687,19 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+             data[0] = 3;
+             ChangeSelectedMove(&data[0], 1, &sMonSummaryScreen->secondMoveIndex);
+         }
+-        else if (JOY_NEW(A_BUTTON))
++        else if (JOY_NEW(A_BUTTON) || CTR_A)
+         {
+             if (sMonSummaryScreen->firstMoveIndex == sMonSummaryScreen->secondMoveIndex)
+                 ExitMovePositionSwitchMode(taskId, FALSE);
+             else
+                 ExitMovePositionSwitchMode(taskId, TRUE);
+         }
+-        else if (JOY_NEW(B_BUTTON))
++        else if (JOY_NEW(B_BUTTON) || CTR_B)
+         {
+             ExitMovePositionSwitchMode(taskId, FALSE);
+         }
++#undef CTR_A
++#undef CTR_B
+     }
+ }
+ 
+@@ -2614,6 +2822,17 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+     {
+         if (gPaletteFade.active != TRUE)
+         {
++#ifdef PLATFORM_3DS
++            u8 touch = CtrSummary_ReplaceTouch(taskId, data);
++
++            if (touch == CTR_TOUCH_HANDLED)
++                return;
++#define CTR_A (touch == CTR_TOUCH_A)
++#define CTR_B (touch == CTR_TOUCH_B)
++#else
++#define CTR_A FALSE
++#define CTR_B FALSE
++#endif
+             if (JOY_NEW(DPAD_UP))
+             {
+                 data[0] = 4;
+@@ -2632,7 +2851,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+             {
+                 ChangePage(taskId, 1);
+             }
+-            else if (JOY_NEW(A_BUTTON))
++            else if (JOY_NEW(A_BUTTON) || CTR_A)
+             {
+                 if (CanReplaceMove() == TRUE)
+                 {
+@@ -2649,7 +2868,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+                     ShowCantForgetHMsWindow(taskId);
+                 }
+             }
+-            else if (JOY_NEW(B_BUTTON))
++            else if (JOY_NEW(B_BUTTON) || CTR_B)
+             {
+                 StopPokemonAnimations();
+                 PlaySE(SE_SELECT);
+@@ -2658,6 +2877,8 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+                 gSpecialVar_Result = FALSE;
+                 BeginCloseSummaryScreen(taskId);
+             }
++#undef CTR_A
++#undef CTR_B
+         }
+     }
+ }
+@@ -2735,7 +2956,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+                 PositionAppealJamSlidingWindow(9, -2, move);
+             }
+         }
+-        else if (JOY_NEW(A_BUTTON | B_BUTTON))
++        else if (JOY_NEW(A_BUTTON | B_BUTTON) || CTR_ANY_TAP())
+         {
+             ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_SPECIES);
+             if (!gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_STATUS]].invisible)
 diff --git c/src/pokenav.c w/src/pokenav.c
 index c826d58ea7..a133fb0c4b 100644
 --- c/src/pokenav.c
