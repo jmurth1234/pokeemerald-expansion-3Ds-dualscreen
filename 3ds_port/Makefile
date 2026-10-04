@@ -176,7 +176,7 @@ devdata: romfs/engine/abi.bin
 	"$(PYTHON)" $(SCRIPTS)/staging.py devdata --romfs romfs --out build/devdata
 
 verify: all verify-input
-	"$(PYTHON)" scripts/verify_build.py --devkitarm "$(DEVKITARM)" --stage 9 --video 1 --full 1
+	"$(PYTHON)" scripts/verify_build.py --devkitarm "$(DEVKITARM)" --stage 9 --video 1 --full 1 --expansion $(if $(wildcard $(ROOT)/include/config/caps.h),1,0)
 
 .PHONY: verify-input
 verify-input: build/input_test.exe

@@ -27,7 +27,7 @@ bool8 MetatileBehavior_IsPC(u8 b) { return b == MB_PC; }
 bool8 MetatileBehavior_IsSecretBasePC(u8 b) { return b == MB_SECRET_BASE_PC; }
 bool8 MetatileBehavior_IsPlayerRoomPCOn(u8 b) { return b == MB_PLAYER_ROOM_PC_ON; }
 static const struct ObjectEventGraphicsInfo *sDynamicInfo;
-const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u8 id)
+const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u16 id)
 { return id == 1 ? sDynamicInfo : NULL; }
 const struct Tileset gTileset_GenericBuilding = {0};
 bool VoxelAtlas_IsVoid(const VoxelMapInstance *inst, int metatile) { (void)inst; (void)metatile; return false; }
@@ -38,16 +38,12 @@ static u32 sSizedBytes;
 u32 Port_GetAssetSizeExact(const void *p) { return p == sSizedAsset ? sSizedBytes : 0; }
 void LZDecompressWram(const u32 *src, void *dst) { (void)src; (void)dst; }
 #ifdef PORT_EXPANSION
-/* The expansion's decompress.c and metatile_behavior.c are the ROM's; the test
- * links nothing from them, so it supplies the calls the voxel units make. */
+/* The one-shot tile loader calls the ROM's decompressors; the tests only
+ * stream through Voxel_LoadTilesStep's own decoder, so these just link.
+ * (The expansion's decompress.c is the ROM's; the test links nothing from it.) */
+u32 GetDecompressedDataSize(const u32 *src) { (void)src; return 0; }
+void DecompressDataWithHeaderWram(const u32 *src, void *dst) { (void)src; (void)dst; }
 void FastLZ77UnCompWram(const u32 *src, void *dst) { (void)src; (void)dst; }
-bool8 MetatileBehavior_IsSurfableWaterOrUnderwater(u8 b) { (void)b; return FALSE; }
-bool8 MetatileBehavior_IsPuddle(u8 b) { return b == MB_PUDDLE; }
-bool8 MetatileBehavior_IsShallowFlowingWater(u8 b) { (void)b; return FALSE; }
-bool8 MetatileBehavior_IsCounter(u8 b) { (void)b; return FALSE; }
-bool8 MetatileBehavior_IsPC(u8 b) { (void)b; return FALSE; }
-bool8 MetatileBehavior_IsSecretBasePC(u8 b) { (void)b; return FALSE; }
-bool8 MetatileBehavior_IsPlayerRoomPCOn(u8 b) { (void)b; return FALSE; }
 #endif
 void CB2_Overworld(void) {}
 void CB2_OverworldBasic(void) {}

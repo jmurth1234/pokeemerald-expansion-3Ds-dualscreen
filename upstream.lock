@@ -4,8 +4,8 @@ commit = "76463dac15cad36aca5e2b3f6366abf9e53f814f"
 
 [pokeemerald-expansion]
 repository = "https://github.com/rh-hideout/pokeemerald-expansion.git"
-commit = "e8bd1cd7b03fc032ea37e3ecd38b379b5d01a1e7"
-tag = "expansion/1.17.0"
+commit = "dfb0f84374230f4d462191601179b742f9f077df"
+tag = "master post-1.17.1 (3 commits)"
 
 [rom]
 name = "Pokemon Emerald (USA, Europe)"

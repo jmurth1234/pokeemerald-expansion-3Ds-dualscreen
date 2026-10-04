@@ -4011,9 +4011,13 @@ static void RenderVoxelEye(C3D_RenderTarget *target, uint32_t clear, float eyeOf
 
 static void RenderVoxel(uint32_t clear, bool stereo, float slider)
 {
+    const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+
     /* The brightness effect (BLDY) on the field's backgrounds and sprites. */
     unsigned control = Reg(0x50), effect = (control >> 6) & 3;
     float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
+    float bloom;
 
     /* The world is BG3: its brightness is BG3's. */
     CtrVoxel_SetBrightness((control & 0x08) ? bright : 0.0f, 0.0f, effect == 2);
@@ -4164,7 +4168,7 @@ static void RenderBattleWorld(uint32_t clear)
     C2D_TargetClear(sLogical, clear);
     CtrVoxel_Draw(sLogical, 0.0f);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    sGpuEarly = GpuStartAtSplit();
+    GpuSplit();
 
     /* The world to the screen, as in the field. */
     C2D_Prepare();
@@ -5365,9 +5369,6 @@ void CtrVideo_Present(void)
     /* Opt-in from the bottom screen's options (CtrSettings_Voxel). */
     bool overworld = field && CtrSettings_Voxel() && CtrVoxel_IsAvailable();
     bool voxel = overworld && CtrVoxel_Update();
-    /* No 3D battles here (upstream's battle-world block needs its own option
-     * and hooks); the scheduler below still takes the flag. */
-    bool battleUpdated = false;
     /* A new map still being made - a frame or two, behind the fade - is
      * black rather than the 2D picture flashing up before the 3D one. */
     bool blank = overworld && !voxel && CtrVoxel_IsWarmingUp();

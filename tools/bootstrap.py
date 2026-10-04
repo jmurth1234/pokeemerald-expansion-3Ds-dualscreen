@@ -90,7 +90,7 @@ def main() -> int:
         # remove the ones these patches create so they apply again.
         for patch in patches:
             for line in patch.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("+++ b/"):
+                if line.startswith("+++ b/") or line.startswith("+++ w/"):
                     created = tree / line[6:]
                     if created.exists() and subprocess.run(
                             ["git", "ls-files", "--error-unmatch", line[6:]], cwd=tree,

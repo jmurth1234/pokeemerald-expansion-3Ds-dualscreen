@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--stage', type=int, required=True)
     parser.add_argument('--video', type=int, default=0)
     parser.add_argument('--full', type=int, choices=(0, 1), default=0)
+    parser.add_argument('--expansion', type=int, choices=(0, 1), default=0)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     nm = Path(args.devkitarm) / 'bin/arm-none-eabi-nm'
@@ -46,6 +47,10 @@ def main():
     names = {line.split()[-1] for line in symbols.splitlines() if line.split()}
 
     required = ['CtrGame_Init', 'CpuSet', 'DmaSet', 'Random', 'AllocZeroed', 'CtrInput_Update']
+    if args.expansion:
+        # The expansion provides these as a static inline and a macro, so no
+        # such symbols are emitted; check the real functions behind them.
+        required = ['CtrGame_Init', 'CpuSet', 'DmaSet', 'Random32', 'AllocZeroed_', 'CtrInput_Update']
     if args.full:
         required += ['AgbMain', 'CtrGame_VBlank', 'CB2_Overworld', 'CtrScripts_Init',
                      'CtrMaps_Init', 'CtrSongs_Init', 'Port_ResolveAssetPointer']

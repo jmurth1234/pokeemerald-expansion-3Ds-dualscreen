@@ -223,6 +223,19 @@ bool Voxel_LoadTilesStep(const void *tilesetPtr, uint8_t *dest, uint32_t destSiz
         load->size = load->packedSize;
         if (tileset->isCompressed)
         {
+#ifdef PORT_EXPANSION
+            if (load->packedSize >= 4 && src[0] != 0x10)
+            {
+                /* Expansion smol payload, not vanilla LZ77: it has no
+                 * streaming form, so take it whole (see Voxel_LoadTiles). */
+                load->size = GetDecompressedDataSize((const u32 *)src);
+                if (!load->size || load->size > destSize) goto failed;
+                DecompressDataWithHeaderWram((const u32 *)src, dest);
+                load->written = load->size;
+                load->initialized = load->done = load->ok = true;
+                return true;
+            }
+#endif
             if (load->packedSize < 4 || src[0] != 0x10) goto failed;
             load->size = (uint32_t)src[1] | ((uint32_t)src[2] << 8) | ((uint32_t)src[3] << 16);
             load->source = 4;

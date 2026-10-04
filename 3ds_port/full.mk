@@ -16,7 +16,13 @@ GAME_ARCH := $(ARCH)
 ASM_PSEUDO_OP_CONV := sed -e 's/\.4byte/\.int/g;s/\.2byte/\.short/g'
 AS := $(DEVKITARM)/bin/arm-none-eabi-as
 CPPTOOL := $(DEVKITARM)/bin/arm-none-eabi-cpp
-ASFLAGS := -mcpu=mpcore --defsym MODERN=1 --defsym PORTABLE=1 --defsym UBFIX=1 --defsym PLATFORM_3DS=1 -I$(ROOT)
+# The game's C files get -DTESTING=0 via GAMEFLAGS, but the .s pipeline never
+# saw it: CPPTOOL gets no -D flags, so GAS evaluated `.if TESTING == FALSE`
+# (which guards every cry sample in sound/direct_sound_data.inc) with TESTING
+# undefined - and GNU as silently drops such blocks with exit 0. Every Cry_X
+# label then landed on one address and all 1159 gCryTable entries pointed at
+# the same empty sample: total cry silence. Define it for the assembler too.
+ASFLAGS := -mcpu=mpcore --defsym MODERN=1 --defsym PORTABLE=1 --defsym UBFIX=1 --defsym PLATFORM_3DS=1 --defsym TESTING=0 -I$(ROOT)
 
 # Game translation units see the port bridge (compat/port_platform.h): the
 # hooks in the shared tree that route resources, scripts and saves to the
@@ -267,7 +273,10 @@ $(ROOT_MID_SRCS): build/midi.stamp ;
 # after them to keep the two writers from racing.
 build/map_includes.stamp: $(wildcard $(ROOT)/data/maps/*/map.json) $(ROOT)/data/layouts/layouts.json | build/graphics.stamp
 	+$(MAKE) -C $(ROOT) include/constants/map_groups.h data/maps/groups.inc data/maps/headers.inc data/maps/connections.inc data/maps/events.inc
-	"$(PYTHON)" $(SCRIPTS)/gen_missing_map_includes.py
+# mapjson reads include/constants/map_groups.h via a path relative to its
+# working directory (mapjson.cpp:206), as does the root Makefile; run from
+# the tree root, not 3ds_port/, or every map fails to generate.
+	cd $(abspath $(ROOT)) && "$(PYTHON)" $(abspath $(SCRIPTS))/gen_missing_map_includes.py
 	@mkdir -p build
 	@touch $@
 build/root/data/map_events.o build/root/data/maps.o: build/map_includes.stamp
@@ -362,7 +371,7 @@ HOST_MAP_HEADERS := $(ROOT)/include/constants/map_groups.h $(ROOT)/include/const
 
 .PHONY: map-includes
 map-includes:
-	"$(PYTHON)" $(SCRIPTS)/gen_missing_map_includes.py
+	cd $(abspath $(ROOT)) && "$(PYTHON)" $(abspath $(SCRIPTS))/gen_missing_map_includes.py
 
 -include $(BACKEND_OBJS:.o=.d)
 

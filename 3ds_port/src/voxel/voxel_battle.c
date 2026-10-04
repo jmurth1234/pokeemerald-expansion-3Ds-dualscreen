@@ -493,7 +493,7 @@ unsigned VoxelBattle_Shadows(VoxelBattleShadow *out, unsigned max)
             continue;
         enemy = GetBattlerSide(b) != B_SIDE_PLAYER;
         /* A floating Pokemon's shadow is the game's own sprite. */
-        shadow = gBattleSpritesDataPtr->healthBoxesData[b].shadowSpriteId;
+        shadow = gBattleSpritesDataPtr->healthBoxesData[b].shadowSpriteIdPrimary;
         if (enemy && shadow < MAX_SPRITES && gSprites[shadow].inUse && !gSprites[shadow].invisible)
             continue;
         out[count].x = sprite->x + sprite->x2;
