@@ -764,6 +764,15 @@ endif
 verify-pokedex-capture:
 	"$(PYTHON)" -B tests/pokedex_capture_test.py --tree "$(ROOT)" --cc "$(HOSTCC)" --sanitize
 
+ifneq ($(PORT_EXPANSION_DEF),)
+.PHONY: verify-expansion-sprites
+verify: verify-expansion-sprites
+verify-expansion-sprites: build/gamedata_image.elf
+	"$(PYTHON)" -B tests/evolution_animation_test.py --tree "$(ROOT)" --cc "$(HOSTCC)"
+	"$(PYTHON)" -B tests/expansion_sprite_test.py --tree "$(ROOT)" --cc "$(HOSTCC)"
+	"$(PYTHON)" -B scripts/verify_sprite_anims.py --tree "$(ROOT)" --image build/gamedata_image.elf
+endif
+
 verify-voxel-dewford:
 	"$(PYTHON)" -B tests/voxel_dewford_test.py --tree "$(ROOT)"
 

@@ -25312,7 +25312,7 @@ index 550127f5..c5b5c237 100644
      u16 offset;
      u16 temp;
 diff --git c/src/pokemon.c w/src/pokemon.c
-index 82017777..8740279e 100644
+index 82017777..e14e7979 100644
 --- c/src/pokemon.c
 +++ w/src/pokemon.c
 @@ -1,4 +1,7 @@
@@ -25412,11 +25412,37 @@ index 82017777..8740279e 100644
              case EVO_LEVEL_BATTLE_ONLY:
                  if (mode == EVO_MODE_BATTLE_ONLY && evolutions[i].param <= level)
                      conditionsMet = TRUE;
+@@ -6271,6 +6312,12 @@ static struct PartyState *GetBattlerPartyStateByPokemon(struct Pokemon *partyMon
+ {
+     struct Pokemon *party = GetTrainerParty(trainer);
+ 
++#ifdef PLATFORM_3DS
++    // Overworld form changes have no battle allocation or saved battle state.
++    if (gBattleStruct == NULL)
++        return NULL;
++#endif
++
+     for (int i = 0; i < PARTY_SIZE; i++)
+     {
+         struct Pokemon *mon = &party[i];
 diff --git c/src/pokemon_animation.c w/src/pokemon_animation.c
-index 222590c7..8b21c04a 100644
+index 222590c7..d6148d72 100644
 --- c/src/pokemon_animation.c
 +++ w/src/pokemon_animation.c
-@@ -1240,7 +1240,7 @@ static void VerticalShakeTwice(struct Sprite *sprite)
+@@ -527,7 +527,12 @@ static void Task_HandleMonAnimation(u8 taskId)
+         // Task_HandleMonAnimation handles more than just KO animations,
+         // but if the counter is non-zero then only KO animations are running.
+         // This assumption is not checked.
++#ifdef PLATFORM_3DS
++        // Evolution also runs this task after battle resources have been freed.
++        if (gBattleStruct != NULL && gBattleStruct->battlerKOAnimsRunning > 0)
++#else
+         if (gBattleStruct->battlerKOAnimsRunning > 0)
++#endif
+             gBattleStruct->battlerKOAnimsRunning--;
+         DestroyTask(taskId);
+     }
+@@ -1240,7 +1245,7 @@ static void VerticalShakeTwice(struct Sprite *sprite)
      u8 amplitude = 0;
  
      if (var5 != (u8)-2)
@@ -25425,7 +25451,7 @@ index 222590c7..8b21c04a 100644
      else
          amplitude = 0;
  
-@@ -3671,7 +3671,7 @@ static void VerticalShakeLowTwice(struct Sprite *sprite)
+@@ -3671,7 +3676,7 @@ static void VerticalShakeLowTwice(struct Sprite *sprite)
      var6 = sVerticalShakeData[sprite->data[5]][1];
      var7 = 0;
      if (sVerticalShakeData[sprite->data[5]][0] != (u8)-2)
@@ -26310,7 +26336,7 @@ index 034c187e..4f5dfc97 100644
      {
          if (JOY_NEW(A_BUTTON))
 diff --git c/src/pokemon_summary_screen.c w/src/pokemon_summary_screen.c
-index 801dfe07..d33c0b47 100644
+index 801dfe07..8b3bbb93 100644
 --- c/src/pokemon_summary_screen.c
 +++ w/src/pokemon_summary_screen.c
 @@ -1,4 +1,7 @@
@@ -26331,7 +26357,20 @@ index 801dfe07..d33c0b47 100644
  
  // Screen titles (upper left)
  #define PSS_LABEL_WINDOW_POKEMON_INFO_TITLE 0
-@@ -1736,10 +1742,189 @@ static void HandleMoveRelearnerInput(u8 taskId)
+@@ -822,7 +828,12 @@ static const union AnimCmd sSpriteAnim_CategoryIcon2[] =
+ 
+ static const union AnimCmd *const sSpriteAnimTable_CategoryIcons[] =
+ {
++#ifdef PLATFORM_3DS
++    // CreateSprite reads animation 0 before callers select a damage category.
++    sSpriteAnim_CategoryIcon0,
++#else
+     NULL,
++#endif
+     sSpriteAnim_CategoryIcon0,
+     sSpriteAnim_CategoryIcon1,
+     sSpriteAnim_CategoryIcon2,
+@@ -1736,10 +1747,189 @@ static void HandleMoveRelearnerInput(u8 taskId)
      }
  }
  
@@ -26521,7 +26560,7 @@ index 801dfe07..d33c0b47 100644
          if (JOY_NEW(DPAD_UP))
          {
              ChangeSummaryPokemon(taskId, -1);
-@@ -2325,6 +2510,17 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+@@ -2325,6 +2515,17 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
  
      if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
      {
@@ -26539,7 +26578,7 @@ index 801dfe07..d33c0b47 100644
          if (JOY_NEW(DPAD_UP))
          {
              data[0] = 4;
-@@ -2335,7 +2531,7 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+@@ -2335,7 +2536,7 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
              data[0] = 4;
              ChangeSelectedMove(data, 1, &sMonSummaryScreen->firstMoveIndex);
          }
@@ -26548,7 +26587,7 @@ index 801dfe07..d33c0b47 100644
          {
              if (sMonSummaryScreen->lockMovesFlag == TRUE
                  || (sMonSummaryScreen->newMove == MOVE_NONE && sMonSummaryScreen->firstMoveIndex == MAX_MON_MOVES))
-@@ -2355,11 +2551,13 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+@@ -2355,11 +2556,13 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
                  PlaySE(SE_FAILURE);
              }
          }
@@ -26563,7 +26602,7 @@ index 801dfe07..d33c0b47 100644
      }
  }
  
-@@ -2471,6 +2669,17 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+@@ -2471,6 +2674,17 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
  
      if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
      {
@@ -26581,7 +26620,7 @@ index 801dfe07..d33c0b47 100644
          if (JOY_NEW(DPAD_UP))
          {
              data[0] = 3;
-@@ -2481,17 +2690,19 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+@@ -2481,17 +2695,19 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
              data[0] = 3;
              ChangeSelectedMove(&data[0], 1, &sMonSummaryScreen->secondMoveIndex);
          }
@@ -26603,7 +26642,7 @@ index 801dfe07..d33c0b47 100644
      }
  }
  
-@@ -2614,6 +2825,17 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2614,6 +2830,17 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
      {
          if (gPaletteFade.active != TRUE)
          {
@@ -26621,7 +26660,7 @@ index 801dfe07..d33c0b47 100644
              if (JOY_NEW(DPAD_UP))
              {
                  data[0] = 4;
-@@ -2632,7 +2854,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2632,7 +2859,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
              {
                  ChangePage(taskId, 1);
              }
@@ -26630,7 +26669,7 @@ index 801dfe07..d33c0b47 100644
              {
                  if (CanReplaceMove() == TRUE)
                  {
-@@ -2649,7 +2871,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2649,7 +2876,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
                      ShowCantForgetHMsWindow(taskId);
                  }
              }
@@ -26639,7 +26678,7 @@ index 801dfe07..d33c0b47 100644
              {
                  StopPokemonAnimations();
                  PlaySE(SE_SELECT);
-@@ -2658,6 +2880,8 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2658,6 +2885,8 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
                  gSpecialVar_Result = FALSE;
                  BeginCloseSummaryScreen(taskId);
              }
@@ -26648,7 +26687,7 @@ index 801dfe07..d33c0b47 100644
          }
      }
  }
-@@ -2735,7 +2959,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+@@ -2735,7 +2964,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
                  PositionAppealJamSlidingWindow(9, -2, move);
              }
          }
@@ -26657,7 +26696,7 @@ index 801dfe07..d33c0b47 100644
          {
              ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_SPECIES);
              if (!gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_STATUS]].invisible)
-@@ -4760,6 +4984,9 @@ static inline bool32 ShouldShowRename(void)
+@@ -4760,6 +4989,9 @@ static inline bool32 ShouldShowRename(void)
  
  static inline bool32 ShouldShowIvEvPrompt(void)
  {

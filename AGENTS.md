@@ -88,6 +88,24 @@ git -C build/expansion worktree remove --force /tmp/exp-check
 
 ## Debugging gotchas (expansion port)
 
+- **`CreateSprite` reads animation 0 before `StartSpriteAnim`.** The expansion's
+  shared category icon table originally put NULL at index `DAMAGE_CATEGORY_NONE`
+  (0). Dump `crash_dump_00000038.dmp` crashed in `SetSpriteSheetFrameTileNum`
+  while opening summary move details; battle move details, the move relearner,
+  and HGSS Pokédex share the template. Give slot 0 a valid frame on 3DS.
+  `make verify` now exercises real sprite creation/animation and audits every
+  linked animation table, including implicit enum holes. Audit
+  `build/gamedata_image.elf`, whose `.gamedata` is PROGBITS; the shipped ELF
+  reserves it as NOBITS, so reading its file bytes gives false null pointers.
+- **Animation and form-change helpers also run outside battles.** Expansion's
+  `Task_HandleMonAnimation` completes during evolution, egg hatching, contests,
+  and Hall of Fame scenes; guard its KO counter access when `gBattleStruct`
+  is NULL. Hardware evolution dump `crash_dump_00000037.dmp` identified this
+  access (PC `0x00383064` in the October 17 build). Likewise,
+  `GetBattlerPartyStateByPokemon` must return NULL without battle resources:
+  overworld time, item, daycare, and poison form changes call it too. Never
+  form `&gBattleStruct->partyState[...]` from a NULL allocation. Regression:
+  `python3 3ds_port/tests/evolution_animation_test.py --tree build/expansion`.
 - **The assembler never saw `-DTESTING=0`.** C files get it via GAMEFLAGS, but
   `ASFLAGS` had no `--defsym TESTING=0` and CPPTOOL gets no `-D` flags, so GAS
   evaluated `.if TESTING == FALSE` (guards every cry sample in
