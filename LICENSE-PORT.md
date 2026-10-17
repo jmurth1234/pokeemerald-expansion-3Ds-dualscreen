@@ -1,8 +1,8 @@
-# Pokémon Emerald 3Ds Dual Screen port licence
+# Emerald 3DS port licence
 
 ## Scope
 
-The licence below applies **only** to original Pokémon Emerald 3Ds Dual Screen port code, tooling
+The licence below applies **only** to original Emerald 3DS port code, tooling
 and documentation authored for this project: the contents of `3ds_port/`,
 `builder/`, `tools/` and `docs/`, and the port's own additions inside
 `patches/pokeemerald/`, unless a file states otherwise.
@@ -15,12 +15,12 @@ It does **not** relicense:
 - data generated from a ROM (such as `emerald3ds.pak`);
 - third-party components, which keep their own licences (see `NOTICE.md`).
 
-A modified upstream file is covered here only for the Pokémon Emerald 3Ds Dual Screen
+A modified upstream file is covered here only for the Emerald 3DS
 contribution to it.
 
 ## Licence (MIT)
 
-Copyright (c) 2026 ZallaxDev and Pokémon Emerald 3Ds Dual Screen contributors
+Copyright (c) 2026 Zallax and Emerald 3DS contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

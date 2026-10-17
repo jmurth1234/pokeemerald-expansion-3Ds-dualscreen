@@ -15,6 +15,9 @@
 #include "3ds_data.h"
 #include "3ds_pak.h"
 #include "3ds_platform.h"
+#ifndef PORT_EXPANSION
+#include "../../include/constants/global.h"
+#endif
 
 /* 0 = choose at runtime; 1 = RomFS, 2 = loose, 3 = pack. */
 #ifndef CTR_DATA_BACKEND
@@ -23,11 +26,41 @@
 
 #define ENGINE_ABI_PATH "engine/abi.bin"
 
-/* The one ROM the data pack can be built from: Pokémon Emerald (USA, Europe). */
+/* The ROM the data pack must come from: the one of the game's compiled
+ * language, never another locale's data. */
+#ifdef PORT_EXPANSION
+/* Expansion ROMs are recipe-specific; the data ABI identifies their pack. */
+#define sSupportedRomSha1 (header + 16)
+#define SUPPORTED_ROM_DETAIL "Use the data pack built for this expansion release."
+#elif GAME_LANGUAGE == LANGUAGE_SPANISH
+static const uint8_t sSupportedRomSha1[20] = {
+    0xfe, 0x15, 0x58, 0xa3, 0xdc, 0xb0, 0x36, 0x0a, 0xb5, 0x58,
+    0x96, 0x9e, 0x09, 0xb6, 0x90, 0x88, 0x8b, 0x84, 0x6d, 0xd9,
+};
+#define SUPPORTED_ROM_DETAIL "Usa la ROM de Pokemon Esmeralda\n" \
+                             "(Espana, BPES) con este cliente."
+#elif GAME_LANGUAGE == LANGUAGE_FRENCH
+static const uint8_t sSupportedRomSha1[20] = {
+    0xca, 0x66, 0x66, 0x51, 0x37, 0x4d, 0x89, 0xca, 0x43, 0x90,
+    0x07, 0xbe, 0xd5, 0x4d, 0x83, 0x9e, 0xb7, 0xbd, 0x14, 0xd0,
+};
+#define SUPPORTED_ROM_DETAIL "Utilise la ROM de Pokemon Emeraude\n" \
+                             "(France, BPEF) avec ce client."
+#elif GAME_LANGUAGE == LANGUAGE_ITALIAN
+static const uint8_t sSupportedRomSha1[20] = {
+    0x16, 0x92, 0xdb, 0x32, 0x24, 0x00, 0xc3, 0x14, 0x1c, 0x5d,
+    0xe2, 0xdb, 0x38, 0x46, 0x99, 0x13, 0xce, 0xb1, 0xf4, 0xd4,
+};
+#define SUPPORTED_ROM_DETAIL "Usa la ROM di Pokemon Smeraldo\n" \
+                             "(Italia, BPEI) con questo client."
+#else
 static const uint8_t sSupportedRomSha1[20] = {
     0xf3, 0xae, 0x08, 0x81, 0x81, 0xbf, 0x58, 0x3e, 0x55, 0xda,
     0xf9, 0x62, 0xa9, 0x2b, 0xb4, 0x6f, 0x4f, 0x1d, 0x07, 0xb7,
 };
+#define SUPPORTED_ROM_DETAIL "Only Pokemon Emerald (USA, Europe) is\n" \
+                             "supported. Run the builder with that ROM."
+#endif
 
 typedef struct
 {
@@ -71,6 +104,24 @@ static void ReadEngineAbi(void)
                        | ((uint32_t)raw[3] << 24);
         fclose(file);
     }
+}
+
+/* The ABI `staging.py devdata` writes into the loose data's marker
+ * ("abi %08x"); false when it has none (older tooling, or a forced loose
+ * backend without a marker). */
+static bool ReadLooseAbi(uint32_t *abi)
+{
+    FILE *file = fopen(CTR_DATA_LOOSE_MARKER, "r");
+    unsigned long value;
+    bool found;
+
+    if (file == NULL)
+        return false;
+    found = fscanf(file, " abi %lx", &value) == 1;
+    fclose(file);
+    if (found)
+        *abi = (uint32_t)value;
+    return found;
 }
 
 static const CtrPakEntry *FindEntry(const char *path)
@@ -121,9 +172,7 @@ static bool OpenPak(void)
         SetError("The data pack does not match this release.", detail);
         goto fail;
     case CTR_PAK_BAD_ROM:
-        SetError("The data pack comes from another ROM.",
-                 "Only Pokemon Emerald (USA, Europe) is\n"
-                 "supported. Run the builder with that ROM.");
+        SetError("The data pack comes from another ROM.", SUPPORTED_ROM_DETAIL);
         goto fail;
     default:
         SetError("The data pack is damaged.",
@@ -190,8 +239,22 @@ bool CtrData_Init(void)
         sBackend = CTR_DATA_ROMFS;
         break;
     case 2:
+    {
+        uint32_t looseAbi;
+
+        /* Only reported: the ABI covers every data file, so it also changes
+         * when one generator's output is copied over during development,
+         * which is what the loose backend is for. After an engine change a
+         * mismatch here explains the crash that follows. */
+        if (!ReadLooseAbi(&looseAbi) || sEngineAbi == 0)
+            CtrLog_Write(CTR_LOG_FS, "data: loose data ABI not checked (unknown)");
+        else if (looseAbi != sEngineAbi)
+            CtrLog_Write(CTR_LOG_ERROR, "data: loose data staged for ABI %08lX, engine is %08lX "
+                         "(make devdata again if the engine changed)",
+                         (unsigned long)looseAbi, (unsigned long)sEngineAbi);
         sBackend = CTR_DATA_LOOSE;
         break;
+    }
     default:
         if (!OpenPak())
             return false;
@@ -338,6 +401,29 @@ bool CtrData_Size(const char *path, uint32_t *outSize)
     if (outSize != NULL)
         *outSize = (uint32_t)size;
     return true;
+}
+
+bool CtrData_Locate(const char *path, uint64_t *outOffset, uint32_t *outSize)
+{
+    const CtrPakEntry *entry;
+
+    if (sBackend != CTR_DATA_PAK || !PathValid(path) || (entry = FindEntry(path)) == NULL)
+        return false;
+    *outOffset = entry->offset;
+    *outSize = entry->rawSize;
+    return true;
+}
+
+bool CtrData_ReadRange(uint64_t offset, void *dest, uint32_t size)
+{
+    bool ok;
+
+    if (sBackend != CTR_DATA_PAK || sPak == NULL)
+        return false;
+    LightLock_Lock(&sPakLock);
+    ok = fseek(sPak, (long)offset, SEEK_SET) == 0 && fread(dest, 1, size, sPak) == size;
+    LightLock_Unlock(&sPakLock);
+    return ok;
 }
 
 bool CtrData_Exists(const char *path)

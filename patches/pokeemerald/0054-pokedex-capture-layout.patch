@@ -1,0 +1,28 @@
+Detect the caught-mon Pokédex page independently of its borrowed battle VBlank.
+The port bridge selects CTR_CENTRED_POKEDEX_CAUGHT, not the field Pokédex:
+fixed BG2/BG3 scroll, a bounded 240x160 picture and stripe-only margins on
+the whole bottom screen. Keep this task hook through preparation and exit;
+do not register the borrowed callback as a Pokédex callback.
+Applies after 0053-accelerated-berry-clock.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/pokedex.c b/src/pokedex.c
+--- a/src/pokedex.c
++++ b/src/pokedex.c
+@@ -5814,6 +5814,16 @@ IntrCallback CtrPokedex_VBlankCallback(void)
+     return VBlankCB_Pokedex;
+ }
+-
++
++bool8 CtrPokedex_IsCaughtMonPage(void)
++{
++    u8 taskId = FindTaskIdByFunc(Task_DisplayCaughtMonDexPage);
++
++    return (taskId != TASK_NONE && gTasks[taskId].data[0] != 0)
++        || FuncIsActiveTask(Task_HandleCaughtMonPageInput)
++        || FuncIsActiveTask(Task_ExitCaughtMonPage);
++}
++
++
+ bool8 CtrPokedex_IsOpen(void)
+ {
+     return sPokedexView != NULL && (gMain.callback2 == CB2_Pokedex || gMain.callback2 == CB2_OpenPokedex);

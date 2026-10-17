@@ -1,0 +1,41 @@
+# The interior lint (voxel_defect_scan.py on each room's pieces, printed by
+# gen_voxel_buildings.py --verify): faults accepted, each with its reason,
+# and the rooms finished.
+#
+# The lint fails the build in every room: a fault found is a failure
+# but one accepted here, which is listed in build/buildings/interior_lint.txt
+# with its reason and not counted. So is an entry here that finds no fault
+# any more (the piece put right, renamed or gone, or its kind misspelt):
+# remove it. A new room is held to the same from its first build.
+
+# Rooms reviewed on the console and approved (layout ids), counted by
+# --verify ("finished on the console").
+finished = []
+
+[allow.brendan_1f_sink]
+under = "its cupboard doors are drawn in the planks' own colours, inside its outline: they are its doors, not the floor under it"
+
+[allow.lab_canisters]
+under = "their lower bands are drawn in the floor's shade grey, inside their outline: they are the canisters, not the floor under them"
+
+[allow.pc2f_counter]
+copied = "its side is its front's bands - the top's lip, the dark line under it, the lilac band, the panel - which run round its ends as along its front: the counter's make, not a drawer's edge"
+
+[allow.house_with_bed_bed_head]
+bleed = "its iron frame is drawn in the greys and white of the bed's foot board, the same frame at the other end: the head's own, not the bed's drawing on it (the pillow, which was, is its own piece)"
+foreign = "the texels it counts are that frame, taken for the bed's by the bleed above"
+
+[allow.flower_shop_room_rack_1_plant_n]
+bleed = "its leaves' dark green is the stand's edge and legs' green: its crown, not the stand's top"
+
+[allow.flower_shop_room_rack_2_plant_n]
+bleed = "its leaves' dark green is the stand's edge and legs' green: its crown, not the stand's top"
+
+[allow.flower_shop_room_rack_e_plant_n]
+bleed = "its leaves' dark green is the stand's edge and legs' green: its crown, not the stand's top"
+
+[allow.flower_shop_room_table_w_white]
+card_bg = "its pot is drawn in the floor's greys, inside its outline: the pot, not the floor behind the plant"
+
+[allow.flower_shop_room_table_e_white]
+card_bg = "its pot is drawn in the floor's greys, inside its outline: the pot, not the floor behind the plant"

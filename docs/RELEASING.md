@@ -7,6 +7,10 @@ contains a ROM, a data pack or anything extracted from the game.
 |---|---|
 | `Emerald3DS-vX.Y.Z-Windows.zip` | the Windows builder: builder, engine-only 3DSX, recipe, `README.txt`, `LICENSES/` |
 | `Emerald3DS.3dsx`, `Emerald3DS.smdh` | quick update of the executable when the data ABI did not change |
+| `Emerald3DS-es.3dsx` | the same for the Spanish variant (installed as `Emerald3DS.3dsx`) |
+| `Emerald3DS-fr.3dsx` | the same for the French variant (installed as `Emerald3DS.3dsx`) |
+| `Emerald3DS-it.3dsx` | the same for the Italian variant (installed as `Emerald3DS.3dsx`) |
+| `Emerald3DS-Forwarder.cia` | optional HOME Menu shortcut that starts the installed 3DSX (Luma3DS) |
 | `Emerald3DS-WebPayload.zip` | the web builder (website): payload, builder package, licences, `web-manifest.json` |
 | `web-manifest.json` | the same manifest on its own, read by the website without downloading the payload |
 | `SHA256SUMS.txt` | SHA-256 of every asset above |
@@ -26,10 +30,14 @@ release after v0.1.2 every release must follow this list; skipping a step
 leaves the site without a web builder or without Quick Update for that
 version.
 
-1. **Code and version.** The release is made from `main` with the web-payload
-   tooling merged (`builder/emerald3ds_builder/web.py`, `webmanifest.py`,
-   `tools/build_web_payload.py`). Set `__version__` in
-   `builder/emerald3ds_builder/__init__.py` and move `## Unreleased` in
+1. **Code and version.** `main` holds the last release and `dev` the work
+   since: merge `dev` into `main` for a release (a hotfix is made on `main`
+   and merged back into `dev`). The release is made from `main` with the
+   web-payload tooling merged (`builder/emerald3ds_builder/web.py`, `webmanifest.py`,
+   `tools/build_web_payload.py`). Set the version in
+   `builder/emerald3ds_builder/__init__.py` (`__version__`),
+   `builder/pyproject.toml` and the placeholder of
+   `.github/ISSUE_TEMPLATE/bug_report.yml`, and move `## Unreleased` in
    `CHANGELOG.md` to `## X.Y.Z — YYYY-MM-DD` (the site links changelog
    headings to releases by that version).
 2. **Build all assets** with `tools/build_release.py` (see *Steps* below).
@@ -41,6 +49,9 @@ version.
    | `web-manifest.json` | knowing, without downloading the payload, that the release can be built on the web, which ROM it accepts, its data ABI |
    | `Emerald3DS.3dsx` | Quick Update (path 2: players who keep their `emerald3ds.pak`) |
    | `Emerald3DS.smdh` | listed with the 3DSX |
+   | `Emerald3DS-es.3dsx` | Quick Update of the Spanish variant (offered after the local pack check) |
+   | `Emerald3DS-fr.3dsx` | Quick Update of the French variant (offered after the local pack check) |
+   | `Emerald3DS-Forwarder.cia` | the HOME Menu forwarder (download and FBI QR code) |
    | `Emerald3DS-vX.Y.Z-Windows.zip` | the Windows builder (not linked by the site) |
    | `SHA256SUMS.txt` | checksums of everything above |
 
@@ -75,7 +86,9 @@ version.
    ```
    gh release create vX.Y.Z --title "Alpha X.Y.Z" --notes-file notes.md \
        dist/Emerald3DS-WebPayload.zip dist/web-manifest.json \
-       dist/Emerald3DS.3dsx dist/Emerald3DS.smdh \
+       dist/Emerald3DS.3dsx dist/Emerald3DS.smdh dist/Emerald3DS-es.3dsx \
+       dist/Emerald3DS-fr.3dsx \
+       dist/Emerald3DS-Forwarder.cia \
        dist/Emerald3DS-vX.Y.Z-Windows.zip dist/SHA256SUMS.txt
    ```
 
@@ -101,21 +114,60 @@ always attach `web-manifest.json`. Consequences:
 - From then on, a release that keeps the data gets a direct 3DSX download; one
   that changes it sends everyone to the web builder. The game itself also
   refuses an incompatible pack on start-up.
+- The direct download is the English `Emerald3DS.3dsx`. Players of another
+  language check their own `emerald3ds.pak`: its header names the ROM it was
+  built from, the site compares it with that language's `dataAbi` and offers
+  its executable (`Emerald3DS-es.3dsx` or `Emerald3DS-fr.3dsx`, saved as
+  `Emerald3DS.3dsx`).
+
+## Languages
+
+One release covers every language: there is never a release per language.
+The 3DS executable cannot be shared (the game data it links against differs
+in size between languages, so each has its own data ABI), but everything else
+is: `payload/` holds the English executable and recipe plus the voxel
+generators, and `payload/es/` (resp. `payload/fr/`, `payload/it/`) the Spanish (resp.
+French, Italian)
+executable and recipe. The builders
+(Windows and web) pick the variant whose recipe was made from the player's ROM;
+`web-manifest.json` describes the English one at its top level and the others
+in `variants` (a site that predates it ignores them and stays English-only).
+
+`build_release.py --spanish-rom <clean BPES ROM> --french-rom <clean BPEF ROM>
+--italian-rom <clean BPEI ROM>`
+adds the localized variants: each copies this tree's sources (every file Git
+does not ignore) to `build/release-es` (resp. `build/release-fr`), localizes
+them with `tools/localize_spanish.py` (docs/SPANISH.md) or
+`tools/localize_french.py` (docs/FRENCH.md) or `tools/localize_italian.py`
+(docs/ITALIAN.md), builds the engine there and writes
+its recipe with the symbol names of `build/spanish-reference.s` (resp.
+`build/french-reference.s`). Without either option the release is English-only,
+as before.
 
 ## Prerequisites (maintainer machine)
 
 - A tree from `tools/bootstrap.py --make` (or the maintainer's workspace).
-- The supported ROM, and the ELF of the original game built from the same
+- The supported ROM, and, for each localized variant, that language's clean
+  ROM (BPES, BPEF). The recipe generator also needs the ELF of the original
+  game built from the same
   pinned upstream (`make` in the upstream tree's root produces
-  `pokeemerald.elf`): the recipe generator needs its symbol table to know
-  where each table lives in the ROM.
+  `pokeemerald.elf`): its symbol table says
+  where each table lives in the ROM. A localized variant uses its own reference
+  symbols file instead (`build/<language>-reference.s`, staged by the
+  localization script).
 - PyInstaller (`pip install pyinstaller`).
+- For the forwarder CIA: [makerom](https://github.com/3DSGuy/Project_CTR/releases)
+  and [bannertool](https://github.com/diasurgical/bannertool/releases), on
+  `PATH` or in `3ds_port/tools-bin/` (ignored by Git). Without them, pass
+  `--skip-cia` (the release then has no forwarder).
 
 ## Steps
 
 ```
 python tools/build_release.py --version 0.1.0 --rom baserom.gba \
     --gba-elf build/upstream/pokeemerald.elf \
+    --spanish-rom esmeralda.gba \
+    --french-rom emeraude.gba \
     --make "make -j8 PYTHON=python"
 ```
 
@@ -154,14 +206,31 @@ reads published releases. A release marked *pre-release* is shown in the
 release history but is not offered as the latest version while a normal
 release exists.
 
-## Future: HOME Menu forwarder
+## HOME Menu forwarder
 
-When a forwarder CIA exists, attach it as `Emerald3DS-Forwarder.cia` and pass
-`--cia-forwarder Emerald3DS-Forwarder.cia` to `tools/build_web_payload.py`
-(manifest `assets.ciaForwarder`). The website shows its download only when the
-asset is really attached. The forwarder launches
-`sdmc:/3ds/emerald3ds/Emerald3DS.3dsx`, so it is installed once and later
-updates only replace the `.3dsx`.
+`3ds_port/forwarder/` builds `Emerald3DS-Forwarder.cia` (`make -C
+3ds_port/forwarder`; `build_release.py` does it and passes
+`--cia-forwarder Emerald3DS-Forwarder.cia` to `tools/build_web_payload.py`, so
+the manifest's `assets.ciaForwarder` names it). Its icon, banner and banner
+sound are `3ds_port/assets/artwork/` (`icon.png` 48×48, `banner.png` 256×128,
+`banner-sound.wav` up to 3 s).
+
+The CIA contains no game code: it asks Luma3DS's `hb:ldr` to load
+`sdmc:/3ds/emerald3ds/Emerald3DS.3dsx`, makes its own title the one Luma loads
+3DSX files through (so no Homebrew Launcher title has to be installed) and
+restarts itself; Luma then starts the game in its place. The game puts Luma's
+previous title back as soon as it starts (`3ds_port/src/main_3ds.c`, argument
+`emerald3ds-forwarder:hbldr-tid=`), so the forwarder needs a game from the
+same release or later. It is installed once; later updates only replace the 3DSX. Without Luma3DS, or without the
+3DSX on the SD card, it shows what is missing. Its title ID (unique ID
+`0xE3D52`) and version (`APP_VERSION` in its Makefile) only change when the
+forwarder itself changes.
+
+The website shows the CIA with an FBI QR code (*Remote Install → Scan QR
+Code*) only when the release really carries it, and a QR code of
+`Emerald3DS.3dsx` for Quick Update: FBI saves a scanned 3DSX to
+`sdmc:/3ds/Emerald3DS/Emerald3DS.3dsx`, the same file on the SD card's
+case-insensitive FAT.
 
 The same pack must never be attached to a release or an issue: it is
 generated from the player's ROM.

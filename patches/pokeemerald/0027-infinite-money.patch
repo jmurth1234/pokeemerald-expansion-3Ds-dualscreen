@@ -1,0 +1,20 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: infinite money
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/money.c b/src/money.c
+--- a/src/money.c
++++ b/src/money.c
+@@ -74,6 +74,13 @@
+ 
+ u32 GetMoney(u32 *moneyPtr)
+ {
++#ifdef PLATFORM_3DS
++    // Infinite money (OPTIONS, CHEATS): the player's money is back at the most
++    // whenever it is read; what was spent is gone only until then.
++    if (moneyPtr == &gSaveBlock1Ptr->money && CtrExtras_Get("infinite_money")
++     && (*moneyPtr ^ gSaveBlock2Ptr->encryptionKey) != MAX_MONEY)
++        *moneyPtr = MAX_MONEY ^ gSaveBlock2Ptr->encryptionKey;
++#endif
+     return *moneyPtr ^ gSaveBlock2Ptr->encryptionKey;
+ }
+ 

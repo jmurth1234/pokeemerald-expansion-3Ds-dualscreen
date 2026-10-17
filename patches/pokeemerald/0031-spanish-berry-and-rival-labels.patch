@@ -1,0 +1,80 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Spanish berry and rival labels
+Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/strings.c b/src/strings.c
+--- a/src/strings.c
++++ b/src/strings.c
+@@ -1775,7 +1775,12 @@
+ const u8 gText_MrStoneMatchCallName[] = _("MR. STONE");
+ const u8 gText_StevenMatchCallDesc[] = _("HARD AS ROCK");
+ const u8 gText_StevenMatchCallName[] = _("STEVEN");
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++const u8 gText_MayBrendanMatchCallDesc[] = _("VECINO GUAY");
++const u8 gText_MayMatchCallDesc[] = _("VECINA GUAY");
++#else
+ const u8 gText_MayBrendanMatchCallDesc[] = _("RAD NEIGHBOR");
++#endif
+ const u8 gText_NormanMatchCallDesc[] = _("RELIABLE ONE");
+ const u8 gText_MomMatchCallDesc[] = _("CALM & KIND");
+ const u8 gText_WallyMatchCallDesc[] = _("{PKMN} LOVER");
+@@ -1817,5 +1822,13 @@
+ const u8 gText_Quiz[] = _("QUIZ");
+ const u8 gText_Answer[] = _("ANSWER");
+ const u8 gText_PokeBalls[] = _("POKé BALLS");
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++const u8 gText_Berry[] = _("BAYA");
++#else
+ const u8 gText_Berry[] = _("BERRY");
++#endif
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++const u8 gText_Berries[] = _("BAYAS");
++#else
+ const u8 gText_Berries[] = _("BERRIES");
++#endif
+diff --git a/include/strings.h b/include/strings.h
+--- a/include/strings.h
++++ b/include/strings.h
+@@ -2481,6 +2481,9 @@
+ extern const u8 gText_StevenMatchCallDesc[];
+ extern const u8 gText_StevenMatchCallName[];
+ extern const u8 gText_MayBrendanMatchCallDesc[];
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++extern const u8 gText_MayMatchCallDesc[];
++#endif
+ extern const u8 gText_WallyMatchCallDesc[];
+ extern const u8 gText_NormanMatchCallDesc[];
+ extern const u8 gText_NormanMatchCallName[];
+diff --git a/src/item.c b/src/item.c
+--- a/src/item.c
++++ b/src/item.c
+@@ -109,9 +109,15 @@
+     else
+         berryString = gText_Berries;
+ 
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++    txtPtr = StringCopy(dst, berryString);
++    *txtPtr = CHAR_SPACE;
++    StringCopy(txtPtr + 1, berryName);
++#else
+     txtPtr = StringCopy(dst, berryName);
+     *txtPtr = CHAR_SPACE;
+     StringCopy(txtPtr + 1, berryString);
++#endif
+ }
+ 
+ bool8 IsBagPocketNonEmpty(u8 pocket)
+diff --git a/src/pokenav_match_call_data.c b/src/pokenav_match_call_data.c
+--- a/src/pokenav_match_call_data.c
++++ b/src/pokenav_match_call_data.c
+@@ -279,7 +279,11 @@
+     .type = MC_TYPE_RIVAL,
+     .playerGender = MALE,
+     .flag = FLAG_ENABLE_RIVAL_MATCH_CALL,
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++    .desc = gText_MayMatchCallDesc,
++#else
+     .desc = gText_MayBrendanMatchCallDesc,
++#endif
+     .name = gText_ExpandedPlaceholder_May,
+     .textData = sMayTextScripts
+ };

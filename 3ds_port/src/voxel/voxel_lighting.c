@@ -42,6 +42,7 @@ typedef struct
     float x, y, z;
     float contact; /* the contact AO factor, 1 where nothing stands close */
     bool lit;      /* the ray reached the sun */
+    bool rayCast;  /* lit is known: not for a point only its contact was asked of */
     uint32_t generation;
 } LightSample;
 static LightSample sSamples[SAMPLE_CACHE_SIZE];
@@ -49,6 +50,10 @@ static LightSample sSamples[SAMPLE_CACHE_SIZE];
 #define SAMPLE_SETS (SAMPLE_CACHE_SIZE / SAMPLE_WAYS)
 static uint8_t sSampleNext[SAMPLE_SETS];
 static uint32_t sGeneration;
+static uint32_t sSampleGeneration;
+VoxelSun gVoxelSun = {0.85f, 0.55f, 1.0f, 0};
+static float sAmbient = VOXEL_AMBIENT;
+static float sStepInverseX = 4.0f / 0.85f, sStepInverseZ = 4.0f / 0.55f;
 static unsigned sRays;
 
 /*
@@ -70,6 +75,44 @@ static float sCeiling;
  */
 static float sMapCeiling[MAX_VOXEL_MAP_INSTANCES];
 static unsigned sMapCeilings;
+
+/*
+ * And finer still, block by block: the tallest caster of each 4x4 cells. A
+ * map's ceiling is that of its tallest model, so on Rustboro's streets every
+ * ray climbed to the height of the Devon tower however far from it it was.
+ * A ray only meets the cells its remaining points fall in, so past the
+ * tallest of the blocks those cover nothing can stop it (Lit). Worked out
+ * from Cell() itself, block by block as rays first need them, and kept for
+ * the generation like the cells: the same casters, so the same answers.
+ */
+#define BLOCK_SHIFT 2
+#define BLOCK_CACHE_SIZE 1024u
+/* Over each caster's own top + base: Lit compares the ray with the sum and
+ * CellOccludes with the difference, which may part by a rounding. */
+#define BLOCK_MARGIN (1.0f / 256.0f)
+typedef struct
+{
+    int16_t bx, bz;
+    float ceiling;    /* world height; -1000 where nothing casts */
+    uint32_t generation;
+} LightBlock;
+static LightBlock sBlocks[BLOCK_CACHE_SIZE];
+/*
+ * The tallest of a block and the two blocks west and north of it (3x3): all
+ * a ray from inside the block can reach (VOXEL_LIGHT_REACH runs 6.8 cells
+ * west and 4.4 north, less than two blocks). One lookup per ray rather than
+ * one per block its reach covers: with those, rays that were short already
+ * cost more than they saved. Its own table, as working it out reads blocks
+ * whose entries it would otherwise evict.
+ */
+#define REACH_BLOCKS 2
+static LightBlock sReach[BLOCK_CACHE_SIZE];
+/* Read for a ray with more than this left to climb to the map's bound. */
+#define BLOCK_CLIMB 1.0f
+
+/* The work rays do, for the slow chunk log: points marched, and of those (and
+ * of the contact tests) how many were tested against a relief's surface. */
+static unsigned sSteps, sSurfaceTests;
 
 static int Tile(float n)
 {
@@ -124,27 +167,56 @@ static void MapCeilings(void)
     }
 }
 
+static void ResetSamples(void)
+{
+    if (++sSampleGeneration == 0)
+    {
+        memset(sSamples, 0, sizeof(sSamples));
+        sSampleGeneration = 1;
+    }
+}
+
+bool VoxelLighting_SetSun(float dx, float dz, float strength, uint32_t key)
+{
+    if (!isfinite(dx) || !isfinite(dz) || !isfinite(strength)
+     || fabsf(dx) > 1.5f || fabsf(dz) > 1.5f || strength < 0.0f || strength > 1.0f)
+        return false;
+    if (gVoxelSun.dx == dx && gVoxelSun.dz == dz
+     && gVoxelSun.strength == strength && gVoxelSun.key == key)
+        return false;
+    gVoxelSun = (VoxelSun){dx, dz, strength, key};
+    sAmbient = 1.0f - (1.0f - VOXEL_AMBIENT) * strength;
+    sStepInverseX = fabsf(dx) > 0.0001f ? 4.0f / dx : 0.0f;
+    sStepInverseZ = fabsf(dz) > 0.0001f ? 4.0f / dz : 0.0f;
+    ResetSamples();
+    return true;
+}
+
 void VoxelLighting_Reset(void)
 {
     if (++sGeneration == 0)
     {
         memset(sCells, 0, sizeof(sCells));
-        memset(sSamples, 0, sizeof(sSamples));
+        memset(sBlocks, 0, sizeof(sBlocks));
+        memset(sReach, 0, sizeof(sReach));
         sGeneration = 1;
     }
+    ResetSamples();
     sCeiling = CasterCeiling();
     MapCeilings();
 }
 
 /*
  * The height past which nothing a ray from (x, z) can meet stands: over the
- * maps its reach overlaps (it runs northwest, towards the sun, and a cell's
+ * maps its reach overlaps (it runs towards the sun, and a cell's
  * point may lie a little off the ray's own), never above the global bound.
  */
 static float RayCeiling(float x, float z)
 {
-    float x0 = x - VOXEL_SUN_DX * VOXEL_LIGHT_REACH - 1.0f, x1 = x + 1.0f;
-    float z0 = z - VOXEL_SUN_DZ * VOXEL_LIGHT_REACH - 1.0f, z1 = z + 1.0f;
+    float endX = x - VOXEL_SUN_DX * VOXEL_LIGHT_REACH;
+    float endZ = z - VOXEL_SUN_DZ * VOXEL_LIGHT_REACH;
+    float x0 = fminf(x, endX) - 1.0f, x1 = fmaxf(x, endX) + 1.0f;
+    float z0 = fminf(z, endZ) - 1.0f, z1 = fmaxf(z, endZ) + 1.0f;
     float ceiling = -1000.0f;
     unsigned count = VoxelWorld_InstanceCount();
 
@@ -188,7 +260,7 @@ static const LightCell *Cell(int x, int z)
     metatile = VoxelWorld_GetMetatileId(x, z);
     if (VoxelWorld_UsesTreeSprites(inst))
     {
-        int part = VoxelTree_Part(metatile);
+        int part = VoxelTree_Part(inst->secondaryTileset, metatile);
         if (part >= 0)
         {
             /* A rounded crown proxy, rather than the opaque rectangular card.
@@ -197,7 +269,7 @@ static const LightCell *Cell(int x, int z)
             cell->top = CROWN_TOP;
             return cell;
         }
-        if (VoxelTree_GroundMetatile(metatile) != metatile)
+        if (VoxelTree_GroundMetatile(inst->secondaryTileset, metatile) != metatile)
             return cell; /* canopy fringe removed by the tree renderer */
     }
     /* A modelled building casts from its own solid, cell by cell - and a
@@ -229,6 +301,100 @@ static const LightCell *Cell(int x, int z)
     return cell;
 }
 
+/* Floor division by the block side, negative tiles included. */
+static int BlockOf(int tile)
+{
+    return tile >= 0 ? tile >> BLOCK_SHIFT : -((-tile + (1 << BLOCK_SHIFT) - 1) >> BLOCK_SHIFT);
+}
+
+/* The height a ray must pass to clear every caster of block (bx, bz). */
+static float BlockCeiling(int bx, int bz)
+{
+    unsigned key = ((uint32_t)bx * 73856093u ^ (uint32_t)bz * 19349663u)
+                 & (BLOCK_CACHE_SIZE - 1);
+    LightBlock *block = &sBlocks[key];
+    float ceiling = -1000.0f;
+    int x0 = bx * (1 << BLOCK_SHIFT), z0 = bz * (1 << BLOCK_SHIFT);
+    int x1 = x0 + (1 << BLOCK_SHIFT), z1 = z0 + (1 << BLOCK_SHIFT);
+    bool onMap = false;
+
+    if (block->generation == sGeneration && block->bx == bx && block->bz == bz)
+        return block->ceiling;
+    /* Off every map no cell casts (Cell): not worth classifying sixteen
+     * cells, each evicting one rays do test. */
+    for (unsigned i = 0; i < VoxelWorld_InstanceCount() && !onMap; ++i)
+    {
+        const VoxelMapInstance *inst = VoxelWorld_Instance(i);
+
+        onMap = inst != NULL && inst->originX < x1 && inst->originX + inst->width > x0
+             && inst->originY < z1 && inst->originY + inst->height > z0;
+    }
+    for (int z = z0; onMap && z < z1; ++z)
+        for (int x = x0; x < x1; ++x)
+        {
+            const LightCell *cell = Cell(x, z);
+
+            /* CellOccludes: nothing under its top, and nothing at all from a
+             * cell whose top is not above its base (a surface's always is). */
+            if (cell->top > 0.0f && cell->top + cell->base + BLOCK_MARGIN > ceiling)
+                ceiling = cell->top + cell->base + BLOCK_MARGIN;
+        }
+    block->generation = sGeneration;
+    block->bx = (int16_t)bx;
+    block->bz = (int16_t)bz;
+    block->ceiling = ceiling;
+    return ceiling;
+}
+
+/* The tallest caster of the blocks from (bx0, bz0) to (bx1, bz1). */
+static float BlocksCeiling(int bx0, int bz0, int bx1, int bz1)
+{
+    float ceiling = -1000.0f;
+
+    for (int bz = bz0; bz <= bz1; ++bz)
+        for (int bx = bx0; bx <= bx1; ++bx)
+        {
+            float block = BlockCeiling(bx, bz);
+
+            if (block > ceiling)
+                ceiling = block;
+        }
+    return ceiling;
+}
+
+/* The same over (bx0, bz0) to (bx1, bz1), from sReach when it covers them. */
+static float ReachCeiling(int bx0, int bz0, int bx1, int bz1)
+{
+    if (bx0 > bx1)
+    {
+        int first = bx1;
+
+        bx1 = bx0;
+        bx0 = first;
+    }
+    if (bz0 > bz1)
+    {
+        int first = bz1;
+
+        bz1 = bz0;
+        bz0 = first;
+    }
+    unsigned key = ((uint32_t)bx1 * 73856093u ^ (uint32_t)bz1 * 19349663u)
+                 & (BLOCK_CACHE_SIZE - 1);
+    LightBlock *reach = &sReach[key];
+
+    if (bx1 - bx0 > REACH_BLOCKS || bz1 - bz0 > REACH_BLOCKS)
+        return BlocksCeiling(bx0, bz0, bx1, bz1);
+    if (reach->generation != sGeneration || reach->bx != bx1 || reach->bz != bz1)
+    {
+        reach->ceiling = BlocksCeiling(bx1 - REACH_BLOCKS, bz1 - REACH_BLOCKS, bx1, bz1);
+        reach->generation = sGeneration;
+        reach->bx = (int16_t)bx1;
+        reach->bz = (int16_t)bz1;
+    }
+    return reach->ceiling;
+}
+
 /* A ray this far under a drawn map's surface is under it, not grazing it. */
 #define SURFACE_BIAS 0.06f
 
@@ -241,7 +407,10 @@ static bool CellOccludes(const LightCell *cell, float x, float y, float z)
     if (cell->top <= y || (cell->top <= 0.0f && !cell->surface))
         return false;
     if (cell->surface)
+    {
+        ++sSurfaceTests;
         return y < VoxelRelief_SurfaceAt(x, z) - SURFACE_BIAS;
+    }
     if (cell->mask != NULL)
     {
         int px = (int)((x - (float)cell->x) * 16.0f), pz = (int)((z - (float)cell->z) * 16.0f);
@@ -314,10 +483,16 @@ bool gVoxelLightingStepEveryPoint; /* the reference march, for the tests */
 static bool Lit(float x, float y, float z)
 {
     float ceiling;
+    /* The blocks' bound is only valid for the maps it was read from: with
+     * maps put on screen since the last reset, the map bound alone. */
+    bool blocks;
 
+    if (gVoxelSun.strength == 0.0f)
+        return true;
     if (sGeneration == 0)
         VoxelLighting_Reset();
     ceiling = RayCeiling(x, z);
+    blocks = VoxelWorld_InstanceCount() == sMapCeilings;
     for (int step = 1; step <= VOXEL_LIGHT_REACH * 4;)
     {
         float rx, ry, rz;
@@ -329,7 +504,26 @@ static bool Lit(float x, float y, float z)
             break;
         tx = Tile(rx);
         tz = Tile(rz);
+        /* The blocks' bound, read once, at the first point the map bound
+         * has not stopped: its points from here to the last lie between this
+         * block and the last point's (rx and rz only fall), and so do the
+         * cells they test. Not for a ray with little left to climb anyway:
+         * on a route of trees that was all of them, and the lookups cost
+         * more than the points they saved. */
+        if (blocks && ceiling - ry > BLOCK_CLIMB)
+        {
+            float fx, fy, fz, reach;
+
+            blocks = false;
+            RayPoint(x, y, z, VOXEL_LIGHT_REACH * 4, &fx, &fy, &fz);
+            reach = ReachCeiling(BlockOf(Tile(fx)), BlockOf(Tile(fz)), BlockOf(tx), BlockOf(tz));
+            if (reach < ceiling)
+                ceiling = reach;
+            if (ry >= ceiling)
+                break;
+        }
         cell = Cell(tx, tz);
+        ++sSteps;
         if (CellOccludes(cell, rx, ry, rz))
             return false;
         ++step;
@@ -340,26 +534,27 @@ static bool Lit(float x, float y, float z)
         if ((cell->crownPart >= 0 || cell->surface || cell->sign || cell->mask != NULL)
          && cell->top + cell->base > ry)
             continue;  /* not a box: point by point while it is above the ray */
-        /* Leave the cell. rx and rz only fall, so it is left when either
-         * drops below the cell's corner. The estimate starts a step short
+        /* Leave the cell along the current sun direction. The estimate starts a step short
          * of the crossing and the exact points settle it. */
         {
             /* Reciprocals, not divisions: the guess is a step short of the
              * crossing anyway, far more than their rounding. */
-            float ex = (x - (float)tx) * (1.0f / (VOXEL_SUN_DX * 0.25f));
-            float ez = (z - (float)tz) * (1.0f / (VOXEL_SUN_DZ * 0.25f));
-            int guess = (int)(ex < ez ? ex : ez) - 1;
+            float exitX = (float)tx + (VOXEL_SUN_DX < 0.0f ? 1.0f : 0.0f);
+            float exitZ = (float)tz + (VOXEL_SUN_DZ < 0.0f ? 1.0f : 0.0f);
+            float ex = sStepInverseX != 0.0f ? (x - exitX) * sStepInverseX : 33.0f;
+            float ez = sStepInverseZ != 0.0f ? (z - exitZ) * sStepInverseZ : 33.0f;
+            int guess = (int)fminf(33.0f, fminf(ex, ez)) - 1;
             const float left = (float)tx, top = (float)tz;
 
             if (guess > step)
                 step = guess;
-            /* rx and rz only fall and the first point was inside the cell,
-             * so it is left exactly when either drops under its corner:
+            /* The first point was inside the cell, so either boundary detects
              * Tile(r) != t, without computing Tile. */
             for (; step <= VOXEL_LIGHT_REACH * 4; ++step)
             {
                 RayPoint(x, y, z, step, &rx, &ry, &rz);
-                if (rx < left || rz < top || ry >= ceiling)
+                if (rx < left || rx >= left + 1.0f
+                 || rz < top || rz >= top + 1.0f || ry >= ceiling)
                     break;
             }
         }
@@ -389,7 +584,7 @@ static float Contact(float x, float y, float z)
  * corners cast their rays again for each quad that met them. The bucket is
  * only where to look; the match is exact.
  */
-static const LightSample *CachedSample(float x, float y, float z)
+static LightSample *FindSample(float x, float y, float z)
 {
     uint32_t hash = (uint32_t)Tile(x * 8.0f) * 73856093u
                   ^ (uint32_t)Tile(z * 8.0f) * 19349663u
@@ -407,7 +602,7 @@ static const LightSample *CachedSample(float x, float y, float z)
         VoxelLighting_Reset();
     for (unsigned i = 0; i < SAMPLE_WAYS; ++i)
     {
-        if (ways[i].generation == sGeneration)
+        if (ways[i].generation == sSampleGeneration)
         {
             if (ways[i].x == x && ways[i].y == y && ways[i].z == z)
                 return &ways[i];
@@ -420,14 +615,41 @@ static const LightSample *CachedSample(float x, float y, float z)
         sample = &ways[sSampleNext[set]];
         sSampleNext[set] = (sSampleNext[set] + 1u) & (SAMPLE_WAYS - 1u);
     }
-    ++sRays;
-    sample->lit = Lit(x, y, z);
     sample->contact = Contact(x, y, z);
+    sample->rayCast = false;
     sample->x = x;
     sample->y = y;
     sample->z = z;
-    sample->generation = sGeneration;
+    sample->generation = sSampleGeneration;
     return sample;
+}
+
+static const LightSample *CachedSample(float x, float y, float z)
+{
+    LightSample *sample = FindSample(x, y, z);
+
+    if (!sample->rayCast)
+    {
+        if (gVoxelSun.strength > 0.0f)
+            ++sRays;
+        sample->lit = Lit(x, y, z);
+        sample->rayCast = true;
+    }
+    return sample;
+}
+
+/*
+ * The contact AO alone, for a point turned from the sun: cached with the
+ * samples, as it depends on the point alone. A relief corner is shared by
+ * the four quads around it, and each tested its four neighbours again.
+ */
+static float CachedContact(float x, float y, float z)
+{
+    /* Contact's own first test: too cheap to cache, and caching it would
+     * only evict samples whose rays were cast. */
+    if (y - Cell(Tile(x), Tile(z))->base > 0.41f)
+        return 1.0f;
+    return FindSample(x, y, z)->contact;
 }
 
 unsigned VoxelLighting_Rays(void)
@@ -435,22 +657,37 @@ unsigned VoxelLighting_Rays(void)
     return sRays;
 }
 
+unsigned VoxelLighting_Steps(void)
+{
+    return sSteps;
+}
+
+unsigned VoxelLighting_SurfaceTests(void)
+{
+    return sSurfaceTests;
+}
+
 float VoxelLighting_Sample(float x, float y, float z)
 {
     const LightSample *sample = CachedSample(x, y, z);
 
-    return (sample->lit ? 1.0f : VOXEL_AMBIENT) * sample->contact;
+    return (sample->lit ? 1.0f : sAmbient) * sample->contact;
 }
 
 uint32_t VoxelLighting_Hash(int x0, int z0, int x1, int z1)
 {
-    /* Rays now reach northwest. Also include the chunk's own north margin
-     * and neighbours on the opposite boundary for AO and face visibility. */
-    int northReach = VOXEL_LIGHT_REACH > VOXEL_CHUNK_MARGIN_NORTH
-                   ? VOXEL_LIGHT_REACH : VOXEL_CHUNK_MARGIN_NORTH;
-    int hx0 = x0 - VOXEL_LIGHT_REACH - 1, hz0 = z0 - northReach - 1;
-    int hx1 = x1 + 1, hz1 = z1 + 2;
+    /* Include the moving ray's reach and neighbours for AO/face visibility. */
+    int reachX = (int)ceilf(fabsf(VOXEL_SUN_DX) * VOXEL_LIGHT_REACH);
+    int reachZ = (int)ceilf(fabsf(VOXEL_SUN_DZ) * VOXEL_LIGHT_REACH);
+    int northReach = VOXEL_SUN_DZ > 0.0f ? reachZ : 0;
+    int hx0 = x0 - (VOXEL_SUN_DX > 0.0f ? reachX : 0) - 1;
+    int hz0 = z0 - (northReach > VOXEL_CHUNK_MARGIN_NORTH
+                  ? northReach : VOXEL_CHUNK_MARGIN_NORTH) - 1;
+    int hx1 = x1 + (VOXEL_SUN_DX < 0.0f ? reachX : 0) + 1;
+    int hz1 = z1 + (VOXEL_SUN_DZ < 0.0f ? reachZ : 0) + 2;
     uint32_t hash = VoxelWorld_BlockHash(hx0, hz0, hx1, hz1);
+
+    hash = (hash ^ gVoxelSun.key) * 16777619u;
 
     /* Equal tile IDs in a different tileset/layout do not mean equal casters.
      * Relative origins preserve the hash when the entire world is rebased. */
@@ -487,6 +724,12 @@ static VoxelVertex Mix(VoxelVertex a, VoxelVertex b, float t)
 static void RawQuad(VoxelBuilder *builder, const VoxelVertex *a,
                     const VoxelVertex *b, const VoxelVertex *c, const VoxelVertex *d)
 {
+    /* Whole or not at all: half a quad is a sliver along its diagonal. */
+    if (builder->count + 6 > builder->capacity)
+    {
+        builder->dropped += 2;
+        return;
+    }
     VoxelBuilder_Tri(builder, a, b, c);
     VoxelBuilder_Tri(builder, a, c, d);
 }
@@ -502,10 +745,10 @@ float VoxelLighting_Face(float nx, float ny, float nz)
         return 1.0f;
     facing = (ny - VOXEL_SUN_DX * nx - VOXEL_SUN_DZ * nz) / length;
     if (facing <= 0.0f)
-        return VOXEL_AMBIENT;
+        return sAmbient;
     if (facing >= 1.0f)
         return 1.0f;
-    return VOXEL_AMBIENT + (1.0f - VOXEL_AMBIENT) * facing;
+    return sAmbient + (1.0f - sAmbient) * facing;
 }
 
 /* Where the builder puts a point it is given: the world, base and lift in. */
@@ -521,9 +764,12 @@ static void WorldPoint(const VoxelBuilder *builder, const VoxelVertex *v,
 
 static void EmitPolygon(VoxelBuilder *builder, const VoxelVertex *out, unsigned count)
 {
-    VoxelBuilder_Tri(builder, &out[0], &out[1], &out[2]);
     if (count == 4)
-        VoxelBuilder_Tri(builder, &out[0], &out[2], &out[3]);
+    {
+        RawQuad(builder, &out[0], &out[1], &out[2], &out[3]);
+        return;
+    }
+    VoxelBuilder_Tri(builder, &out[0], &out[1], &out[2]);
 }
 
 /*
@@ -536,7 +782,7 @@ static void LightPolygon(VoxelBuilder *builder, const VoxelVertex *const *v, uns
 {
     VoxelVertex out[4];
     float face = VoxelLighting_Face(nx, ny, nz);
-    bool sunward = face > VOXEL_AMBIENT;
+    bool sunward = face > sAmbient;
     float px, py, pz;
 
     for (unsigned i = 0; i < count; ++i)
@@ -549,11 +795,11 @@ static void LightPolygon(VoxelBuilder *builder, const VoxelVertex *const *v, uns
         WorldPoint(builder, v[i], &px, &py, &pz);
         if (!sunward)
         {
-            out[i].shade *= VOXEL_AMBIENT * Contact(px, py, pz);
+            out[i].shade *= sAmbient * CachedContact(px, py, pz);
             continue;
         }
         sample = CachedSample(px, py, pz);
-        out[i].shade *= (sample->lit ? face : VOXEL_AMBIENT) * sample->contact;
+        out[i].shade *= (sample->lit ? face : sAmbient) * sample->contact;
     }
     EmitPolygon(builder, out, count);
 }
@@ -562,33 +808,35 @@ static void LightPolygon(VoxelBuilder *builder, const VoxelVertex *const *v, uns
  * The relief's lattice (builder->vertexFace): each corner brings its own
  * face term in its shade. A corner turned from the sun casts no ray.
  */
-static void LightVertexFaces(VoxelBuilder *builder, const VoxelVertex *const *v)
+static void LightVertexFaces(VoxelBuilder *builder, const VoxelVertex *const *v, unsigned count)
 {
     VoxelVertex out[4];
 
-    for (unsigned i = 0; i < 4; ++i)
+    for (unsigned i = 0; i < count; ++i)
     {
         float face = v[i]->shade, px, py, pz;
 
         out[i] = *v[i];
         WorldPoint(builder, v[i], &px, &py, &pz);
-        if (face <= VOXEL_AMBIENT + 0.001f)
+        if (face <= sAmbient + 0.001f)
         {
-            out[i].shade = VOXEL_AMBIENT * Contact(px, py, pz);
+            out[i].shade = sAmbient * CachedContact(px, py, pz);
             continue;
         }
         {
             const LightSample *sample = CachedSample(px, py, pz);
 
-            out[i].shade = (sample->lit ? face : VOXEL_AMBIENT) * sample->contact;
+            out[i].shade = (sample->lit ? face : sAmbient) * sample->contact;
         }
     }
-    EmitPolygon(builder, out, 4);
+    EmitPolygon(builder, out, count);
 }
 
-void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
-                         const VoxelVertex *b, const VoxelVertex *c,
-                         const VoxelVertex *d)
+/* A quad, or with `count` 3 the triangle a b c (d is c): lit alike, the
+ * triangle only spared the quad's empty second half. */
+static void LightFace(VoxelBuilder *builder, const VoxelVertex *a,
+                      const VoxelVertex *b, const VoxelVertex *c,
+                      const VoxelVertex *d, unsigned count)
 {
     VoxelVertex corners[4] = {*a, *b, *c, *d};
     const VoxelVertex *points[4] = {a, b, c, d};
@@ -601,7 +849,7 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
 
     if (builder->vertexFace && builder->lightingConstant < 0.0f && !builder->rounded)
     {
-        LightVertexFaces(builder, points);
+        LightVertexFaces(builder, points, count);
         return;
     }
     if (ny < 0.0f)
@@ -630,12 +878,12 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
      * there is no sun left to face. */
     if (builder->lightingConstant >= 0.0f)
     {
-        float light = builder->lightingConstant > VOXEL_AMBIENT + 0.01f
+        float light = builder->lightingConstant > sAmbient + 0.01f
                     ? builder->lightingConstant * face : builder->lightingConstant;
 
         for (unsigned i = 0; i < 4; ++i)
             corners[i].shade *= light;
-        RawQuad(builder, &corners[0], &corners[1], &corners[2], &corners[3]);
+        EmitPolygon(builder, corners, count);
         return;
     }
 
@@ -649,14 +897,15 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
 
             WorldPoint(builder, points[i], &px, &py, &pz);
             sample = CachedSample(px, py, pz);
-            corners[i].shade *= (sample->lit ? face : VOXEL_AMBIENT) * sample->contact;
+            corners[i].shade *= (sample->lit ? face : sAmbient) * sample->contact;
         }
-        RawQuad(builder, &corners[0], &corners[1], &corners[2], &corners[3]);
+        EmitPolygon(builder, corners, count);
         return;
     }
 
     /* Only ground-sized horizontal faces need extra samples. Four sub-quads
-     * resolve diagonal shadow edges without multiplying all wall geometry. */
+     * resolve diagonal shadow edges without multiplying all wall geometry.
+     * A triangle spanning the cell goes this way as the quad it was. */
     if (builder->lightingRefine
      && a->y == b->y && a->y == c->y && a->y == d->y && (a->y <= 0.41f || builder->artShaded)
      && fabsf(a->x - c->x) >= 0.99f && fabsf(a->z - c->z) >= 0.99f
@@ -691,7 +940,20 @@ void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
             RawQuad(builder, &grid[0], &grid[2], &grid[8], &grid[6]);
         return;
     }
-    LightPolygon(builder, points, 4, nx, ny, nz);
+    LightPolygon(builder, points, count, nx, ny, nz);
+}
+
+void VoxelLighting_Quad(VoxelBuilder *builder, const VoxelVertex *a,
+                         const VoxelVertex *b, const VoxelVertex *c,
+                         const VoxelVertex *d)
+{
+    LightFace(builder, a, b, c, d, 4);
+}
+
+void VoxelLighting_Tri(VoxelBuilder *builder, const VoxelVertex *a,
+                       const VoxelVertex *b, const VoxelVertex *c)
+{
+    LightFace(builder, a, b, c, c, 3);
 }
 
 /*
@@ -711,7 +973,16 @@ void VoxelLighting_ModelTri(VoxelBuilder *builder, const VoxelVertex *a,
                             const VoxelVertex *b, const VoxelVertex *c, float drawnShade)
 {
     VoxelVertex plain[3] = {*a, *b, *c};
-    float face;
+    float face = VoxelLighting_ModelShade(a, b, c, drawnShade);
+
+    for (unsigned i = 0; i < 3; ++i)
+        plain[i].shade = face;
+    VoxelBuilder_Tri(builder, &plain[0], &plain[1], &plain[2]);
+}
+
+float VoxelLighting_ModelShade(const VoxelVertex *a, const VoxelVertex *b,
+                               const VoxelVertex *c, float drawnShade)
+{
     float ux = b->x - a->x, uy = b->y - a->y, uz = b->z - a->z;
     float vx = c->x - a->x, vy = c->y - a->y, vz = c->z - a->z;
     float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
@@ -737,101 +1008,9 @@ void VoxelLighting_ModelTri(VoxelBuilder *builder, const VoxelVertex *a,
      * The drawn shade gives way to the sun's facing, and that is all: no
      * cast shadow on a model, as there never was. A town's models are
      * thousands of triangles, and a ray from each put a Rustboro chunk at
-     * 40-80 ms on an Old 3DS.
+     * 40-80 ms on an Old 3DS. It depends on the triangle alone, so a
+     * static model's is worked out once (ctr_voxel.c StaticMesh).
      */
-    face = VoxelLighting_Face(nx, ny, nz);
-    for (unsigned i = 0; i < 3; ++i)
-        plain[i].shade = face;
-    VoxelBuilder_Tri(builder, &plain[0], &plain[1], &plain[2]);
-}
-
-/* Contact shadows are clipped to each receiving ground tile: no floating blob
- * across a wall, void, water edge or step. Like the current billboard renderer,
- * this uses visual mesh heights, not the GBA collision-elevation byte. */
-static bool Receiver(int x, int z, float *height)
-{
-    const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, z);
-    int metatile;
-    if (inst == NULL || inst->indoor)
-        return false;
-    metatile = VoxelWorld_GetMetatileId(x, z);
-    if (VoxelWorld_UsesTreeSprites(inst)
-     && (VoxelTree_Part(metatile) >= 0 || VoxelTree_GroundMetatile(metatile) != metatile))
-    {
-        *height = 0.0f;
-        return true;
-    }
-    {
-        float top;
-
-        /* Ground the model leaves uncovered receives like any other. */
-        if (VoxelBuildings_CellAt(inst, x, z, NULL, &top))
-        {
-            *height = 0.0f;
-            return top <= 0.0f;
-        }
-    }
-    /* Nor is there a flat top on a slope for a shadow to lie on. */
-    if (VoxelRelief_IsSlope(VoxelRelief_Cell(inst, x, z)))
-        return false;
-    switch (VoxelWorld_ClassifyTile(x, z))
-    {
-    case VOXEL_SHAPE_FLAT:
-    case VOXEL_SHAPE_WATER: *height = 0.0f; return true;
-    case VOXEL_SHAPE_DECAL: *height = 0.02f; return true;
-    default: return false;
-    }
-}
-
-/* Sutherland-Hodgman, clipping a convex polygon against one tile edge. An
- * octagon clipped by four planes has at most twelve vertices. */
-static unsigned Clip(const VoxelVertex *in, unsigned count, VoxelVertex *out,
-                      bool axisZ, float edge, bool greater)
-{
-    unsigned written = 0;
-    if (count == 0) return 0;
-    VoxelVertex prev = in[count - 1];
-    float pd = (axisZ ? prev.z : prev.x) - edge;
-    if (!greater) pd = -pd;
-    for (unsigned i = 0; i < count; ++i)
-    {
-        VoxelVertex cur = in[i];
-        float cd = (axisZ ? cur.z : cur.x) - edge;
-        if (!greater) cd = -cd;
-        if ((pd < 0 && cd > 0) || (pd > 0 && cd < 0))
-            out[written++] = Mix(prev, cur, pd / (pd - cd));
-        if (cd >= 0) out[written++] = cur;
-        prev = cur;
-        pd = cd;
-    }
-    return written;
-}
-
-void VoxelLighting_Contact(VoxelBuilder *builder, float x, float z)
-{
-    static const float ring[8][2] = {
-        {-1,0}, {-0.707107f,-0.707107f}, {0,-1}, {0.707107f,-0.707107f},
-        {1,0}, {0.707107f,0.707107f}, {0,1}, {-0.707107f,0.707107f}
-    };
-    VoxelVertex polygon[8], a[16], b[16];
-    /* Slight southeast displacement, away from the northwest sun. */
-    float cx = x + 0.10f, cz = z + 0.06f;
-    for (unsigned i = 0; i < 8; ++i)
-        polygon[i] = (VoxelVertex){cx + ring[i][0] * 0.36f, 0,
-                                   cz + ring[i][1] * 0.23f, 0, 0, 0};
-    for (int tz = Tile(cz - 0.23f); tz <= Tile(cz + 0.23f); ++tz)
-        for (int tx = Tile(cx - 0.36f); tx <= Tile(cx + 0.36f); ++tx)
-        {
-            float height;
-            unsigned n;
-            if (!Receiver(tx, tz, &height)) continue;
-            n = Clip(polygon, 8, a, false, (float)tx, true);
-            n = Clip(a, n, b, false, (float)(tx + 1), false);
-            n = Clip(b, n, a, true, (float)tz, true);
-            n = Clip(a, n, b, true, (float)(tz + 1), false);
-            for (unsigned i = 0; i < n; ++i) b[i].y = height + 0.012f;
-            for (unsigned i = 1; i + 1 < n; ++i)
-                VoxelBuilder_Tri(builder, &b[0], &b[i], &b[i + 1]);
-        }
+    return VoxelLighting_Face(nx, ny, nz);
 }
 #endif

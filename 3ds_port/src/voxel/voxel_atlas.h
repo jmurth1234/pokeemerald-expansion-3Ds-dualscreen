@@ -175,6 +175,17 @@ unsigned VoxelAtlas_AnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlas
                                   unsigned page, const uint8_t *liveTiles,
                                   const uint8_t work[128], unsigned *cursor,
                                   VoxelAnimSlot *out, unsigned max);
+/*
+ * The same for the atlas of a map beside the current one that shares its
+ * primary tileset (Route 107's Dewford pair beside Route 108's Slateport
+ * one): BG VRAM holds the current map's secondary tiles, not this pair's, so
+ * only the metatiles drawn wholly from primary tiles - the sea, the shore,
+ * the flowers - are redrawn, and `work` is read for primary tiles alone.
+ */
+unsigned VoxelAtlas_SharedAnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlasMap *map,
+                                        unsigned page, const uint8_t *liveTiles,
+                                        const uint8_t work[128], unsigned *cursor,
+                                        VoxelAnimSlot *out, unsigned max);
 
 /* Texture coordinates of a packed slot, in the PICA convention where v=1 is
  * the first row in memory. U includes page*2, stripped by the chunk packer. */

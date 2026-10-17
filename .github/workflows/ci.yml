@@ -41,8 +41,29 @@ jobs:
           cd 3ds_port
           gcc -std=c99 -O2 -Wall -Wextra -Werror -Iinclude tests/input_test.c src/3ds_input_decode.c -o input_test && ./input_test
           gcc -std=c99 -O2 -Wall -Wextra -Werror -Iinclude tests/video_decode_test.c src/3ds_video_decode.c -o video_test && ./video_test
+      - name: Day/night clock and lighting
+        run: make -C 3ds_port verify-daynight verify-clock-store verify-encounters verify-night-lamps
+      - name: Standalone voxel shadows and mesh fixtures
+        run: |
+          make -C 3ds_port verify-voxel-lighting verify-voxel-trees build/voxel_ground_mesh_test.exe
+          cd 3ds_port
+          ./build/voxel_ground_mesh_test.exe
+      - name: Night window masks and building-page compatibility
+        run: |
+          python -m pip install Pillow
+          python 3ds_port/tests/voxel_night_test.py --cc gcc
+      - name: Bottom map and clock footer
+        run: python 3ds_port/tests/bottom_map_test.py
 
   build-3ds:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - upstream: pokeemerald
+            tree: upstream
+          - upstream: pokeemerald-expansion
+            tree: expansion
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
     steps:
@@ -52,17 +73,27 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends build-essential g++ libpng-dev python3 python3-pil git
       - name: Bootstrap and build
-        run: python3 tools/bootstrap.py --make -j4 --python python3
+        run: |
+          python3 -m py_compile tools/port_common/gen_asset_table.py
+          python3 builder/tests/test_asset_table_compatibility.py
+          python3 tools/bootstrap.py --upstream ${{ matrix.upstream }} --dir build/${{ matrix.tree }} --make -j4 --python python3
       - name: Host tests and link audit
-        run: make -C build/upstream/3ds_port verify PYTHON=python3
+        run: make -C build/${{ matrix.tree }}/3ds_port verify PYTHON=python3
+      - name: Production timed encounter rules
+        if: matrix.upstream == 'pokeemerald'
+        run: python3 3ds_port/tests/encounter_tables_test.py --tree build/${{ matrix.tree }}
+      - name: Production berry clock integration
+        if: matrix.upstream == 'pokeemerald'
+        run: python3 3ds_port/tests/berry_clock_test.py --tree build/${{ matrix.tree }}
       - name: Engine-only 3DSX
-        run: make -C build/upstream/3ds_port release PYTHON=python3
+        run: make -C build/${{ matrix.tree }}/3ds_port release PYTHON=python3
       - name: Audit the build outputs that would ship
         run: |
-          mkdir -p ship && cp build/upstream/3ds_port/dist/Emerald3DS.3dsx build/upstream/3ds_port/dist/Emerald3DS.smdh ship/
-          python3 -c "import zipfile,pathlib; z=zipfile.ZipFile('ship.zip','w'); [z.write(p, p.name) for p in pathlib.Path('ship').iterdir()]"
+          mkdir -p ship && cp build/${{ matrix.tree }}/3ds_port/dist/Emerald3DS.3dsx build/${{ matrix.tree }}/3ds_port/dist/Emerald3DS.smdh ship/
+          # In payload/, where the release ships them (release_audit_allow.toml [large]).
+          python3 -c "import zipfile,pathlib; z=zipfile.ZipFile('ship.zip','w'); [z.write(p, 'payload/' + p.name) for p in pathlib.Path('ship').iterdir()]"
           python3 tools/release_audit.py --zip ship.zip --strict
       - uses: actions/upload-artifact@v4
         with:
-          name: emerald3ds-engine
+          name: emerald3ds-engine-${{ matrix.tree }}
           path: ship/

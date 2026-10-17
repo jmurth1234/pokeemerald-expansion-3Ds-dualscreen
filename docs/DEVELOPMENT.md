@@ -30,13 +30,17 @@ port files without touching the upstream checkout unless `--clean` is given.
 applying `patches/pokeemerald-expansion/*.patch`:
 
 ```
-python tools/bootstrap.py --upstream pokeemerald-expansion --make
+python tools/bootstrap.py --upstream pokeemerald-expansion --dir build/expansion --make
 ```
 
 The port code is shared: where the trees differ it branches on
 `PORT_EXPANSION` (defined for expansion builds), and the graphics and
 generated headers the port reads from the tree are built on demand by the
 port Makefile.
+
+The expansion uses its own shop/trade controls and link engine. The original
+port's local-wireless adapter is currently enabled only for the original game.
+Both trees share the renderer, and CI builds and verifies both variants.
 
 ## Building
 
@@ -52,7 +56,11 @@ make devdata                     # build/devdata/ for the loose backend
 
 Options: `VOXEL=0`, `VOXEL_LIGHTING=0`, `SHOW_FPS=0`, `EMBED_DATA=0`,
 `DATA_BACKEND=1|2|3` (force romfs, loose or pak), `SAMPLE_OVERLAY_DIR=...`
-(replacement sample .bin files, for private experiments). Per-machine
+(replacement sample .bin files, for private experiments), `VOXEL_STEREO=1|0`
+(what OPTIONS' 3D WORLD on AUTO does: the voxel world per eye with the 3D
+slider on every model, or on none; unset, a New 3DS takes it), `FORCE_SLIDER=1.0` (a fixed 3D slider for an
+emulator without one; Azahar passes its own when `factor_3d` is non-zero in
+its config). Per-machine
 settings can go in `3ds_port/local.mk`, which is never committed.
 
 Game translation units have no header dependency tracking: after editing a
@@ -70,11 +78,35 @@ shared header, delete the affected `build/root/src/*.o`.
 - **Exactly the release**: `make release pak`, copy `dist/Emerald3DS.3dsx`
   and `build/emerald3ds.pak`.
 
-The log is `/3ds/emerald3ds/port.log`. Emulator runs (Azahar) are useful for
+The log is `/3ds/emerald3ds/port.log`, written only if an empty file named
+`/3ds/emerald3ds/debug.txt` exists on the SD card (create it for development
+builds); the previous session is kept as `port-prev.log`. Emulator runs (Azahar) are useful for
 diagnosis; acceptance is on hardware — the SD card's latency, the linear heap
 and VRAM behave differently there.
 
 ## Host tests
+
+The SDK-free day/night clock and lighting tests can also run separately:
+`make -C 3ds_port verify-daynight`. They are included in `make verify` and CI.
+`make -C 3ds_port verify-clock-store` exercises save-bound clock state, CRCs,
+fractions, file replacement/backup recovery and failed writes. After bootstrap,
+`python3 3ds_port/tests/berry_clock_test.py --tree build/upstream` compiles the
+actual berry/minute update functions and checks all six speeds, midnight,
+no double credit, watering/stopped-tree rules and original expiry. Repeat
+with `--tree build/upstream-es` for Spanish. Native clock and storage tests
+also pass ASan/UBSan on macOS.
+The shared-clock consumers and timed encounter resolver are tested by
+`make -C 3ds_port verify-daynight verify-encounters`. After bootstrap, run
+`python3 3ds_port/tests/encounter_tables_test.py --tree build/upstream` to
+check every production route rule, its pinned species, levels/rates and
+original fallbacks under ASan/UBSan. Use `--tree build/upstream-es` for Spanish.
+`python3 3ds_port/tests/bottom_map_test.py` compares partial/full map redraws,
+including the clock footer, midnight, toggles and location changes.
+`python3 3ds_port/tests/voxel_night_test.py --cc clang` checks authored window
+masks and the real VXB7/VXB8 readers without a bootstrapped tree (Pillow is
+required). Add `--assets build/upstream/3ds_port/romfs/voxel/buildings.bin`
+to check generated pages as well, or run `verify-night-windows` in that tree.
+See [day/night validation](DAY_NIGHT.md) for the hardware acceptance checklist.
 
 `make verify` builds and runs the C host tests (input decoding, video decode,
 pack parser, voxel world hashing, arena, atlas, trees, lighting, ground mesh,

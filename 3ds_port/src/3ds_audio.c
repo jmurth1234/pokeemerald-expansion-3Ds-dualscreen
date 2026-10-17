@@ -16,6 +16,7 @@
  */
 
 #include <3ds.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "3ds_audio.h"
@@ -36,6 +37,12 @@ static unsigned sPrimed;
 static float sRate;
 static bool sReady;
 static CtrAudioStats sStats;
+/* The sound engine's worker, at the end of this file. */
+static Thread sWorker;
+static LightEvent sKick, sIdle;
+static volatile bool sWorkerQuit;
+/* The worker on the DSP's clock (CtrAudio_SetClock, below). */
+static volatile bool sClock;
 
 bool CtrAudio_Available(void) { return sReady; }
 CtrAudioStats *CtrAudio_Stats(void) { return &sStats; }
@@ -97,6 +104,17 @@ bool CtrAudio_Init(void)
 
 void CtrAudio_Shutdown(void)
 {
+    if (sWorker != NULL)
+    {
+        ndspSetCallback(NULL, NULL);
+        if (!(sClock && sReady))
+            LightEvent_Wait(&sIdle);
+        sWorkerQuit = true;
+        LightEvent_Signal(&sKick);
+        threadJoin(sWorker, U64_MAX);
+        threadFree(sWorker);
+        sWorker = NULL;
+    }
     if (!sReady)
         return;
     sReady = false;
@@ -146,7 +164,7 @@ static void CorrectDrift(unsigned queued)
     sStats.rateHz = rate;
 }
 
-void CtrAudio_Queue(const float *interleaved, int frames)
+void CtrAudio_Queue(const int32_t *interleaved, int frames)
 {
     uint64_t start;
     unsigned queued;
@@ -190,17 +208,15 @@ void CtrAudio_Queue(const float *interleaved, int frames)
     out = sSamples + (size_t)sNext * CTR_AUDIO_MAX_FRAMES * 2;
     for (int i = 0; i < frames * 2; ++i)
     {
-        /*
-         * Adding 1.5 * 2^23 leaves the rounded integer in the low mantissa bits,
-         * so the conversion is one float add and a bit copy instead of a VFP11
-         * float-to-int, which stalls the pipeline. A sample is far inside +-2^22
-         * (a runaway mix is clipped below, after this).
-         */
-        union { float f; int32_t i; } magic;
-        int32_t sample;
+        /* The mixer's fixed point has 1 << 23 to full scale: 8 bits below
+         * the 16 the DSP plays, rounded off. */
+#ifdef PORT_EXPANSION
+        float value = ((const float *)interleaved)[i] * 32767.0f;
+        int32_t sample = value > 32767.0f ? 32767 : value < -32768.0f ? -32768 : (int32_t)value;
+#else
+        int32_t sample = (interleaved[i] + 128) >> 8;
+#endif
 
-        magic.f = interleaved[i] * 32767.0f + 12582912.0f;
-        sample = magic.i - 0x4B400000;
         if (sample > 32767)
             sample = 32767;
         else if (sample < -32768)
@@ -212,6 +228,19 @@ void CtrAudio_Queue(const float *interleaved, int frames)
             peak = sample;
     }
 
+#ifdef CTR_AUDIO_DUMP
+    {
+        static FILE *dump;
+        static unsigned dumped;
+
+        if (dumped == 0)
+            dump = fopen("sdmc:/3ds/emerald3ds/audio.raw", "wb");
+        if (dump && dumped >= 600 && dumped < 2400)
+            fwrite(out, sizeof(int16_t), (size_t)frames * 2, dump);
+        if (dump && ++dumped == 2400)
+            fclose(dump), dump = NULL;
+    }
+#endif
     DSP_FlushDataCache(out, (size_t)frames * 2 * sizeof(int16_t));
 
     memset(buf, 0, sizeof(*buf));
@@ -227,4 +256,187 @@ void CtrAudio_Queue(const float *interleaved, int frames)
     sStats.queued = queued + 1;
     CorrectDrift(queued + 1);
     sStats.submitMs = (float)((svcGetSystemTick() - start) * 1000.0 / SYSCLOCK_ARM11);
+}
+
+/* ── The sound engine's worker ─────────────────────────────────────────── */
+
+/*
+ * m4a mixes every voice in software, in floats, once a frame: on an Old 3DS
+ * that is milliseconds of the game thread's frame. On a core of its own it
+ * runs beside the next frame's game logic instead. The New 3DS has two cores
+ * the system leaves idle; the Old 3DS lends its system core for the share of
+ * time asked for here. Each frame waits for the previous mix before handing
+ * over the next, so the engine still advances exactly one frame per frame.
+ */
+#define CTR_AUDIO_SYSCORE_PERCENT 50
+/* On the system core the mix only gets that share of the time. If the game
+ * thread ends up waiting for it more than this on average, it mixes on its own
+ * thread again: never slower than without the worker. */
+#define CTR_AUDIO_WAIT_LIMIT_MS 1.0f
+#define CTR_AUDIO_WAIT_WINDOW 120
+static int sWorkerCore;
+static unsigned sKicks;
+static uint64_t sWaited;
+
+static RecursiveLock sSoundLock;
+static void (*sMix)(void);
+
+/*
+ * The sound engine on the DSP's clock (OPTIONS' REAL-TIME PACING,
+ * CtrAudio_SetClock): the worker mixes a frame whenever the DSP has fewer
+ * than CTR_AUDIO_TARGET_DEPTH queued, woken by NDSP's own frame callback,
+ * instead of once per game frame. A frame the game takes too long over then
+ * costs it a little speed, not the sound a click: music keeps its tempo,
+ * played by the DSP's time and not the display's. Off, the engine advances
+ * one frame per shown frame, as on the GBA, and the game thread waits for
+ * the mix it asked for (CtrAudio_Kick).
+ */
+/* With nothing to queue (the engine's DMA off, as before m4aSoundInit) the
+ * worker still mixes, but no faster than the game would have. */
+#define CTR_AUDIO_CLOCK_IDLE_MS 16.0f
+
+/* NDSP's thread, once per DSP frame (about 5 ms): the queue may have moved. */
+/* Set once the engine is back on the game thread (CtrAudio_Kick): the
+ * worker must never mix again, or two cores would run the engine at once
+ * when the clock is turned back on. */
+static volatile bool sGivenUp;
+
+static void DspFrame(void *arg)
+{
+    (void)arg;
+    if (sClock && !sGivenUp)
+        LightEvent_Signal(&sKick);
+}
+
+static void Worker(void *arg)
+{
+    uint64_t idleUntil = 0;
+
+    (void)arg;
+    for (;;)
+    {
+        LightEvent_Wait(&sKick);
+        if (sWorkerQuit)
+            break;
+        /* Without the DSP (CtrAudio_Init failed: an emulator without its
+         * firmware) there is no clock to follow and nothing to queue; the
+         * engine then runs once per shown frame as below, so that what the
+         * game asks of it - a cry's end, a fanfare's - still comes. */
+        if (sClock && sReady)
+        {
+            /* The game thread never waits in this mode, but leaves the idle
+             * event set so that leaving it finds the worker idle. */
+            LightEvent_Signal(&sIdle);
+            /* Up to the target depth, one frame per DSP frame at the most
+             * each: the next callback brings the rest, with the queue's
+             * statuses updated in between. */
+            if (QueuedBuffers() < CTR_AUDIO_TARGET_DEPTH && svcGetSystemTick() >= idleUntil)
+            {
+                uint32_t before = sStats.frames;
+
+                RecursiveLock_Lock(&sSoundLock);
+                sMix();
+                RecursiveLock_Unlock(&sSoundLock);
+                if (sStats.frames == before)
+                    idleUntil = svcGetSystemTick() + (uint64_t)(CTR_AUDIO_CLOCK_IDLE_MS * SYSCLOCK_ARM11 / 1000.0f);
+            }
+            continue;
+        }
+        RecursiveLock_Lock(&sSoundLock);
+        sMix();
+        RecursiveLock_Unlock(&sSoundLock);
+        LightEvent_Signal(&sIdle);
+    }
+    LightEvent_Signal(&sIdle);
+}
+
+void CtrAudio_SetClock(bool on)
+{
+    if (on == sClock)
+        return;
+    sClock = on;
+    if (sWorker != NULL)
+        CtrLog_Write(CTR_LOG_AUDIO, "sound engine %s", on ? "on the DSP's clock" : "once per shown frame");
+}
+
+bool CtrAudio_StartWorker(void (*mix)(void))
+{
+    s32 priority = 0x30;
+    int core = 2;
+    bool newModel = false;
+
+    if (sWorker != NULL)
+        return true;
+    sMix = mix;
+    RecursiveLock_Init(&sSoundLock);
+    LightEvent_Init(&sKick, RESET_ONESHOT);
+    LightEvent_Init(&sIdle, RESET_STICKY);
+    LightEvent_Signal(&sIdle);
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    /* Above the game thread: it only ever waits on the mix it asked for. */
+    priority = priority > 0x18 ? priority - 1 : priority;
+    /* Core 2 is a New 3DS's alone. An Old 3DS refuses it, but Azahar
+     * emulating one takes it and crashes, so only a New 3DS asks. */
+    if (R_SUCCEEDED(APT_CheckNew3DS(&newModel)) && newModel)
+        sWorker = threadCreate(Worker, NULL, 32 * 1024, priority, core, false);
+    if (sWorker == NULL && R_SUCCEEDED(APT_SetAppCpuTimeLimit(CTR_AUDIO_SYSCORE_PERCENT)))
+    {
+        core = 1;
+        sWorker = threadCreate(Worker, NULL, 32 * 1024, priority, core, false);
+    }
+    if (sWorker == NULL)
+    {
+        CtrLog_Write(CTR_LOG_AUDIO, "sound engine mixes on the game thread (no core to spare)");
+        return false;
+    }
+    sWorkerCore = core;
+    ndspSetCallback(DspFrame, NULL);
+    CtrLog_Write(CTR_LOG_AUDIO, "sound engine mixes on core %d%s", core, sClock ? ", on the DSP's clock" : "");
+    return true;
+}
+
+bool CtrAudio_Kick(void)
+{
+    if (sGivenUp)
+        return false;
+    if (sClock && sReady)
+    {
+        /* The DSP's callback wakes the worker; the game thread never waits. */
+        LightEvent_Signal(&sKick);
+        return true;
+    }
+    uint64_t start = svcGetSystemTick();
+
+    LightEvent_Wait(&sIdle);
+    sWaited += svcGetSystemTick() - start;
+    if (++sKicks == CTR_AUDIO_WAIT_WINDOW)
+    {
+        float waitMs = (float)(sWaited * 1000.0 / SYSCLOCK_ARM11 / sKicks);
+
+        sKicks = 0;
+        sWaited = 0;
+        if (sWorkerCore == 1 && waitMs > CTR_AUDIO_WAIT_LIMIT_MS)
+        {
+            /* The worker is idle and stays so: it is never kicked again. */
+            sGivenUp = true;
+            CtrLog_Write(CTR_LOG_AUDIO, "sound engine back on the game thread: it waited %.2f ms "
+                         "a frame for the system core", waitMs);
+            return false;
+        }
+    }
+    LightEvent_Clear(&sIdle);
+    LightEvent_Signal(&sKick);
+    return true;
+}
+
+void CtrAudio_LockSound(void)
+{
+    if (sWorker != NULL)
+        RecursiveLock_Lock(&sSoundLock);
+}
+
+void CtrAudio_UnlockSound(void)
+{
+    if (sWorker != NULL)
+        RecursiveLock_Unlock(&sSoundLock);
 }

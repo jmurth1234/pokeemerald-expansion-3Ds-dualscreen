@@ -44,5 +44,10 @@ void *VoxelArena_Alloc(VoxelArena *arena, uint32_t size, bool fromTop);
 void VoxelArena_Free(VoxelArena *arena, void *block);
 /* The largest piece that would fit right now. */
 uint32_t VoxelArena_LargestGap(const VoxelArena *arena);
+/* The place of `block` among the live pieces (by address), or -1. */
+int VoxelArena_PieceOf(const VoxelArena *arena, const void *block);
+/* The largest piece that would fit once the pieces flagged in `freed` (one
+ * entry per live piece, by address) were freed. Nothing is freed. */
+uint32_t VoxelArena_LargestGapFreeing(const VoxelArena *arena, const bool *freed);
 
 #endif

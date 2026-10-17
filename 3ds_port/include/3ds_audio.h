@@ -31,8 +31,25 @@ typedef struct
 
 bool CtrAudio_Init(void);
 void CtrAudio_Shutdown(void);
-void CtrAudio_Queue(const float *interleaved, int frames);
+void CtrAudio_Queue(const int32_t *interleaved, int frames);
 CtrAudioStats *CtrAudio_Stats(void);
 bool CtrAudio_Available(void);
+
+/*
+ * The game's sound engine on a core of its own (3ds_sound.c). mix runs one
+ * frame of it; CtrAudio_Kick hands the worker the next frame, after the one
+ * before it is done, and returns at once. CtrAudio_LockSound keeps the worker
+ * out while the game thread calls into the engine; it nests.
+ * StartWorker is false where there is no core to spare: the caller then mixes
+ * on its own thread as before.
+ */
+bool CtrAudio_StartWorker(void (*mix)(void));
+/* False once the worker is given up (see 3ds_audio.c): mix inline from then. */
+bool CtrAudio_Kick(void);
+/* The worker on the DSP's clock (true) rather than once per shown frame:
+ * OPTIONS' REAL-TIME PACING, set each frame by CtrPlatform_EndFrame. */
+void CtrAudio_SetClock(bool on);
+void CtrAudio_LockSound(void);
+void CtrAudio_UnlockSound(void);
 
 #endif

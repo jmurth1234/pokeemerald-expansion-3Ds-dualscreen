@@ -34,6 +34,18 @@ bool VoxelRelief_CutVariant(unsigned i, unsigned *layout, unsigned *metatile, co
     if (!sDerived || i >= VOXEL_CUTS) return false;
     *layout = 1; *metatile = i; *rows = cut; return true;
 }
+/* What voxel_relief.c gives a cut whose rock has no 45-degree side: its
+ * background clear as drawn, and no pixel kept for the polygon's edge. */
+void VoxelRelief_CutClear(const uint8_t *rows, uint16_t clear[16])
+{
+    for (int j = 0; j < 16; ++j)
+        clear[j] = (uint16_t)((unsigned)rows[2 * j] | ((unsigned)rows[2 * j + 1] << 8));
+}
+int VoxelRelief_CutFringe(const uint8_t *rows, const uint16_t clear[16], int x, int y)
+{
+    (void)rows; (void)clear; (void)x; (void)y;
+    return -1;
+}
 static uint8_t sPrimaryTiles[512 * 32], sSecondaryTiles[512 * 32];
 static uint16_t sPrimaryPalettes[16 * 16], sSecondaryPalettes[16 * 16];
 static uint16_t sMetatiles[1024 * 8];
@@ -457,6 +469,22 @@ static void AnimatedTiles(void)
                 }
             }
             assert(seen == 3 && calls >= 2);
+        }
+        /* The atlas of a map beside the current one, sharing its primary:
+         * the same three when they are drawn from primary tiles alone, and
+         * one with a secondary tile in it (BG VRAM holds another map's) left
+         * as it is - the current map's own pass still redraws it. */
+        {
+            static VoxelAnimSlot out[4];
+            unsigned cursor = 0;
+
+            assert(VoxelAtlas_SharedAnimatedSlots(&inst, &map, 0, live, dirty, &cursor, out, 4) == 3);
+            sMetatiles[66 * 8 + 5] = 600;
+            cursor = 0;
+            assert(VoxelAtlas_SharedAnimatedSlots(&inst, &map, 0, live, dirty, &cursor, out, 4) == 2);
+            cursor = 0;
+            assert(VoxelAtlas_AnimatedSlots(&inst, &map, 0, live, dirty, &cursor, out, 4) == 3);
+            sMetatiles[66 * 8 + 5] = 0;
         }
         memset(dirty, 0, sizeof(dirty));
         assert(VoxelAtlas_RefreshAnimatedPageRows(&inst, &map, 0, sOneGo, live, dirty, &rows) == 0

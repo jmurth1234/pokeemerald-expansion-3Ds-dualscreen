@@ -1,0 +1,61 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: the translated ROMs keep their own name then prefix order
+Applies after 0050-italian-ending-tilemap.patch; apply with tools/bootstrap.py.
+
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -2281,6 +2281,7 @@
+     return NULL;
+ }
+ 
++#if GAME_LANGUAGE == LANGUAGE_ENGLISH
+ #define HANDLE_NICKNAME_STRING_CASE(battler, monIndex)                \
+     if (GetBattlerSide(battler) != B_SIDE_PLAYER)                     \
+     {                                                                   \
+@@ -2302,6 +2303,47 @@
+     }                                                                   \
+     StringGet_Nickname(text);                                           \
+     toCpy = text;
++#else
++#define HANDLE_NICKNAME_STRING_CASE(battler, monIndex)                   \
++    if (GetBattlerSide(battler) != B_SIDE_PLAYER)                        \
++    {                                                                    \
++        GetMonData(&gEnemyParty[monIndex], MON_DATA_NICKNAME, text);     \
++    }                                                                    \
++    else                                                                 \
++    {                                                                    \
++        GetMonData(&gPlayerParty[monIndex], MON_DATA_NICKNAME, text);    \
++    }                                                                    \
++    /* The translated ROMs write the prefix with a leading space and their own engine\
++     * places it after the name ("CHENIPOTTE selvatico attacca"); the decomp copies it\
++     * in front. Fill the buffer here - the name, then the prefix - and leave toCpy on\
++     * the terminator, so the copy the switch makes afterwards adds nothing. */\
++    StringGet_Nickname(text);                                            \
++    {                                                                    \
++        const u8 *end;                                                   \
++        toCpy = text;                                                    \
++        while (*toCpy != EOS)                                            \
++        {                                                                \
++            dst[dstID] = *toCpy;                                         \
++            dstID++;                                                     \
++            toCpy++;                                                     \
++        }                                                                \
++        end = toCpy;                                                     \
++        if (GetBattlerSide(battler) != B_SIDE_PLAYER)                    \
++        {                                                                \
++            if (gBattleTypeFlags & BATTLE_TYPE_TRAINER)                  \
++                toCpy = sText_FoePkmnPrefix;                             \
++            else                                                         \
++                toCpy = sText_WildPkmnPrefix;                            \
++            while (*toCpy != EOS)                                        \
++            {                                                            \
++                dst[dstID] = *toCpy;                                     \
++                dstID++;                                                 \
++                toCpy++;                                                 \
++            }                                                            \
++        }                                                                \
++        toCpy = end;                                                     \
++    }
++#endif
+ 
+ // Ensure the defined length for an item name can contain the full defined length of a berry name.
+ // This ensures that custom Enigma Berry names will fit in the text buffer at the top of BattleStringExpandPlaceholders.

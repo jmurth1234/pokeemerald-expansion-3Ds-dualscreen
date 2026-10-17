@@ -1,0 +1,69 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: trade evolutions at Lv. 40
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/evolution_scene.c b/src/evolution_scene.c
+--- a/src/evolution_scene.c
++++ b/src/evolution_scene.c
+@@ -770,6 +770,25 @@
+             BattlePutTextOnWindow(gStringVar4, B_WIN_MSG);
+             PlayBGM(MUS_EVOLVED);
+             gTasks[taskId].tState++;
++#ifdef PLATFORM_3DS
++            // A trade-item evolution reached by level (pokemon.c,
++            // TRADE_EVO_LEVEL): the item is used up, as a trade does.
++            {
++                u16 pre = gTasks[taskId].tPreEvoSpecies, post = gTasks[taskId].tPostEvoSpecies;
++                u16 held = GetMonData(mon, MON_DATA_HELD_ITEM, NULL);
++                int e;
++
++                for (e = 0; e < EVOS_PER_MON; e++)
++                    if (gEvolutionTable[pre][e].method == EVO_TRADE_ITEM
++                     && gEvolutionTable[pre][e].targetSpecies == post
++                     && gEvolutionTable[pre][e].param == held && held != ITEM_NONE)
++                    {
++                        held = ITEM_NONE;
++                        SetMonData(mon, MON_DATA_HELD_ITEM, &held);
++                        break;
++                    }
++            }
++#endif
+             SetMonData(mon, MON_DATA_SPECIES, (void *)(&gTasks[taskId].tPostEvoSpecies));
+             CalculateMonStats(mon);
+             EvolutionRenameMon(mon, gTasks[taskId].tPreEvoSpecies, gTasks[taskId].tPostEvoSpecies);
+diff --git a/src/pokemon.c b/src/pokemon.c
+--- a/src/pokemon.c
++++ b/src/pokemon.c
+@@ -5509,6 +5509,13 @@
+     return personality % NUM_NATURES;
+ }
+ 
++#ifdef PLATFORM_3DS
++// Trade evolutions at Lv. 40 (OPTIONS, ENHANCEMENTS): without a link partner,
++// a trade evolution also happens on reaching this level, an item one while
++// holding the item.
++#define TRADE_EVO_LEVEL 40
++#endif
++
+ u16 GetEvolutionTargetSpecies(struct Pokemon *mon, u8 mode, u16 evolutionItem)
+ {
+     int i;
+@@ -5590,6 +5597,19 @@
+                 if (gEvolutionTable[species][i].param <= beauty)
+                     targetSpecies = gEvolutionTable[species][i].targetSpecies;
+                 break;
++#ifdef PLATFORM_3DS
++            // The item is given up when the evolution completes
++            // (evolution_scene.c), not here: it can still be cancelled.
++            case EVO_TRADE:
++                if (CtrExtras_Get("trade_evo") && level >= TRADE_EVO_LEVEL)
++                    targetSpecies = gEvolutionTable[species][i].targetSpecies;
++                break;
++            case EVO_TRADE_ITEM:
++                if (CtrExtras_Get("trade_evo") && level >= TRADE_EVO_LEVEL
++                 && gEvolutionTable[species][i].param == heldItem)
++                    targetSpecies = gEvolutionTable[species][i].targetSpecies;
++                break;
++#endif
+             }
+         }
+         break;

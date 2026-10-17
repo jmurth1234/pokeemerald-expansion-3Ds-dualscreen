@@ -1,19 +1,22 @@
-Pokémon Emerald 3Ds Dual Screen
-===============================
+Emerald 3DS
+===========
 
 A native Nintendo 3DS port of Pokémon Emerald that uses both screens.
 
 This download does NOT contain the game. You need your own dump of your own
-Pokémon Emerald (USA, Europe) cartridge. The builder reads that ROM on this
-computer and generates the game's data pack from it. The ROM is not uploaded,
-copied or modified, and no Internet connection is needed.
+Pokémon Emerald (USA, Europe), Pokémon Esmeralda (Spain), Pokémon Émeraude
+(France) or Pokémon Smeraldo (Italy) cartridge; the game is built in that
+ROM's language. The builder reads that ROM on this computer and generates the
+game's data pack from it. The ROM is not uploaded, copied or modified. An
+Internet connection is only used to download the optional follower sprites.
 
 What you need
 -------------
 - A Nintendo 3DS / 2DS family console with custom firmware (Luma3DS) and the
   Homebrew Launcher.
 - A clean ROM of Pokémon Emerald (USA, Europe),
-  SHA-1 f3ae088181bf583e55daf962a92bb46f4f1d07b7.
+  SHA-1 f3ae088181bf583e55daf962a92bb46f4f1d07b7, or of Pokémon Esmeralda
+  (Spain), SHA-1 fe1558a3dcb0360ab558969e09b690888b846dd9.
 - The console's SD card in this computer (or any folder, to copy by hand).
 
 Install
@@ -27,7 +30,7 @@ Install
        /3ds/emerald3ds/Emerald3DS.3dsx
        /3ds/emerald3ds/Emerald3DS.smdh
        /3ds/emerald3ds/emerald3ds.pak
-6. Put the card back in the console and start Pokémon Emerald 3Ds Dual Screen from the
+6. Put the card back in the console and start Emerald 3DS from the
    Homebrew Launcher.
 
 Saves are kept in /3ds/emerald3ds/emerald3ds.sav. Reinstalling or updating
@@ -47,6 +50,6 @@ game tells you when they do not match.
 
 Legal
 -----
-Pokémon Emerald 3Ds Dual Screen is an unofficial fan project, not affiliated with or endorsed by
+Emerald 3DS is an unofficial fan project, not affiliated with or endorsed by
 Nintendo, Game Freak, Creatures or The Pokémon Company. Pokémon and Pokémon
 Emerald are trademarks of their respective owners. See LICENSES/.

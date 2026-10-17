@@ -121,7 +121,7 @@ static bool LoadBundle(const char *what, const char *payloadPath, const char *re
     memcpy(&header, relocs, sizeof(header));
     if (header.magic != magic || header.version != BUNDLE_VERSION
      || header.payloadBytes != payloadBytes || payloadBytes != region
-     || relocBytes != sizeof(header) + 4u * (header.internalCount + header.externalCount))
+     || (uint64_t)relocBytes != sizeof(header) + 4ull * ((uint64_t)header.internalCount + header.externalCount))
     {
         PORT_LOG("[ERROR] %s bundle does not match this executable "
                 "(payload %lu, region %lu)\n",
@@ -148,7 +148,7 @@ static bool LoadBundle(const char *what, const char *payloadPath, const char *re
     {
         u32 site = sites[i];
 
-        if (site + 4 > region)
+        if (site > region || region - site < 4)   /* site + 4 can wrap */
             goto badSite;
         WriteSite(blob + site, (u32)(uintptr_t)blob + ReadSite(blob + site));
     }
@@ -157,7 +157,7 @@ static bool LoadBundle(const char *what, const char *payloadPath, const char *re
     {
         u32 site = sites[i];
 
-        if (site + 4 > region)
+        if (site > region || region - site < 4)
             goto badSite;
         WriteSite(blob + site, ReadSite(blob + site) + delta);
     }

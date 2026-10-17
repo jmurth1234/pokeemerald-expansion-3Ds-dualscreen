@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import __version__, pak
+from . import __version__, followers, pak
 from .build import Payload, build_pack, default_payload
 from .errors import BuilderError
 from .install import APP_DIR, find_sd_cards, install
@@ -22,7 +22,7 @@ from .recipe import Recipe
 
 
 def _progress(fraction: float, message: str) -> None:
-    sys.stdout.write("\r[%3d%%] %-45s" % (int(fraction * 100), message))
+    sys.stdout.write("\r[%3d%%] %-72s" % (int(fraction * 100), message))
     sys.stdout.flush()
     if fraction >= 1.0:
         sys.stdout.write("\n")
@@ -33,11 +33,16 @@ def cmd_build(args) -> int:
     out_dir = Path(args.output) / APP_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     info = build_pack(Path(args.rom), payload, out_dir / "emerald3ds.pak", _progress, args.keep_workdir)
-    for exe in payload.executables():
+    print("Times (%s): %s" % (info["rom"], ", ".join("%s %.1f s" % t for t in info["timings"])))
+    for exe in info["payload"].executables():
         if exe.exists():
             shutil.copy2(exe, out_dir / exe.name)
     print("Data pack: %d files, %.1f MiB, release %s" % (info["entries"], info["bytes"] / 1048576,
                                                          info["release"]))
+    if info.get("followers"):
+        f = info["followers"]
+        print("Followers: %d sprites, %d texts (%d downloaded)%s" % (f["sprites"], f.get("texts", 0), f["downloaded"],
+              ", %d not available" % len(f["missing"]) if f["missing"] else ""))
     print("Copy the folder %s to the root of your SD card." % (Path(args.output) / "3ds"))
     return 0
 
@@ -48,8 +53,8 @@ def cmd_install(args) -> int:
     sd = Path(args.sd)
     with tempfile.TemporaryDirectory(prefix="emerald3ds-") as tmp:
         pak_path = Path(tmp) / "emerald3ds.pak"
-        build_pack(Path(args.rom), payload, pak_path, _progress)
-        files = {exe.name: exe for exe in payload.executables()}
+        info = build_pack(Path(args.rom), payload, pak_path, _progress)
+        files = {exe.name: exe for exe in info["payload"].executables()}
         files["emerald3ds.pak"] = pak_path
         dest = install(sd, files, lambda f: _progress(f, "Copying to the SD card"))
     print("Installed to %s" % dest)
@@ -58,15 +63,20 @@ def cmd_install(args) -> int:
 
 def cmd_verify(args) -> int:
     payload = Payload(args.payload)
-    recipe = Recipe.load(payload.recipe)
     with pak.PakReader(Path(args.pak)) as reader:
+        # The pack names the ROM it was built from: check it against that variant.
+        recipe = Recipe.load(payload.for_rom(reader.rom_sha1.hex()).recipe)
         count = reader.verify()
         expected = {pak.path_id(e["path"]): e for e in recipe.entries + recipe.generated}
+        # The optional follower sprites (followers.py) are not the recipe's.
+        optional = {pak.path_id(p) for p in followers.pack_paths()}
         for pid, entry in reader.entries.items():
+            if pid in optional:
+                continue
             want = expected.get(pid)
             if want is None or want["crc"] != entry.crc32 or want["size"] != entry.raw_size:
                 raise BuilderError("The data pack does not match this release.")
-        if len(reader.entries) != len(expected) or reader.abi != recipe.engine_abi:
+        if len(set(reader.entries) - optional) != len(expected) or reader.abi != recipe.engine_abi:
             raise BuilderError("The data pack does not match this release.")
     print("OK: %d entries, ABI %08x, release %s" % (count, recipe.engine_abi, recipe.release))
     return 0

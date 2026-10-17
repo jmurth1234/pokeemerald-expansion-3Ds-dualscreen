@@ -67,8 +67,6 @@ void VoxelWorld_BeginBatch(void);
 
 /* The current map, its connections and theirs (see voxel_world.c). */
 void VoxelWorld_BuildInstances(void);
-/* Layouts of the maps just past those placed, none of them on screen now. */
-unsigned VoxelWorld_NextLayouts(unsigned *layouts, unsigned max);
 /*
  * The asset payloads the renderer reads for the maps on screen and one
  * crossing away - each layout's border, each tileset's attributes, metatiles,
@@ -96,9 +94,14 @@ bool VoxelWorld_UsesTreeSprites(const VoxelMapInstance *inst);
 /* The metatile the 2D game tiles outside the map, or -1 if there is none.
  * Without it the view ends in the clear colour past the last map. */
 int VoxelWorld_BorderMetatile(int worldX, int worldY);
+/* True where that metatile is water: it lies flush with the map's own water,
+ * not stood up as the belt (VoxelMesh_EmitBorder). */
+bool VoxelWorld_BorderIsWater(int worldX, int worldY);
 VoxelVisualShape VoxelWorld_ClassifyTile(int worldX, int worldY);
 
 void VoxelWorld_GetMapDimensions(int *width, int *height);
+/* Whether the map joins others at its edges, walked across with no warp. */
+bool VoxelWorld_MapIsConnected(void);
 void VoxelWorld_GetPlayerWorldCoords(float *worldX, float *worldZ);
 void VoxelWorld_GetLocation(int *mapGroup, int *mapNum);
 /* Small renderer-facing classification of the original field weather state. */
@@ -111,9 +114,11 @@ typedef enum {
     VOXEL_WEATHER_SHADE
 } VoxelWeatherClass;
 VoxelWeatherClass VoxelWorld_Weather(void);
-/* The expansion's time-of-day tint as a per-channel multiplier (1,1,1 when the
- * map has no natural light, i.e. indoors, caves, or DNS disabled). */
-void VoxelWorld_TimeTint(float rgb[3]);
+/* How thick the game's fog is right now, 0-1: its sprites' blend as it fades
+ * in and out, 0 when there are none (voxel_world.c). */
+float VoxelWorld_FogDensity(void);
+/* A cave, tunnel or other map under the ground (MAP_TYPE_UNDERGROUND). */
+bool VoxelWorld_Underground(void);
 /* The palette fade on the backgrounds as a blend towards rgb (0-1) by amount,
  * false when there is none (voxel_world.c). */
 bool VoxelWorld_ScreenFade(float *amount, float rgb[3]);
@@ -171,6 +176,8 @@ typedef struct {
 } VoxelTileLoad;
 bool Voxel_LoadTilesStep(const void *tileset, uint8_t *dest, uint32_t destSize,
                          VoxelTileLoad *load, unsigned bytes);
-bool Voxel_LoadTiles(const void *tileset, uint8_t *dest, uint32_t destSize);
+
+/* Expansion map palette tint, identity for the original game. */
+void VoxelWorld_TimeTint(float rgb[3]);
 
 #endif

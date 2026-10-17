@@ -7,10 +7,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "voxel_tileset_fixture.h"
 #include "voxel_mesh_builder.h"
 #include "voxel_regions.h"
 #include "voxel_atlas.h"
 #include "voxel_building.h"
+
+/* voxel_tree.c compares the map's secondary tileset with this object to
+ * recognise Dewford's tree art; this test never uses that art, so an empty
+ * tileset is enough for the link. */
+const struct Tileset gTileset_Dewford = {0};
 
 static VoxelMapInstance sMap={.layoutId=1,.width=8,.height=8};
 static VoxelAtlasMap sAtlas;
@@ -27,8 +33,11 @@ const VoxelMapInstance *VoxelWorld_GetInstanceAt(int x,int y)
 {
     return x>=sMap.originX && y>=sMap.originY && x<sMap.originX+8 && y<sMap.originY+8 ? &sMap : NULL;
 }
+/* Set: every cell's own metatile, for the ground variant check. */
+static int sOwnMetatile=-1;
 int VoxelWorld_GetMetatileId(int x,int y)
 {
+    if (sOwnMetatile>=0) return sOwnMetatile;
     assert(VoxelWorld_GetInstanceAt(x,y));
     return (y-sMap.originY)*8+x-sMap.originX;
 }
@@ -40,6 +49,7 @@ VoxelVisualShape VoxelWorld_ClassifyTile(int x,int y)
     return x-sMap.originX==6 && y-sMap.originY==2 ? VOXEL_SHAPE_WATER : VOXEL_SHAPE_FLAT;
 }
 int VoxelWorld_BorderMetatile(int x,int y) { (void)x; (void)y; return -1; }
+bool VoxelWorld_BorderIsWater(int x, int y) { (void)x; (void)y; return false; }
 void VoxelWorld_GetPlayerWorldCoords(float *x,float *z) { *x=7+sMap.originX; *z=7+sMap.originY; }
 void VoxelAtlas_SlotUV(unsigned slot,float *u,float *v,float *ue,float *ve)
 {
@@ -61,6 +71,13 @@ static void Emit(VoxelBuilder *b,int x0,int y0,int x1,int y1)
 {
     VoxelMesh_EmitInstance(b,&sMap,x0+sMap.originX,y0+sMap.originY,
         x1+sMap.originX,y1+sMap.originY);
+}
+/* Stands in for voxel_world.c's tileset test: only the layout a variant was
+ * taken from draws it here. */
+static bool OwnLayoutFits(const VoxelMapInstance *inst,unsigned layout,unsigned metatile)
+{
+    (void)metatile;
+    return layout==(unsigned)inst->layoutId;
 }
 static int Compare(const void *aa,const void *bb)
 {
@@ -84,6 +101,17 @@ int main(void)
         assert(isfinite(v->x)&&isfinite(v->y)&&isfinite(v->z));
         assert(v->x>=0 && v->x<=8 && v->z>=0 && v->z<=8);
         assert(v->y==0);
+    }
+    /* A quad goes in whole or not at all: with room for a triangle and a
+     * half, never half of the second one (a sliver along its diagonal). */
+    {
+        VoxelBuilder small;
+        VoxelVertex room[9];
+        const VoxelVertex q[4]={{0,0,0,0,0,1},{1,0,0,0,0,1},{1,0,1,0,0,1},{0,0,1,0,0,1}};
+        VoxelBuilder_Init(&small,room,9);
+        VoxelBuilder_Quad(&small,&q[0],&q[1],&q[2],&q[3]);
+        VoxelBuilder_Quad(&small,&q[0],&q[1],&q[2],&q[3]);
+        assert(small.count==6 && small.dropped==2);
     }
     /* Chunk by chunk: the same triangles. */
     Init(&part,sChunks);
@@ -137,10 +165,41 @@ int main(void)
             assert(!memcmp(modelsWhole,modelsSliced,whole.count*sizeof(*modelsWhole)));
         }
         assert(layouts>0);
+        /* A ground variant is the one drawn from the cell's own tilesets:
+         * metatile 0x22B less its upper layer is one of Slateport's and
+         * another of Route 111's (Mauville's tileset), and Route 111's rocks
+         * stand on its own, the one its atlas composes. */
+        {
+            unsigned layout,metatile,quarters,first=~0u,second=~0u,found=0;
+            for(unsigned v=0;VoxelBuildings_Variant(v,&layout,&metatile,&quarters);++v)
+                if(metatile==0x22B && quarters==15) { if(first==~0u) first=v; else if(second==~0u) second=v; }
+            if(second!=~0u)
+            {
+                VoxelBuildings_Variant(second,&layout,&metatile,&quarters);
+                memset(&town,0,sizeof(town));
+                town.layoutId=(int)layout; town.width=town.height=256;
+                sOwnMetatile=0x22B;
+                for(int y=0;y<256;++y) for(int x=0;x<256;++x)
+                {
+                    int ground;
+                    VoxelBuildings_SetVariantFits(NULL);
+                    if(!VoxelBuildings_CellAt(&town,x,y,&ground,NULL) || ground!=(int)(VOXEL_METATILE_REAL+first))
+                        continue;
+                    VoxelBuildings_SetVariantFits(OwnLayoutFits);
+                    assert(VoxelBuildings_CellAt(&town,x,y,&ground,NULL) && ground==(int)(VOXEL_METATILE_REAL+second));
+                    ++found;
+                }
+                VoxelBuildings_SetVariantFits(NULL);
+                sOwnMetatile=-1;
+                assert(found>0);
+            }
+            else
+                puts("NOTE ground: no second 0x22B variant, tileset match not checked");
+        }
         VoxelBuildings_Shutdown();
     }
     else
         puts("NOTE ground: " VOXEL_BUILDINGS_PATH " absent, sliced models not checked");
-    puts("PASS ground: flat cells, flush water, chunks, negative origins, row-by-row builds, cell drafts, sliced models");
+    puts("PASS ground: flat cells, flush water, chunks, negative origins, row-by-row builds, cell drafts, whole quads, sliced models, ground variants");
     return 0;
 }

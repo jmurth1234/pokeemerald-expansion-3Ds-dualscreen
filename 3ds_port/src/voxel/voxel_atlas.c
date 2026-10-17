@@ -305,14 +305,25 @@ static bool ComposeAt(const struct AtlasSource *src, const uint16_t *entries,
         }
     }
     /* a cut tile's background is clear: the alpha test leaves the ground
-     * drawn flat under it to show */
-    for (unsigned y = 0; cut != NULL && y < VOXEL_ATLAS_SLOT && y < 16; ++y)
+     * drawn flat under it to show (less what its straight diagonals take
+     * in: VoxelRelief_CutClear) */
+    if (cut != NULL)
     {
-        unsigned row = (unsigned)cut[2 * y] | ((unsigned)cut[2 * y + 1] << 8);
+        uint16_t clear[16];
 
-        for (unsigned x = 0; x < 16; ++x)
-            if ((row >> x) & 1u)
-                dest[CtrVideo_Texel(baseX + x, baseY + y, width)] &= (uint16_t)~1u;
+        VoxelRelief_CutClear(cut, clear);
+        for (unsigned y = 0; y < VOXEL_ATLAS_SLOT && y < 16; ++y)
+            for (unsigned x = 0; x < 16; ++x)
+            {
+                int from = VoxelRelief_CutFringe(cut, clear, (int)x, (int)y);
+
+                if ((clear[y] >> x) & 1u)
+                    dest[CtrVideo_Texel(baseX + x, baseY + y, width)] &= (uint16_t)~1u;
+                else if (from >= 0)
+                    /* kept for the polygon's edge: the rock's colour */
+                    dest[CtrVideo_Texel(baseX + x, baseY + y, width)] =
+                        dest[CtrVideo_Texel(baseX + (unsigned)(from % 16), baseY + (unsigned)(from / 16), width)];
+            }
     }
     return black;
 }
@@ -435,7 +446,7 @@ bool VoxelAtlas_JobBegin(VoxelAtlasJob *job, const VoxelMapInstance *inst, uint1
         unsigned m, hidden;
         const uint8_t *cut;
 
-        if (AtlasSourceOf(job->primary, job->secondary, id, &m, &hidden, &cut) && job->used[m])
+        if (AtlasSourceOf(job->primary, job->secondary, id, &m, &hidden, &cut) && m < VOXEL_METATILE_REAL && job->used[m])
             job->used[id] = job->used[m];
     }
     /* An older in-flight chunk can request an extension after all of its
@@ -702,10 +713,10 @@ bool VoxelAtlas_Build(const VoxelMapInstance *inst, uint16_t *dest, VoxelAtlasMa
  * `work` holds the tiles to redraw for, `*cursor` where the walk over the
  * ids goes on; it ends when *cursor reaches VOXEL_METATILE_IDS.
  */
-unsigned VoxelAtlas_AnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlasMap *map,
-                                  unsigned page, const uint8_t *liveTiles,
-                                  const uint8_t work[128], unsigned *cursor,
-                                  VoxelAnimSlot *out, unsigned max)
+static unsigned AnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlasMap *map,
+                              unsigned page, const uint8_t *liveTiles,
+                              const uint8_t work[128], unsigned *cursor,
+                              VoxelAnimSlot *out, unsigned max, bool primaryOnly)
 {
     struct AtlasSource src;
     uint8_t *voidBits;
@@ -747,11 +758,16 @@ unsigned VoxelAtlas_AnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlas
         for (unsigned t = 0; t < NUM_TILES_PER_METATILE; ++t)
         {
             unsigned tile = entries[t] & 0x3FF;
-            if (work[tile >> 3] & (1u << (tile & 7)))
+            if (primaryOnly && tile >= TILES_PER_TILESET)
             {
-                affected = true;
+                /* drawn with secondary tiles BG VRAM does not hold */
+                affected = false;
                 break;
             }
+            if (work[tile >> 3] & (1u << (tile & 7)))
+                affected = true;
+            if (affected && !primaryOnly)
+                break;
         }
         if (!affected)
             continue;
@@ -766,4 +782,20 @@ unsigned VoxelAtlas_AnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlas
     }
     *cursor = m;
     return count;
+}
+
+unsigned VoxelAtlas_AnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlasMap *map,
+                                  unsigned page, const uint8_t *liveTiles,
+                                  const uint8_t work[128], unsigned *cursor,
+                                  VoxelAnimSlot *out, unsigned max)
+{
+    return AnimatedSlots(inst, map, page, liveTiles, work, cursor, out, max, false);
+}
+
+unsigned VoxelAtlas_SharedAnimatedSlots(const VoxelMapInstance *inst, const VoxelAtlasMap *map,
+                                        unsigned page, const uint8_t *liveTiles,
+                                        const uint8_t work[128], unsigned *cursor,
+                                        VoxelAnimSlot *out, unsigned max)
+{
+    return AnimatedSlots(inst, map, page, liveTiles, work, cursor, out, max, true);
 }

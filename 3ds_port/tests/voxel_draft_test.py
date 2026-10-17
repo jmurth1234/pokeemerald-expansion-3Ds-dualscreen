@@ -3,7 +3,9 @@ compiled out of ctr_voxel.c itself and run on the host with the GPU mocked.
 
 - ChunkIndex/ChunkUnindex/FindChunk against a linear search, through random
   inserts, re-keys and releases, with the buckets forced to collide;
-- RequestWait against the linear table it replaced, call for call;
+- RequestWait against the linear table it replaced, call for call, and the
+  record a full request list hands over on a replacement;
+- ChunkVram giving up nothing when no gap could be made;
 - DraftChunk: the vertices a draft packs, their order by atlas page, the
   bounds, the upload bookkeeping, and every refusal leaving nothing behind.
 """
@@ -79,6 +81,7 @@ typedef struct {
     uint32_t stamp, viewStamp;
     int gx0, gz0, gx1, gz1; float gy0, gy1, buildMs;
     bool uncovered; uint32_t atlasExtension; bool draft;
+    unsigned staticCount;
 } VoxelChunk;
 typedef struct {
     VoxelVertex *vertices; unsigned capacity, count, dropped;
@@ -136,8 +139,9 @@ static void VoxelMesh_DraftCell(VoxelBuilder *b, const VoxelMapInstance *inst, i
                       'static void GrowBounds(', 'static void PackDraft(', 'static int PackedFloor(', 'static int PackedCeil(',
                       'static unsigned ChunkBucket(', 'static unsigned ChunkBucketOf(',
                       'static void ChunkUnindex(', 'static void ChunkIndex(', 'static void ReleaseChunk(',
-                      'static VoxelChunk *FindChunk(', 'static VoxelChunk *OldestChunk(',
-                      'static VoxelChunk *FreeChunkSlot(', 'static VoxelGpuVertex *ChunkVram(',
+                      'static VoxelChunk *FindChunk(', 'static bool Evictable(',
+                      'static VoxelChunk *OldestChunk(', 'static VoxelChunk *FreeChunkSlot(',
+                      'static bool ChunkRoomPossible(', 'static VoxelGpuVertex *ChunkVram(',
                       'static VoxelChunk *DraftChunk(']:
         if signature == 'static unsigned ChunkBucket(':
             source += 'static uint8_t sChunkHead[128];\nstatic uint8_t sChunkNext[VOXEL_CHUNK_SLOTS];\n' \
@@ -145,7 +149,7 @@ static void VoxelMesh_DraftCell(VoxelBuilder *b, const VoxelMapInstance *inst, i
         source += function(voxel, signature)
     # The linear table RequestWait replaced, for the equivalence run.
     source += r'''
-static struct { int group, map, cx, cy; bool border, used; uint32_t seen, progress; } sRequestWait[VOXEL_REQUESTS_MAX];
+static struct { int group, map, cx, cy; bool border, used; uint32_t seen, progress, noRoomUntil; } sRequestWait[VOXEL_REQUESTS_MAX];
 static struct { int group, map, cx, cy; bool border, used; uint32_t seen, progress; } sOld[VOXEL_REQUESTS_MAX];
 static uint8_t sWaitHead[128], sWaitNext[VOXEL_REQUESTS_MAX];
 '''
@@ -235,12 +239,35 @@ static void TestWait(void)
                           .cx = (int)(rnd() % 14), .cy = (int)(rnd() % 14)};
         unsigned a, b;
         sFrame += rnd() % 3 == 0;
-        a = RequestWait(&site);
+        a = RequestWait(&site, -1);
         b = RequestWaitOld(&site);
         assert(a == b);
         assert(sRequestWait[a].cx == site.cx && sRequestWait[a].cy == site.cy
             && sRequestWait[a].border == site.border && sRequestWait[a].group == site.inst->mapGroup);
         assert(sRequestWait[a].seen == sOld[b].seen);
+    }
+    /* A replacement in a full list: a square not in the table takes the
+     * displaced request's record, out of its old chain and into its own, and
+     * starts afresh; a square in the table keeps its own. */
+    {
+        ChunkSite gone = {.inst = &inst[0], .cx = 3, .cy = 4}, fresh = {.inst = &inst[2], .cx = 40, .cy = 41};
+        unsigned w, again;
+        ++sFrame;
+        w = RequestWait(&gone, -1);
+        sRequestWait[w].noRoomUntil = sFrame + 60;
+        sRequestWait[w].progress = sFrame - 50;
+        assert(RequestWait(&fresh, (int)w) == w);
+        assert(sRequestWait[w].cx == 40 && sRequestWait[w].cy == 41 && sRequestWait[w].group == 1);
+        assert(sRequestWait[w].noRoomUntil == 0 && sRequestWait[w].progress == sFrame);
+        assert(RequestWait(&fresh, -1) == w);
+        again = RequestWait(&gone, -1);
+        assert(again != w && sRequestWait[again].cx == 3 && sRequestWait[again].cy == 4);
+        assert(RequestWait(&fresh, (int)again) == w && sRequestWait[again].cx == 3);
+        for (unsigned b = 0; b < 128; ++b)
+            for (unsigned link = sWaitHead[b]; link != 0; link = sWaitNext[link - 1u])
+                assert(WaitBucket(sRequestWait[link - 1u].group, sRequestWait[link - 1u].map,
+                                  sRequestWait[link - 1u].cx, sRequestWait[link - 1u].cy,
+                                  sRequestWait[link - 1u].border) == b);
     }
 }
 
@@ -296,10 +323,11 @@ static void TestDraft(void)
     }
     assert(chunk->gx0 == 0 && chunk->gz0 == 0 && chunk->gx1 == 8 && chunk->gz1 == 8);
     assert(chunk->gy0 == 0.0f && chunk->gy1 > 0.0f && chunk->gy1 <= 0.75f + 1e-6f);
-    /* the same square again reuses its slot and its block */
-    uploadAllowed = 8;
+    /* the same square again reuses its slot and its block, and draws none of
+     * the static models a build placed in it */
+    uploadAllowed = 8; chunk->staticCount = 2;
     again = DraftChunk(&site, &atlas, chunk);
-    assert(again == chunk && FindChunk(false, 1, 2, 1, 2) == chunk);
+    assert(again == chunk && FindChunk(false, 1, 2, 1, 2) == chunk && again->staticCount == 0);
     {
         unsigned used = 0; for (unsigned i = 0; i < VOXEL_CHUNK_SLOTS; ++i) used += sChunks[i].used;
         assert(used == 1);
@@ -331,6 +359,18 @@ static void TestDraft(void)
         uploadAllowed = 8; sStagingUsed = 0; sChunkUploads = 0; copies = 0;
         assert(DraftChunk(&other, &atlas, NULL) == NULL);
         assert(FindChunk(false, 1, 2, 2, 2) == NULL && copies == 0 && uploadAllowed == 7);
+        /* two off screen but apart (8-16 and 24-32 KiB, an on-screen chunk
+         * between): no 12 KiB gap even with both gone, so neither is given up */
+        assert((uint8_t *)sChunks[2].vram - sArenaBlock == 8 * 1024);
+        assert((uint8_t *)sChunks[4].vram - sArenaBlock == 16 * 1024);
+        assert((uint8_t *)sChunks[5].vram - sArenaBlock == 24 * 1024);
+        sChunks[2].viewStamp = sFrame - 1; sChunks[2].stamp = sFrame - 6;
+        sChunks[5].viewStamp = sFrame - 1; sChunks[5].stamp = sFrame - 7;
+        assert(ChunkVram(12 * 1024, true) == NULL);
+        assert(FindChunk(false, 9, 9, 2, 0) != NULL && FindChunk(false, 9, 9, 5, 0) != NULL);
+        assert(sChunkArena.used == 6 * 8 * 1024);
+        sChunks[2].viewStamp = sChunks[2].stamp = sFrame;
+        sChunks[5].viewStamp = sChunks[5].stamp = sFrame;
         /* one of them off screen: it is the one given up */
         sChunks[3].viewStamp = sFrame - 1; sChunks[3].stamp = sFrame - 5;
         uploadAllowed = 8;
@@ -346,7 +386,7 @@ int main(void)
     TestIndex();
     TestWait();
     TestDraft();
-    puts("PASS draft: chunk index vs linear search, request wait vs linear table, draft vertices/pages/bounds/uploads/refusals");
+    puts("PASS draft: chunk index vs linear search, request wait vs linear table and reuse, no futile eviction, draft vertices/pages/bounds/uploads/refusals");
     return 0;
 }
 '''

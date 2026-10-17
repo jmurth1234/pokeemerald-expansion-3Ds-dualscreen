@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: Project version
-      placeholder: e.g. 0.1.2
+      placeholder: e.g. 0.4.0
     validations:
       required: true
   - type: dropdown
@@ -92,7 +92,7 @@ body:
     id: attachments
     attributes:
       label: Logs / screenshots / video
-      description: Attach /3ds/emerald3ds/port.log or safe captures where useful. Do not attach game data or secrets.
+      description: To get a log, create an empty file /3ds/emerald3ds/debug.txt on the SD card, reproduce the problem and attach /3ds/emerald3ds/port.log (or port-prev.log if you relaunched the game), or safe captures where useful. Do not attach game data or secrets.
     validations:
       required: true
   - type: checkboxes

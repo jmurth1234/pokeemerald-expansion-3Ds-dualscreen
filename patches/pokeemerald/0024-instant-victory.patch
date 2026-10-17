@@ -1,0 +1,103 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: instant victory
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/data/battle_scripts_2.s b/data/battle_scripts_2.s
+--- a/data/battle_scripts_2.s
++++ b/data/battle_scripts_2.s
+@@ -86,6 +86,14 @@
+ 	setbyte gBattleOutcome, B_OUTCOME_CAUGHT
+ 	finishturn
+ 
++@ Instant victory (3DS port, OPTIONS, CHEATS): the target faints at once.
++BattleScript_CheatFaintTarget::
++	orword gHitMarker, HITMARKER_IGNORE_SUBSTITUTE | HITMARKER_PASSIVE_HP_UPDATE
++	healthbarupdate BS_TARGET
++	datahpupdate BS_TARGET
++	tryfaintmon BS_TARGET
++	end2
++
+ BattleScript_WallyBallThrow::
+ 	printstring STRINGID_GOTCHAPKMNCAUGHTWALLY
+ 	setbyte gBattleOutcome, B_OUTCOME_CAUGHT
+diff --git a/include/battle_scripts.h b/include/battle_scripts.h
+--- a/include/battle_scripts.h
++++ b/include/battle_scripts.h
+@@ -218,6 +218,7 @@
+ extern const u8 BattleScript_WallyBallThrow[];
+ extern const u8 BattleScript_ShakeBallThrow[];
+ extern const u8 BattleScript_TrainerBallBlock[];
++extern const u8 BattleScript_CheatFaintTarget[];   // 3DS port: instant victory
+ extern const u8 BattleScript_RunByUsingItem[];
+ extern const u8 BattleScript_ActionWatchesCarefully[];
+ extern const u8 BattleScript_ActionGetNear[];
+diff --git a/src/battle_main.c b/src/battle_main.c
+--- a/src/battle_main.c
++++ b/src/battle_main.c
+@@ -4132,10 +4132,67 @@
+     STATE_SELECTION_SCRIPT_MAY_RUN
+ };
+ 
++#ifdef PLATFORM_3DS
++// After the cheat's faint: EXP, the next Pokemon or the end of the battle, as
++// BattleTurnPassed handles a faint at the end of a turn.
++static void CheatAfterFaint(void)
++{
++    s32 i;
++
++    if (HandleFaintedMonActions())
++        return;
++    gBattleStruct->faintedActionsState = 0;
++    gHitMarker &= ~(HITMARKER_IGNORE_SUBSTITUTE | HITMARKER_PASSIVE_HP_UPDATE);
++    for (i = 0; i < 5; i++)
++        gBattleCommunication[i] = 0;
++    if (gBattleOutcome != 0)
++    {
++        gCurrentActionFuncId = B_ACTION_FINISHED;
++        gBattleMainFunc = RunTurnActionsFunctions;
++        return;
++    }
++    gBattleMainFunc = HandleTurnActionSelectionState;
++}
++
++// Instant victory (OPTIONS, CHEATS): as a turn starts, before anyone has
++// chosen, an opponent still standing faints. EXP and prize money as usual.
++// Not in link, recorded, Safari or Wally's battles.
++static bool8 TryCheatFaintOpponent(void)
++{
++    u8 battler;
++
++    if (!CtrExtras_Get("instant_victory") || gBattleControllerExecFlags
++     || (gBattleTypeFlags & (BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED | BATTLE_TYPE_SAFARI | BATTLE_TYPE_WALLY_TUTORIAL)))
++        return FALSE;
++    for (battler = 0; battler < gBattlersCount; battler++)
++    {
++        if (gBattleCommunication[battler] != STATE_TURN_START_RECORD)
++            return FALSE;
++    }
++    for (battler = 0; battler < gBattlersCount; battler++)
++    {
++        if (GetBattlerSide(battler) != B_SIDE_OPPONENT || gBattleMons[battler].hp == 0
++         || (gAbsentBattlerFlags & gBitTable[battler]))
++            continue;
++        gBattlerAttacker = GetBattlerAtPosition(B_POSITION_PLAYER_LEFT);
++        gBattlerTarget = battler;
++        gBattleMoveDamage = gBattleMons[battler].hp;
++        gBattleMainFunc = CheatAfterFaint;
++        BattleScriptExecute(BattleScript_CheatFaintTarget);
++        return TRUE;
++    }
++    return FALSE;
++}
++#endif
++
+ static void HandleTurnActionSelectionState(void)
+ {
+     s32 i;
+ 
++#ifdef PLATFORM_3DS
++    if (TryCheatFaintOpponent())
++        return;
++#endif
+     gBattleCommunication[ACTIONS_CONFIRMED_COUNT] = 0;
+     for (gActiveBattler = 0; gActiveBattler < gBattlersCount; gActiveBattler++)
+     {

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "voxel_sign.h"
 #include "voxel_file.h"
@@ -8,11 +9,12 @@
 #include "voxel_atlas.h"
 #include "voxel_regions.h"
 #include "voxel_relief.h"
+#include "voxel_building.h"
 
 #ifndef SIGN_MASK_PATH
 #define SIGN_MASK_PATH "voxel/signposts.bin"
 #endif
-#define SIGN_MAGIC "VXS2"
+#define SIGN_MAGIC "VXS3"
 
 typedef struct
 {
@@ -20,6 +22,7 @@ typedef struct
     uint16_t rows[16];
     uint16_t head[16];  /* the sign's part drawn in the cell north of it */
     uint16_t headGround;
+    uint16_t ground;    /* the metatile the sign's own cell is laid with */
 } SignRecord;
 
 static SignRecord *sIndex;
@@ -92,6 +95,157 @@ static bool HasHead(const SignRecord *r)
         if (r->head[i] != 0)
             return true;
     return false;
+}
+
+bool VoxelSign_IsLantern(const uint16_t head[16])
+{
+    unsigned top = head[0], middle = head[4], width = 0;
+    for (unsigned column = 0; column < 16; ++column)
+        width += (middle >> column) & 1u;
+    return top != 0 && (top & (top - 1u)) == 0 && width >= 7;
+}
+
+/* The ground a lamp's light may fall on: what is walked or seen between
+ * things - floor, water, the foot of a post, fence or prop. Not a building,
+ * tree, cliff, ledge or stair, whose ground is not where the pool lies. */
+static bool LampLit(const VoxelMapInstance *inst, int x, int z)
+{
+    int localX = x - inst->originX, localZ = z - inst->originY;
+    unsigned role;
+
+    if (localX < 0 || localZ < 0 || localX >= inst->width || localZ >= inst->height)
+        return false;
+    role = VoxelRegions_RoleAt(inst->layoutId, localX, localZ);
+    return role == VOXEL_ROLE_FLOOR || role == VOXEL_ROLE_WATER || role == VOXEL_ROLE_SIGNPOST
+        || role == VOXEL_ROLE_FENCE || role == VOXEL_ROLE_PROP;
+}
+
+/* A rectangle of the pool on one ground, its texture (the round falloff of
+ * VOXEL_LAMP_POOL_RADIUS) mapped from the lamp's centre. */
+static void LampPoolQuad(VoxelBuilder *b, float x0, float z0, float x1, float z1,
+                         float centerX, float centerZ)
+{
+    float scale = 0.5f / VOXEL_LAMP_POOL_RADIUS;
+    float u0 = 0.5f + (x0 - centerX) * scale, u1 = 0.5f + (x1 - centerX) * scale;
+    float v0 = 0.5f + (z0 - centerZ) * scale, v1 = 0.5f + (z1 - centerZ) * scale;
+
+    VoxelBuilder_Quad(b,
+        &(VoxelVertex){x0, 0.0f, z0, u0, v0, 1.0f},
+        &(VoxelVertex){x1, 0.0f, z0, u1, v0, 1.0f},
+        &(VoxelVertex){x1, 0.0f, z1, u1, v1, 1.0f},
+        &(VoxelVertex){x0, 0.0f, z1, u0, v1, 1.0f});
+}
+
+/*
+ * The pool of light under a lamp: a textured disc on the ground, its falloff
+ * per pixel. Where every cell it covers is lit ground at one height - a city
+ * street - it is one quad; elsewhere a quad a cell, on the cells it may light.
+ * It used to be four quads a cell with the falloff in the vertices, which drew
+ * it in visible squares, and it left out the lamp's own cell (a signpost) and
+ * any fence beside it: dark squares where the light is brightest.
+ */
+static void LampGround(VoxelBuilder *builder, const VoxelMapInstance *inst,
+                       float centerX, float centerZ)
+{
+    const float r = VOXEL_LAMP_POOL_RADIUS;
+    int firstX = (int)floorf(centerX - r), lastX = (int)floorf(centerX + r);
+    int firstZ = (int)floorf(centerZ - r), lastZ = (int)floorf(centerZ + r);
+    float lift = 0.0f, shift = 0.0f;
+    bool flat = true;
+
+    if (builder == NULL)
+        return;
+    builder->base = VoxelRelief_Base(inst);
+    for (int zpos = firstZ; zpos <= lastZ && flat; ++zpos)
+        for (int xpos = firstX; xpos <= lastX && flat; ++xpos)
+        {
+            float l = VoxelRelief_CellLift(inst, xpos, zpos), s = VoxelRelief_CellShift(inst, xpos, zpos);
+
+            if (zpos == firstZ && xpos == firstX)
+            {
+                lift = l;
+                shift = s;
+            }
+            flat = LampLit(inst, xpos, zpos) && l == lift && s == shift;
+        }
+    if (flat)
+    {
+        if (builder->capacity - builder->count < 6u)
+            return;
+        builder->lift = lift;
+        builder->shift = shift;
+        LampPoolQuad(builder, centerX - r, centerZ - r, centerX + r, centerZ + r, centerX, centerZ);
+        return;
+    }
+    for (int zpos = firstZ; zpos <= lastZ; ++zpos)
+        for (int xpos = firstX; xpos <= lastX; ++xpos)
+        {
+            /* the cell's nearest point to the centre: is any of it lit? */
+            float nx = centerX < xpos ? xpos : centerX > xpos + 1 ? xpos + 1 : centerX;
+            float nz = centerZ < zpos ? zpos : centerZ > zpos + 1 ? zpos + 1 : centerZ;
+
+            if ((nx - centerX) * (nx - centerX) + (nz - centerZ) * (nz - centerZ) >= r * r
+             || !LampLit(inst, xpos, zpos))
+                continue;
+            if (builder->capacity - builder->count < 6u)
+                return;
+            builder->lift = VoxelRelief_CellLift(inst, xpos, zpos);
+            builder->shift = VoxelRelief_CellShift(inst, xpos, zpos);
+            LampPoolQuad(builder, (float)xpos, (float)zpos, (float)(xpos + 1), (float)(zpos + 1),
+                         centerX, centerZ);
+        }
+}
+
+void VoxelSign_EmitNight(VoxelBuilder *glass, VoxelBuilder *ground,
+                       const VoxelMapInstance *inst, int x0, int y0, int x1, int y1)
+{
+    if (glass == NULL || inst == NULL || inst->indoor || !LoadMasks())
+        return;
+    for (unsigned index = 0; index < sCount; ++index)
+    {
+        const SignRecord *record = &sIndex[index];
+        int xpos = inst->originX + record->x, zpos = inst->originY + record->y;
+        if (record->layout != inst->layoutId || !VoxelSign_IsLantern(record->head)
+            || xpos < x0 || xpos >= x1 || zpos < y0 || zpos >= y1
+            || VoxelRegions_RoleAt(inst->layoutId, record->x, record->y) != VOXEL_ROLE_SIGNPOST)
+            continue;
+        int last = 16;
+        for (unsigned row = 0; row < 16; ++row)
+            if (record->rows[row] != 0)
+                last = (int)row + 16;
+        glass->base = VoxelRelief_Base(inst);
+        glass->lift = VoxelRelief_CellLift(inst, xpos, zpos);
+        glass->shift = VoxelRelief_CellShift(inst, xpos, zpos);
+        float back = zpos - 1 + (last / 8) * 0.5f + 0.25f - VOXEL_SIGN_PINNED_DEPTH / 32.0f;
+        float front = back + VOXEL_SIGN_PINNED_DEPTH / 16.0f;
+        for (unsigned row = 6; row < 11; ++row)
+        {
+            unsigned bits = record->head[row];
+            int left = 0, right = 15;
+            while (left < 16 && (bits & (1u << left)) == 0)
+                ++left;
+            while (right >= left && (bits & (1u << right)) == 0)
+                --right;
+            left += 2;
+            right -= 2;
+            if (left > right)
+                continue;
+            if (glass->capacity - glass->count < 12u)
+                return;
+            float leftX = xpos + left / 16.0f, rightX = xpos + (right + 1) / 16.0f;
+            float bottom = (last - (int)row) / 16.0f, top = bottom + 1.0f / 16.0f;
+            for (unsigned face = 0; face < 2; ++face)
+            {
+                float depth = face == 0 ? front : back;
+                VoxelBuilder_Quad(glass,
+                    &(VoxelVertex){leftX, bottom, depth, 0.0f, 0.0f, 1.0f},
+                    &(VoxelVertex){rightX, bottom, depth, 0.0f, 0.0f, 1.0f},
+                    &(VoxelVertex){rightX, top, depth, 0.0f, 0.0f, 1.0f},
+                    &(VoxelVertex){leftX, top, depth, 0.0f, 0.0f, 1.0f});
+            }
+        }
+        LampGround(ground, inst, xpos + 0.5f, (front + back) * 0.5f);
+    }
 }
 
 static void PixelUV(const VoxelSignMask *m, unsigned x, unsigned y, float *u, float *v)
@@ -198,30 +352,69 @@ static void EmitSign(VoxelBuilder *b, float wx, float wz, float baseY,
         }
     if (!components) return;
     depth = (float)depthPixels / 16.0f;
-    for (y = 0; y < m->height; ++y) {
-        for (x = 0; x < m->width; ++x) {
-            float x0, x1, y0, y1, z0, z1;
-            float u0, u1, v0, v1;
-            if (!Filled(m, (int)x, (int)y)) continue;
-            int maxY = lowY[component[y * 16 + x]];
-            x0 = wx + (float)x / 16.0f;
-            x1 = wx + (float)(x + 1) / 16.0f;
-            /* buildObject's lowY is the real drawn bottom, not the cell
-             * bottom. The lowest opaque row therefore contacts baseY. */
-            y0 = baseY + (float)(maxY - (int)y) / 16.0f;
-            y1 = y0 + 1.0f / 16.0f;
-            z0 = wz + (maxY / 8) * 0.5f + 0.25f - depth * 0.5f;
-            z1 = z0 + depth;
-            PixelUV(m, x, y, &u0, &v0);
-            u1 = u0 + m->du;
-            v1 = v0 + m->dv;
-            if (!Filled(m, (int)x, (int)y - 1)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,5);
-            if (!Filled(m, (int)x, (int)y + 1)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,4);
-            if (!Filled(m, (int)x - 1, (int)y)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,2);
-            if (!Filled(m, (int)x + 1, (int)y)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,3);
+    /*
+     * Every face is merged along the pixels that share it: tops and bottoms
+     * along a row, the sides down a column, front and back along a row. A
+     * merged face carries the drawing across it as the faces of its pixels
+     * did, each pixel on its own sixteenth: the same picture in a fifth
+     * fewer quads. Pixels side by side or one over the other are one piece
+     * and stand on the same bottom. A boulder is a signpost too (Sky
+     * Pillar's top, thirteen of them to a chunk), and pixel by pixel they
+     * were more than a chunk could hold.
+     */
+    for (x = 0; x < m->width; ++x) {
+        for (int side = 2; side <= 3; ++side) {
+            int dx = side == 2 ? -1 : 1;
+            for (y = 0; y < m->height; ++y) {
+                unsigned start = y;
+                if (!Filled(m, (int)x, (int)y) || Filled(m, (int)x + dx, (int)y)) continue;
+                int maxY = lowY[component[y * 16 + x]];
+                /* never across the seam of a lamp's head and its post: the
+                 * two are drawn in different places of the atlas */
+                while (y + 1 < m->height && y + 1 != m->headRows
+                       && Filled(m, (int)x, (int)y + 1) && !Filled(m, (int)x + dx, (int)y + 1))
+                    ++y;
+                {
+                    float xa = wx + (float)x / 16.0f;
+                    float xb = xa + 1.0f / 16.0f;
+                    float za = wz + (maxY / 8) * 0.5f + 0.25f - depth * 0.5f;
+                    float zb = za + depth;
+                    /* buildObject's lowY is the real drawn bottom, not the
+                     * cell bottom. The lowest opaque row therefore contacts
+                     * baseY. */
+                    float ya = baseY + (float)(maxY - (int)y) / 16.0f;
+                    float yb = baseY + (float)(maxY - (int)start + 1) / 16.0f;
+                    float ua, va;
+                    PixelUV(m, x, start, &ua, &va);
+                    Face(b, xa,ya,za,xb,yb,zb,ua,va,ua + m->du,va + (y + 1 - start) * m->dv,shade,side);
+                }
+            }
         }
-        /* Front/back are merged here; the previous loop emits only the
-         * silhouette sides and the top/bottom pixel boundaries. */
+    }
+    for (y = 0; y < m->height; ++y) {
+        for (int side = 4; side <= 5; ++side) {
+            int dy = side == 5 ? -1 : 1;
+            for (x = 0; x < m->width; ++x) {
+                unsigned start = x;
+                if (!Filled(m, (int)x, (int)y) || Filled(m, (int)x, (int)y + dy)) continue;
+                int maxY = lowY[component[y * 16 + x]];
+                while (x + 1 < m->width && Filled(m, (int)x + 1, (int)y)
+                       && !Filled(m, (int)x + 1, (int)y + dy))
+                    ++x;
+                {
+                    float xa = wx + (float)start / 16.0f;
+                    float xb = wx + (float)(x + 1) / 16.0f;
+                    float za = wz + (maxY / 8) * 0.5f + 0.25f - depth * 0.5f;
+                    float zb = za + depth;
+                    float ya = baseY + (float)(maxY - (int)y) / 16.0f;
+                    float yb = ya + 1.0f / 16.0f;
+                    float ua, va;
+                    PixelUV(m, start, y, &ua, &va);
+                    Face(b, xa,ya,za,xb,yb,zb,ua,va,ua + (x + 1 - start) * m->du,va + m->dv,shade,side);
+                }
+            }
+        }
+        /* Front and back. */
         for (x = 0; x < m->width; ++x) {
             unsigned start = x;
             if (!Filled(m, (int)x, (int)y)) continue;
@@ -258,9 +451,8 @@ bool VoxelSign_EmitStanding(VoxelBuilder *b, const VoxelMapInstance *inst, int x
 
 bool VoxelSign_IsCell(const VoxelMapInstance *inst, int x, int y)
 {
-    return inst && VoxelRegions_RoleAt((unsigned)inst->layoutId, x - inst->originX,
-                                       y - inst->originY) == VOXEL_ROLE_SIGNPOST
-        && FindMask((unsigned)inst->layoutId, x - inst->originX, y - inst->originY) != NULL;
+    return inst && FindMask((unsigned)inst->layoutId, x - inst->originX,
+                           y - inst->originY) != NULL;
 }
 
 static bool EmitCell(VoxelBuilder *b, const VoxelMapInstance *inst, int x, int y, bool ground)
@@ -272,8 +464,6 @@ static bool EmitCell(VoxelBuilder *b, const VoxelMapInstance *inst, int x, int y
     if (!b || !inst) return false;
     lx = x - inst->originX;
     ly = y - inst->originY;
-    if (VoxelRegions_RoleAt((unsigned)inst->layoutId, lx, ly) != VOXEL_ROLE_SIGNPOST)
-        return false;
     r = FindMask((unsigned)inst->layoutId, lx, ly);
     if (!r || !VoxelMesh_TileUV(b, x, y, &u0, &v0, &u1, &v1)) return false;
     memset(&mask, 0, sizeof(mask));
@@ -292,14 +482,28 @@ static bool EmitCell(VoxelBuilder *b, const VoxelMapInstance *inst, int x, int y
     }
     {
         float gu0, gv0, gu1, gv1;
-        /* The lone detector guarantees an open south neighbour. Never paint
-         * the sign's drawing a second time on its ground. */
-        if (ground && VoxelMesh_TileUV(b, x, y + 1, &gu0, &gv0, &gu1, &gv1))
+        /* The ground the generator matched to the cell's drawing round the
+         * sign (the lawn it stands on, not the path south of it); the cell
+         * south of it when the atlas has none. Never paint the sign's
+         * drawing a second time on its ground. */
+        if (ground && (VoxelMesh_MetatileUV(b, r->ground, &gu0, &gv0, &gu1, &gv1)
+                    || VoxelMesh_TileUV(b, x, y + 1, &gu0, &gv0, &gu1, &gv1)))
             VoxelMesh_Top(b, (float)x, (float)y, 0.0f, 0.0f,
                           gu0, gv0, gu1, gv1, 1.0f);
     }
     VoxelSign_Emit(b, (float)x, (float)(y - (mask.headRows ? 1 : 0)), 0.0f, &mask,
                    VOXEL_SIGN_PINNED_DEPTH, 1.0f);
+    return true;
+}
+
+bool VoxelSign_Ground(const VoxelMapInstance *inst, int x, int y, int *metatile)
+{
+    const SignRecord *r;
+
+    if (!inst) return false;
+    r = FindMask((unsigned)inst->layoutId, x - inst->originX, y - inst->originY);
+    if (!r) return false;
+    if (metatile) *metatile = r->ground;
     return true;
 }
 
@@ -311,8 +515,6 @@ bool VoxelSign_HeadGround(const VoxelMapInstance *inst, int x, int y, int *metat
     if (!inst) return false;
     lx = x - inst->originX;
     ly = y - inst->originY;
-    if (VoxelRegions_RoleAt((unsigned)inst->layoutId, lx, ly + 1) != VOXEL_ROLE_SIGNPOST)
-        return false;
     r = FindMask((unsigned)inst->layoutId, lx, ly + 1);
     if (!r || !HasHead(r))
         return false;
@@ -361,9 +563,10 @@ static bool ShadowOf(const VoxelMapInstance *inst, int x, int y, SignShadow *s)
     const int16_t *relief;
     bool head;
 
-    if (!VoxelSign_IsCell(inst, x, y))
+    /* one search: VoxelSign_IsCell would make the same one again */
+    r = inst ? FindMask((unsigned)inst->layoutId, x - inst->originX, y - inst->originY) : NULL;
+    if (r == NULL)
         return false;
-    r = FindMask((unsigned)inst->layoutId, x - inst->originX, y - inst->originY);
     head = HasHead(r);
     memset(s, 0, sizeof(*s));
     if (head)
@@ -390,6 +593,16 @@ static bool ShadowOf(const VoxelMapInstance *inst, int x, int y, SignShadow *s)
     if (relief != NULL)
         s->base = relief[3 * VOXEL_RELIEF_SIDE + 2] / 16.0f;
     s->zMid = (float)(y - (head ? 1 : 0)) + (float)(s->low / 8) * 0.5f + 0.25f;
+    {
+        /* on a bridge's deck (voxel_mesh_builder.c stands it there) */
+        float deck;
+
+        if (VoxelBuildings_DeckAt(inst, x + 0.5f, y + 0.5f, 0, &deck))
+        {
+            s->base += deck;
+            s->zMid += deck;
+        }
+    }
     return true;
 }
 

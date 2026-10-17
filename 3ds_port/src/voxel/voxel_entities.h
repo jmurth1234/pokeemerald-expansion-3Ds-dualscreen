@@ -22,14 +22,25 @@
 #include "voxel_camera.h"
 #include "voxel_mesh_builder.h"
 
-/* 16 slots of 64x64, one per gObjectEvents[], in a 256x256 RGBA5551 texture. */
-#define VOXEL_SPRITE_ATLAS_DIM  256u
+/*
+ * 32 slots of 64x64 in a 512x256 RGBA5551 texture (256 KiB of linear memory):
+ * the first 16 one per gObjectEvents[], the rest for what is not an object -
+ * field effects, the follower, the visible wild Pokemon - which also take an
+ * unused object's slot. With 16 in all, a route full of trainers left those
+ * too few: grass stepped on did not rustle and the wild ones blinked in and
+ * out as they took turns.
+ */
+#define VOXEL_SPRITE_ATLAS_W    512u
+#define VOXEL_SPRITE_ATLAS_H    256u
 #define VOXEL_SPRITE_SLOT_DIM   64u
-#define VOXEL_SPRITE_COLUMNS    (VOXEL_SPRITE_ATLAS_DIM / VOXEL_SPRITE_SLOT_DIM)
-#define VOXEL_SPRITE_SLOTS      16u
-#define VOXEL_SPRITE_PIXELS     (VOXEL_SPRITE_ATLAS_DIM * VOXEL_SPRITE_ATLAS_DIM)
+#define VOXEL_SPRITE_COLUMNS    (VOXEL_SPRITE_ATLAS_W / VOXEL_SPRITE_SLOT_DIM)
+#define VOXEL_SPRITE_SLOTS      32u
+#define VOXEL_SPRITE_PIXELS     (VOXEL_SPRITE_ATLAS_W * VOXEL_SPRITE_ATLAS_H)
 #define VOXEL_CAST_SHADOW_VERTICES 6u
-#define VOXEL_REFLECTION_VERTICES 6u
+/* A reflection is cut across its card into strips, each over the water under
+ * it (EmitReflection): at most one quad a strip. */
+#define VOXEL_REFLECTION_STRIPS 4u
+#define VOXEL_REFLECTION_VERTICES (6u * VOXEL_REFLECTION_STRIPS)
 
 /* Forgets every cached slot, so the next update re-decodes from scratch. */
 void VoxelEntities_Reset(void);
@@ -41,6 +52,8 @@ void VoxelEntities_Reset(void);
  * once per step no matter how smooth its damping is.
  */
 void VoxelEntities_GetPlayerWorldPos(float *worldX, float *worldZ);
+/* How high a bridge's deck carries the player, tiles (0 off one). */
+float VoxelEntities_PlayerDeck(void);
 /* First vertex of the emitted player quad, or -1 when invisible/not emitted. */
 int VoxelEntities_PlayerVertexFirst(void);
 

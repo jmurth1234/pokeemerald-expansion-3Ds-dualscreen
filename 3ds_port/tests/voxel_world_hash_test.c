@@ -27,7 +27,11 @@ bool8 MetatileBehavior_IsPC(u8 b) { return b == MB_PC; }
 bool8 MetatileBehavior_IsSecretBasePC(u8 b) { return b == MB_SECRET_BASE_PC; }
 bool8 MetatileBehavior_IsPlayerRoomPCOn(u8 b) { return b == MB_PLAYER_ROOM_PC_ON; }
 static const struct ObjectEventGraphicsInfo *sDynamicInfo;
+#ifdef PORT_EXPANSION
 const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u16 id)
+#else
+const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u8 id)
+#endif
 { return id == 1 ? sDynamicInfo : NULL; }
 const struct Tileset gTileset_GenericBuilding = {0};
 bool VoxelAtlas_IsVoid(const VoxelMapInstance *inst, int metatile) { (void)inst; (void)metatile; return false; }
@@ -38,12 +42,10 @@ static u32 sSizedBytes;
 u32 Port_GetAssetSizeExact(const void *p) { return p == sSizedAsset ? sSizedBytes : 0; }
 void LZDecompressWram(const u32 *src, void *dst) { (void)src; (void)dst; }
 #ifdef PORT_EXPANSION
-/* The one-shot tile loader calls the ROM's decompressors; the tests only
- * stream through Voxel_LoadTilesStep's own decoder, so these just link.
- * (The expansion's decompress.c is the ROM's; the test links nothing from it.) */
-u32 GetDecompressedDataSize(const u32 *src) { (void)src; return 0; }
-void DecompressDataWithHeaderWram(const u32 *src, void *dst) { (void)src; (void)dst; }
-void FastLZ77UnCompWram(const u32 *src, void *dst) { (void)src; (void)dst; }
+static unsigned sSmolCalls;
+u32 GetDecompressedDataSize(const u32 *src) { (void)src; return 8; }
+void DecompressDataWithHeaderWram(const u32 *src, void *dst)
+{ (void)src; ++sSmolCalls; memset(dst, 0x37, 8); }
 #endif
 void CB2_Overworld(void) {}
 void CB2_OverworldBasic(void) {}
@@ -52,9 +54,13 @@ const struct MapHeader *const GetMapHeaderFromConnection(const struct MapConnect
 unsigned VoxelRegions_RoleAt(unsigned id, int x, int y)
 { (void)id; (void)x; (void)y; return VOXEL_ROLE_FLOOR; }
 VoxelVisualShape Voxel_BehaviorShape(unsigned b) { (void)b; return VOXEL_SHAPE_COUNT; }
-int VoxelTree_Part(int id) { (void)id; return -1; }
-int VoxelTree_GroundMetatile(int id) { return id; }
+int VoxelTree_Part(const void *secondaryTileset, int metatileId)
+{ (void)secondaryTileset; (void)metatileId; return -1; }
+int VoxelTree_GroundMetatile(const void *secondaryTileset, int metatileId)
+{ (void)secondaryTileset; return metatileId; }
 bool VoxelRelief_IsDrawn(const VoxelMapInstance *inst) { (void)inst; return false; }
+const u16 *MapGridGetCameraBorderAt(int x, int y, u8 *index)
+{ (void)x; (void)y; *index = 0; return NULL; }
 
 static void Check(int x0, int y0, int x1, int y1)
 {
@@ -132,6 +138,17 @@ static void TileLoadTests(void)
     assert(!Voxel_LoadTilesStep(&tileset, dest, 1025, &load, 512) && load.written == 1024);
     assert(Voxel_LoadTilesStep(&tileset, dest, 1025, &load, 512) && load.ok);
     assert(!memcmp(raw, dest, 1025) && dest[1025] == 0xCA);
+#ifdef PORT_EXPANSION
+    const u32 smol[] = {1, 0};
+    tileset.tiles = (const void *)smol; tileset.isCompressed = true;
+    sSizedAsset = smol; sSizedBytes = sizeof(smol); load = (VoxelTileLoad){0};
+    memset(dest, 0xCA, sizeof(dest));
+    assert(Voxel_LoadTilesStep(&tileset, dest, 7, &load, 1) && !load.ok);
+    assert(sSmolCalls == 0 && dest[0] == 0xCA);
+    load = (VoxelTileLoad){0};
+    assert(Voxel_LoadTilesStep(&tileset, dest, 8, &load, 1) && load.ok);
+    assert(sSmolCalls == 1 && load.written == 8 && dest[7] == 0x37 && dest[8] == 0xCA);
+#endif
     sSizedAsset = NULL; sSizedBytes = 0;
     puts("PASS tile streaming: bounded literal/match/raw writes, overlap, truncation and bounds");
 }

@@ -37,8 +37,16 @@ void CtrEmu_EndVBlank(void)
 
 u16 Platform_GetKeyInput(void)
 {
-    /* The bottom screen's touch controls press buttons through here. */
-    u16 held = CtrInput_Get()->held | CtrBottom_InjectedKeys();
+    const CtrInput *input = CtrInput_Get();
+    u16 held = input->held;
+
+    /* Y is the 3DS's own SELECT: the registered item, as the bottom screen's
+     * Y button says. */
+    if (input->physicalHeld & CTR_KEY_Y)
+        held |= SELECT_BUTTON;
+    /* The bottom screen's column takes the buttons while X has its focus;
+     * its touch controls press buttons through here. */
+    held = CtrBottom_FilterKeys(held) | CtrBottom_InjectedKeys();
     REG_KEYINPUT = held ^ KEYS_MASK;
     return held;
 }
@@ -46,10 +54,11 @@ u16 Platform_GetKeyInput(void)
 /* AgbMain owns the loop: this is the game's frame boundary. */
 void CtrGame_WaitFrame(void);
 void VBlankIntrWait(void) { CtrGame_WaitFrame(); }
+/* At once, as on the GBA: DoSoftReset expects SoftReset not to return. */
 void SoftReset(u32 flags)
 {
     (void)flags;
-    CtrPlatform_RequestReset();
+    CtrGame_SoftReset();
 }
 
 static u8 Bcd(unsigned value) { return ((value / 10) << 4) | (value % 10); }
@@ -60,7 +69,10 @@ void Platform_SetStatus(struct SiiRtcInfo *rtc) { sRtcStatus = rtc->status; }
 
 void Platform_GetDateTime(struct SiiRtcInfo *rtc)
 {
-    time_t now = time(NULL) + sClockOffset;
+    /* A measured scenario's own clock: the game seeds its random numbers
+     * from it (3ds_scenario.c). */
+    int64_t pinned;
+    time_t now = (CtrScenario_Clock(&pinned) ? (time_t)pinned : time(NULL)) + sClockOffset;
     struct tm value;
     if (!localtime_r(&now, &value))
         CtrPlatform_Fatal("RTC conversion failed");
@@ -139,11 +151,15 @@ void Platform_ReadFlash(u16 sector, u32 offset, u8 *dest, u32 size)
     memcpy(dest, FLASH_BASE + address, size);
 }
 
+#ifdef PORT_EXPANSION
 void Platform_QueueAudio(float *samples, s32 count)
+#else
+void Platform_QueueAudio(s32 *samples, s32 count)
+#endif
 {
     /*
      * m4aSoundVSync hands over one mixer frame per VBlank, measured in bytes
-     * because SDL's queue is. Four bytes per float, two floats per frame.
+     * because SDL's queue is. Four bytes per sample, two samples per frame.
      */
-    CtrAudio_Queue(samples, count / (s32)(2 * sizeof(float)));
+    CtrAudio_Queue((const int32_t *)samples, count / (s32)(2 * sizeof(s32)));
 }

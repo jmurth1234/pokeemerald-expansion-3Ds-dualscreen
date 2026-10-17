@@ -1,0 +1,85 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: shiny odds
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/pokemon.c b/src/pokemon.c
+--- a/src/pokemon.c
++++ b/src/pokemon.c
+@@ -2209,6 +2209,40 @@
+     CalculateMonStats(mon);
+ }
+ 
++#ifdef PLATFORM_3DS
++// Shiny odds (OPTIONS, CHEATS): a new Pokemon for the player rolls its
++// personality up to this many times, keeping the first shiny one (1: the
++// game's 1 in 8192; 0: until it is shiny). Eggs and trades keep the game's.
++static const u16 sShinyRolls[] = {1, 2, 8, 32, 128, 0};
++
++static u32 ShinyRolls(void)
++{
++    u32 setting = CtrExtras_Get("shiny_odds");
++
++    return setting < ARRAY_COUNT(sShinyRolls) ? sShinyRolls[setting] : 1;
++}
++
++static bool8 ShinyForPlayer(u32 personality)
++{
++    u32 otId = gSaveBlock2Ptr->playerTrainerId[0]
++             | (gSaveBlock2Ptr->playerTrainerId[1] << 8)
++             | (gSaveBlock2Ptr->playerTrainerId[2] << 16)
++             | (gSaveBlock2Ptr->playerTrainerId[3] << 24);
++
++    return GET_SHINY_VALUE(otId, personality) < SHINY_ODDS;
++}
++
++// TRUE while another roll is due: `rolls` counts down (0: no limit).
++static bool8 ShinyRollAgain(u32 *rolls, u32 personality)
++{
++    if (ShinyForPlayer(personality))
++        return FALSE;
++    if (*rolls == 0)
++        return TRUE;
++    return --*rolls > 0;
++}
++#endif
++
+ void CreateBoxMon(struct BoxPokemon *boxMon, u16 species, u8 level, u8 fixedIV, u8 hasFixedPersonality, u32 fixedPersonality, u8 otIdType, u32 fixedOtId)
+ {
+     u8 speciesName[POKEMON_NAME_LENGTH + 1];
+@@ -2222,6 +2256,15 @@
+         personality = fixedPersonality;
+     else
+         personality = Random32();
++#ifdef PLATFORM_3DS
++    if (!hasFixedPersonality && otIdType == OT_ID_PLAYER_ID)
++    {
++        u32 rolls = ShinyRolls();
++
++        while (ShinyRollAgain(&rolls, personality))
++            personality = Random32();
++    }
++#endif
+ 
+     SetBoxMonData(boxMon, MON_DATA_PERSONALITY, &personality);
+ 
+@@ -2332,6 +2375,21 @@
+         personality = Random32();
+     }
+     while (nature != GetNatureFromPersonality(personality));
++#ifdef PLATFORM_3DS
++    {
++        // Wild Pokemon: more rolls, the nature kept.
++        u32 rolls = ShinyRolls();
++
++        while (ShinyRollAgain(&rolls, personality))
++        {
++            do
++            {
++                personality = Random32();
++            }
++            while (nature != GetNatureFromPersonality(personality));
++        }
++    }
++#endif
+ 
+     CreateMon(mon, species, level, fixedIV, TRUE, personality, OT_ID_PLAYER_ID, 0);
+ }

@@ -44,17 +44,23 @@ static void Place(VoxelCamera *cam)
     cam->targetY = cam->ground;
 }
 
-/* Wider maps are framed from further away, up to a fixed ceiling. The pitch
- * and the zoom are the player's (bottom-screen options; 40 degrees, 100%). */
+/* Wider maps are framed from further away, up to a fixed ceiling. Maps joined
+ * by connections all take the ceiling: the player walks from one to the next
+ * with no fade, and a 20x20 town (Oldale, Dewford) would otherwise pull the
+ * camera in at once on crossing its edge. The pitch and the zoom are the
+ * player's (bottom-screen options; 40 degrees, 100%). */
 static void AdaptDistance(VoxelCamera *cam)
 {
     int mapW = 0, mapH = 0;
-    float scale;
+    float scale = 5.0f;
 
-    VoxelWorld_GetMapDimensions(&mapW, &mapH);
-    scale = (float)(mapW > mapH ? mapW : mapH) * 0.2f;
-    if (scale > 5.0f)
-        scale = 5.0f;
+    if (!VoxelWorld_MapIsConnected())
+    {
+        VoxelWorld_GetMapDimensions(&mapW, &mapH);
+        scale = (float)(mapW > mapH ? mapW : mapH) * 0.2f;
+        if (scale > 5.0f)
+            scale = 5.0f;
+    }
     cam->distance = (8.0f + scale) * 100.0f / (float)CtrSettings_VoxelZoom();
     cam->pitch = (float)CtrSettings_VoxelPitch();
 }

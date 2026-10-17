@@ -1,0 +1,28 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Italian ending tilemap
+Applies after 0049-italian-layout.patch; apply with tools/bootstrap.py.
+
+The Italian ROM draws "THE END" with a pre-rendered tilemap ("la fine",
+graphics/credits/italian/the_end_copyright.bin.lz in the Italian tree), the same
+way the Spanish and French ones do: tools/localize_italian.py ships it as
+graphics/credits/italian_the_end.bin.lz.
+
+--- a/src/credits.c
++++ b/src/credits.c
+@@ -122,6 +122,8 @@
+ static const u32 sSpanishTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/spanish_the_end.bin.lz");
+ #elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
+ static const u32 sFrenchTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/french_the_end.bin.lz");
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_ITALIAN
++static const u32 sItalianTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/italian_the_end.bin.lz");
+ #endif
+ 
+ static const u8 sTheEnd_LetterMap_T[] =
+@@ -1338,6 +1340,8 @@
+     LZ77UnCompVram(sSpanishTheEnd_Tilemap, (void *)(VRAM + offset));
+ #elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
+     LZ77UnCompVram(sFrenchTheEnd_Tilemap, (void *)(VRAM + offset));
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_ITALIAN
++    LZ77UnCompVram(sItalianTheEnd_Tilemap, (void *)(VRAM + offset));
+ #else
+     u16 pos;
+     u16 baseTile = (palette / 16) << 12;

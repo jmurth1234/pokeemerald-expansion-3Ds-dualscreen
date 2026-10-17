@@ -1,0 +1,19 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: every ball catches
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/battle_script_commands.c b/src/battle_script_commands.c
+--- a/src/battle_script_commands.c
++++ b/src/battle_script_commands.c
+@@ -10029,6 +10029,12 @@
+             }
+         }
+ 
++#ifdef PLATFORM_3DS
++        // Every Poke Ball catches (OPTIONS, CHEATS): wild battles only (a
++        // trainer's Pokemon never reaches here).
++        if (CtrExtras_Get("always_catch"))
++            odds = 255;
++#endif
+         if (odds > 254) // mon caught
+         {
+             BtlController_EmitBallThrowAnim(B_COMM_TO_CONTROLLER, BALL_3_SHAKES_SUCCESS);

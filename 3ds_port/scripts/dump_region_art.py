@@ -18,7 +18,20 @@ NUM_PRIMARY = 512
 TILES_PER_TILESET = 512
 
 
+# The generators build a LayoutArt per layout (thousands per run) over a few
+# dozen tilesets: the files are read and parsed once per process.
+_INCBIN = {}
+_U16 = {}
+_GRAPHICS = {}
+
+
 def incbin_map(pattern):
+    if pattern not in _INCBIN:
+        _INCBIN[pattern] = _incbin_map(pattern)
+    return dict(_INCBIN[pattern])
+
+
+def _incbin_map(pattern):
     text = open(os.path.join(ROOT, "src", "data", "tilesets", "metatiles.h"),
                 encoding="utf-8").read()
     out = {"gTileset_" + n: os.path.join(ROOT, p)
@@ -36,8 +49,10 @@ def incbin_map(pattern):
 
 
 def read_u16(path):
-    raw = open(path, "rb").read()
-    return list(struct.unpack("<%dH" % (len(raw) // 2), raw[:len(raw) // 2 * 2]))
+    if path not in _U16:
+        raw = open(path, "rb").read()
+        _U16[path] = struct.unpack("<%dH" % (len(raw) // 2), raw[:len(raw) // 2 * 2])
+    return list(_U16[path])
 
 
 def tileset_dir(name):
@@ -51,7 +66,14 @@ def tileset_dir(name):
 
 
 def load_graphics(name):
-    """4bpp tile bytes and sixteen 16-colour palettes, as RGB triples."""
+    """4bpp tile bytes and sixteen 16-colour palettes, as RGB triples (shared:
+    callers only read them)."""
+    if name not in _GRAPHICS:
+        _GRAPHICS[name] = _load_graphics(name)
+    return _GRAPHICS[name]
+
+
+def _load_graphics(name):
     base = tileset_dir(name)
     if base is None:
         return b"", []

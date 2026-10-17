@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT / "builder"))
 
 from emerald3ds_builder import __version__ as BUILDER_VERSION, pak  # noqa: E402
 from emerald3ds_builder.recipe import Recipe  # noqa: E402
-from emerald3ds_builder.rom import KNOWN_CODES, ROM_SIZE  # noqa: E402
+from emerald3ds_builder.rom import KNOWN_CODES, ROM_PROFILES, ROM_SIZE  # noqa: E402
 from emerald3ds_builder.webmanifest import (ENTRYPOINT, INSTALL_DIR, INSTALL_FILES, KIND,  # noqa: E402
                                             MANIFEST_NAME, PAYLOAD_NAME, SCHEMA_VERSION, validate)
 
@@ -45,7 +45,9 @@ PACKAGE_EXCLUDE = {"gui.py", "install.py", "cli.py", "__main__.py"}
 LICENSES = [("LICENSE-PORT.md", "LICENSE-PORT.md"), ("NOTICE.md", "NOTICE.md"),
             ("AI_DISCLOSURE.md", "AI_DISCLOSURE.md"), ("3ds_port/src/voxel/NOTICE.md", "voxel-NOTICE.md")]
 FIXED_TIME = (2020, 1, 1, 0, 0, 0)
-ROM_REGIONS = {"BPEE": ("USA, Europe", "en")}
+VARIANT_FILES = ("Emerald3DS.3dsx", "Emerald3DS.smdh", "emerald3ds.recipe")
+ROM_REGIONS = {"BPEE": ("USA, Europe", "en"), "BPES": ("Spain", "es"), "BPEF": ("France", "fr"),
+               "BPEI": ("Italy", "it")}
 
 
 def sha256(data: bytes) -> str:
@@ -55,11 +57,18 @@ def sha256(data: bytes) -> str:
 def collect(payload: Path, package: Path = PACKAGE, licenses_root: Path = ROOT) -> dict[str, bytes]:
     """Every file of the web payload except the manifest: {zip path: bytes}."""
     files: dict[str, bytes] = {}
-    for name in ("Emerald3DS.3dsx", "Emerald3DS.smdh", "emerald3ds.recipe"):
+    for name in VARIANT_FILES:
         src = payload / name
         if not src.is_file():
             raise SystemExit("build_web_payload: %s is missing" % src)
         files["payload/" + name] = src.read_bytes()
+    # Other languages: payload/<lang>/ with their own executable and recipe.
+    for sub in sorted(p for p in payload.iterdir() if p.is_dir() and (p / "emerald3ds.recipe").is_file()):
+        for name in VARIANT_FILES:
+            src = sub / name
+            if not src.is_file():
+                raise SystemExit("build_web_payload: %s is missing" % src)
+            files["payload/%s/%s" % (sub.name, name)] = src.read_bytes()
     voxelgen = payload / "voxelgen"
     if voxelgen.is_dir():
         for path in sorted(voxelgen.rglob("*")):
@@ -70,6 +79,8 @@ def collect(payload: Path, package: Path = PACKAGE, licenses_root: Path = ROOT) 
             files["python/emerald3ds_builder/" + path.name] = path.read_bytes()
     for src, dst in LICENSES:
         path = licenses_root / src
+        if not path.is_file():
+            path = licenses_root / "public" / src  # the private workspace keeps them in public/
         if path.is_file():
             files["licenses/" + dst] = path.read_bytes()
     return files
@@ -78,8 +89,15 @@ def collect(payload: Path, package: Path = PACKAGE, licenses_root: Path = ROOT) 
 def make_manifest(files: dict[str, bytes], version: str, tag: str, cia_forwarder: str | None = None,
                   synthetic: bool = False) -> dict:
     recipe = Recipe.from_bytes(files["payload/emerald3ds.recipe"])
-    code = "BPEE"
-    region, language = ROM_REGIONS.get(code, ("", ""))
+
+    def rom_entry(sha1: str) -> dict:
+        if synthetic:
+            return {"sha1": sha1, "name": "Synthetic test ROM (not a game)", "code": "TEST",
+                    "region": "", "language": ""}
+        # The ROM a recipe is made from (BPES for the Spanish variant).
+        code = next((c for c, sha in ROM_PROFILES.items() if sha == sha1), "BPEE")
+        region, language = ROM_REGIONS.get(code, ("", ""))
+        return {"sha1": sha1, "name": KNOWN_CODES[code], "code": code, "region": region, "language": language}
 
     def ref(path: str, release_asset: str | None = None) -> dict:
         out = {"path": path, "sha256": sha256(files[path]), "size": len(files[path])}
@@ -96,9 +114,7 @@ def make_manifest(files: dict[str, bytes], version: str, tag: str, cia_forwarder
         "builderVersion": BUILDER_VERSION,
         "packSchema": pak.SCHEMA,
         "dataAbi": "%08x" % recipe.engine_abi,
-        "supportedRoms": [{"sha1": recipe.rom_sha1, "name": KNOWN_CODES[code] if not synthetic else
-                           "Synthetic test ROM (not a game)", "code": code if not synthetic else "TEST",
-                           "region": region, "language": language}],
+        "supportedRoms": [rom_entry(recipe.rom_sha1)],
         "pythonRuntime": {"minimumVersion": "3.11", "packages": ["pillow"], "stdlib": ["lzma", "zlib"]},
         "pyodideCompatibility": {"inprocessGenerators": True, "subprocess": False},
         "entrypoint": dict(ENTRYPOINT),
@@ -112,6 +128,23 @@ def make_manifest(files: dict[str, bytes], version: str, tag: str, cia_forwarder
         },
         "files": [{"path": p, "sha256": sha256(d), "size": len(d)} for p, d in sorted(files.items())],
     }
+    variants = []
+    for lang in sorted({p.split("/")[1] for p in files if p.count("/") == 2 and p.startswith("payload/")
+                        and p.endswith("/emerald3ds.recipe")}):
+        sub = "payload/%s/" % lang
+        variant_recipe = Recipe.from_bytes(files[sub + "emerald3ds.recipe"])
+        variants.append({
+            "rom": rom_entry(variant_recipe.rom_sha1),
+            "dataAbi": "%08x" % variant_recipe.engine_abi,
+            "recipeRelease": variant_recipe.release,
+            # Release asset names must be unique: Emerald3DS-es.3dsx, installed
+            # on the SD card as Emerald3DS.3dsx all the same.
+            "assets": {"threeDsx": ref(sub + "Emerald3DS.3dsx", "Emerald3DS-%s.3dsx" % lang),
+                       "smdh": ref(sub + "Emerald3DS.smdh"),
+                       "recipe": ref(sub + "emerald3ds.recipe")},
+        })
+    if variants:
+        manifest["variants"] = variants
     if synthetic:
         manifest["synthetic"] = True
     return validate(manifest)
@@ -178,35 +211,46 @@ def make_synthetic(out_dir: Path) -> dict[str, Path]:
     """A complete synthetic web payload, built through the real recipe, pack and
     manifest code: a fake 64 KiB "ROM" (code TEST, no game data), a recipe with
     one file of every operation kind, one in-process generator, and placeholder
-    executables. Only for tests and local development of the web builder."""
+    executables; plus a second variant (payload/es/: its own fake ROM, recipe,
+    executable and data ABI), as a release with a localized variant has. Only for
+    tests and local development of the web builder."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    rom = bytearray((i * 7 + 3) & 0xFF for i in range(64 * 1024))
-    rom[0xA0:0xB0] = b"SYNTHETIC\0\0\0TEST"
-    padded = bytes(rom) + b"\xff" * (ROM_SIZE - len(rom))
-    rom_sha1 = hashlib.sha1(padded).hexdigest()
-    gen_input = bytes(rom[0x1000:0x1100])
-    gen_output = bytes(reversed(gen_input)) * 4
+
+    def fake_rom(seed: int, code: bytes) -> bytearray:
+        rom = bytearray((i * 7 + seed) & 0xFF for i in range(64 * 1024))
+        rom[0xA0:0xB0] = b"SYNTHETIC\0\0\0" + code
+        return rom
 
     def entry(path: str, data: bytes, ops: list) -> dict:
         return {"path": path, "size": len(data), "crc": zlib.crc32(data) & 0xFFFFFFFF, "ops": ops}
 
-    entries = [entry("data/synthetic_copy.bin", bytes(rom[0x200:0x600]), [["C", 0x200, 0x400]]),
-               entry("data/synthetic_fill.bin", b"\x5a" * 512, [["F", 0x5A, 512]])]
-    generated = [{"path": "stage/leaves.bin", "size": len(gen_output),
-                  "crc": zlib.crc32(gen_output) & 0xFFFFFFFF, "generator": "gen_intro_margins.py"}]
-    inputs = [entry("data/synthetic/input.bin", gen_input, [["C", 0x1000, 0x100]])]
-    items = [(e["path"], e["size"], e["crc"]) for e in entries + generated]
-    vtree = {"tilesets": {}, "layouts_table_label": "gMapLayouts", "layouts": [], "maps": [],
-             "map_types": {}, "connection_directions": {}, "metatiles_h": [], "headers_h": [],
-             "metatile_behaviors": [["MB_NORMAL", 0]]}
-    recipe = Recipe(engine_abi=pak.engine_abi(items), rom_sha1=rom_sha1, release="v0.0.0-synthetic",
-                    entries=entries, generated=generated, inputs=inputs, vtree=vtree)
+    def make_recipe(rom: bytearray, fill: int) -> Recipe:
+        padded = bytes(rom) + b"\xff" * (ROM_SIZE - len(rom))
+        gen_input = bytes(rom[0x1000:0x1100])
+        gen_output = bytes(reversed(gen_input)) * 4
+        entries = [entry("data/synthetic_copy.bin", bytes(rom[0x200:0x600]), [["C", 0x200, 0x400]]),
+                   entry("data/synthetic_fill.bin", bytes([fill]) * 512, [["F", fill, 512]])]
+        generated = [{"path": "stage/leaves.bin", "size": len(gen_output),
+                      "crc": zlib.crc32(gen_output) & 0xFFFFFFFF, "generator": "gen_intro_margins.py"}]
+        inputs = [entry("data/synthetic/input.bin", gen_input, [["C", 0x1000, 0x100]])]
+        items = [(e["path"], e["size"], e["crc"]) for e in entries + generated]
+        vtree = {"tilesets": {}, "layouts_table_label": "gMapLayouts", "layouts": [], "maps": [],
+                 "map_types": {}, "connection_directions": {}, "metatiles_h": [], "headers_h": [],
+                 "metatile_behaviors": [["MB_NORMAL", 0]]}
+        return Recipe(engine_abi=pak.engine_abi(items), rom_sha1=hashlib.sha1(padded).hexdigest(),
+                      release="v0.0.0-synthetic", entries=entries, generated=generated, inputs=inputs,
+                      vtree=vtree)
 
+    rom, rom_es = fake_rom(3, b"TEST"), fake_rom(5, b"TES2")
     payload = out_dir / "payload"
     (payload / "voxelgen" / "scripts").mkdir(parents=True, exist_ok=True)
+    (payload / "es").mkdir(parents=True, exist_ok=True)
     (payload / "Emerald3DS.3dsx").write_bytes(b"3DSX" + b"SYNTHETIC EXECUTABLE PLACEHOLDER\n")
     (payload / "Emerald3DS.smdh").write_bytes(b"SMDH" + b"SYNTHETIC ICON PLACEHOLDER\n")
-    recipe.save(payload / "emerald3ds.recipe")
+    make_recipe(rom, 0x5A).save(payload / "emerald3ds.recipe")
+    (payload / "es" / "Emerald3DS.3dsx").write_bytes(b"3DSX" + b"SYNTHETIC SECOND VARIANT PLACEHOLDER\n")
+    (payload / "es" / "Emerald3DS.smdh").write_bytes(b"SMDH" + b"SYNTHETIC ICON PLACEHOLDER\n")
+    make_recipe(rom_es, 0xA5).save(payload / "es" / "emerald3ds.recipe")
     (payload / "voxelgen" / "scripts" / "gen_intro_margins.py").write_text(SYNTHETIC_GENERATOR, encoding="utf-8")
     (payload / "voxelgen" / "scripts" / "synthetic_state.py").write_text("CALLS = 0\n", encoding="utf-8")
 
@@ -217,7 +261,10 @@ def make_synthetic(out_dir: Path) -> dict[str, Path]:
     (out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     rom_path = out_dir / "synthetic-rom.bin"
     rom_path.write_bytes(bytes(rom))
-    return {"payload": payload, "zip": archive, "manifest": out_dir / MANIFEST_NAME, "rom": rom_path}
+    rom_es_path = out_dir / "synthetic-rom-es.bin"
+    rom_es_path.write_bytes(bytes(rom_es))
+    return {"payload": payload, "zip": archive, "manifest": out_dir / MANIFEST_NAME, "rom": rom_path,
+            "rom_es": rom_es_path}
 
 
 def main() -> None:

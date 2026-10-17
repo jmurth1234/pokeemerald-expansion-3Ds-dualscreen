@@ -6,10 +6,13 @@
 #include "voxel_sign.h"
 #include "voxel_regions.h"
 #include "voxel_relief.h"
+#include "voxel_building.h"
 
 static bool sFloor;
 static unsigned sLayout;
 static int sX, sY;
+static int sOriginY;
+static unsigned sRole = VOXEL_ROLE_SIGNPOST;
 
 void VoxelBuilder_Quad(VoxelBuilder *b, const VoxelVertex *a, const VoxelVertex *c,
                        const VoxelVertex *d, const VoxelVertex *e)
@@ -27,10 +30,17 @@ void VoxelMesh_Top(VoxelBuilder *b,float x,float z,float h,float inset,
     assert(u == .5f); /* donor, not the board */
     sFloor = true;
 }
+/* No atlas slot for the matched ground: the cell south of the sign is laid. */
+bool VoxelMesh_MetatileUV(VoxelBuilder *b,int m,float *u,float *v,float *ue,float *ve)
+{
+    (void)b; (void)m; (void)u; (void)v; (void)ue; (void)ve;
+    return false;
+}
 bool VoxelMesh_TileUV(VoxelBuilder *b,int x,int y,float *u,float *v,float *ue,float *ve)
 {
     (void)b; (void)x;
-    *u = y == sY+1 ? .5f : 0; *ue = *u + .25f;
+    *u = y == sY+sOriginY+1 ? .5f : y == sY+sOriginY-1 ? .75f : 0;
+    *ue = *u + .25f;
     *v = 1; *ve = .75f;
     return true;
 }
@@ -40,13 +50,96 @@ const int16_t *VoxelRelief_Cell(const VoxelMapInstance *inst, int x, int y)
     (void)inst; (void)x; (void)y;
     return NULL;
 }
+/* Nor on a bridge's deck. */
+bool VoxelBuildings_DeckAt(const VoxelMapInstance *inst, float worldX, float worldZ,
+                           unsigned elevation, float *lift)
+{
+    (void)inst; (void)worldX; (void)worldZ; (void)elevation; (void)lift;
+    return false;
+}
+float VoxelRelief_Base(const VoxelMapInstance *inst)
+{
+    (void)inst;
+    return 0.0f;
+}
+float VoxelRelief_CellLift(const VoxelMapInstance *inst, int x, int y)
+{
+    (void)inst; (void)x; (void)y;
+    return 0.0f;
+}
+float VoxelRelief_CellShift(const VoxelMapInstance *inst, int x, int y)
+{
+    (void)inst; (void)x; (void)y;
+    return 0.0f;
+}
 unsigned VoxelRegions_RoleAt(unsigned id,int x,int y)
 {
-    return id == sLayout && x == sX && y == sY ? VOXEL_ROLE_SIGNPOST : VOXEL_ROLE_FLOOR;
+    return id == sLayout && x == sX && y == sY ? sRole : VOXEL_ROLE_FLOOR;
+}
+
+static void CheckDewford(void)
+{
+    static VoxelVertex vertices[16384];
+    VoxelBuilder builder = {.vertices=vertices,.capacity=16384};
+    VoxelMapInstance inst = {.layoutId=12,.originX=7,.originY=9};
+    int ground = -1;
+    bool foot = false, top = false, headUV = false, bodyUV = false;
+    sLayout = 12;
+    sX = 11;
+    sY = 16;
+    sOriginY = inst.originY;
+    sRole = VOXEL_ROLE_WALL;
+    int xpos = sX + inst.originX, ypos = sY + inst.originY;
+    assert(VoxelRegions_RoleAt(sLayout, sX, sY) == VOXEL_ROLE_WALL);
+    assert(VoxelSign_IsCell(&inst, xpos, ypos));
+    assert(!VoxelSign_IsCell(&inst, xpos, ypos - 1));
+    assert(!VoxelSign_IsCell(&inst, xpos - 1, ypos));
+    assert(VoxelSign_HeadGround(&inst, xpos, ypos - 1, &ground) && ground == 0x124);
+    assert(!VoxelSign_HeadGround(&inst, xpos, ypos, NULL));
+    assert(VoxelSign_EmitCell(&builder, &inst, xpos, ypos));
+    assert(sFloor && builder.count > 0 && builder.dropped == 0);
+    for (unsigned index = 0; index < builder.count; ++index)
+    {
+        VoxelVertex *vertex = &vertices[index];
+        assert(vertex->x >= xpos + 1.0f / 16 && vertex->x <= xpos + 1.0f);
+        assert(vertex->y >= 0.0f && vertex->y <= 23.0f / 16);
+        assert(vertex->z == ypos + .6875f || vertex->z == ypos + .8125f);
+        if (vertex->y == 0.0f) foot = true;
+        if (vertex->y == 23.0f / 16) top = true;
+        if (vertex->y > 1.0f)
+        {
+            assert(vertex->u >= .75f && vertex->u <= 1.0f);
+            headUV = true;
+        }
+        else if (vertex->y < 1.0f)
+        {
+            assert(vertex->u >= 0.0f && vertex->u <= .25f);
+            bodyUV = true;
+        }
+    }
+    assert(foot && top && headUV && bodyUV);
+    assert(VoxelSign_CasterTop(&inst, xpos, ypos) == 23.0f / 16);
+    assert(VoxelSign_Occludes(&inst, xpos, ypos, xpos + .5f, 1.25f, ypos + .75f));
+    assert(!VoxelSign_Occludes(&inst, xpos, ypos, xpos + .5f, 1.5f, ypos + .75f));
+    VoxelBuilder glass = {.vertices=vertices,.capacity=16384};
+    VoxelBuilder nightGround = {.vertices=vertices,.capacity=16384};
+    VoxelSign_EmitNight(&glass, &nightGround, &inst, xpos, ypos, xpos + 1, ypos + 1);
+    assert(glass.count == 0 && nightGround.count == 0);
+    builder.count = 0;
+    sFloor = false;
+    assert(VoxelSign_EmitStanding(&builder, &inst, xpos, ypos));
+    assert(!sFloor && builder.count > 0 && builder.dropped == 0);
+    VoxelSign_Shutdown();
+    puts("PASS Dewford gym sign: real VXS3, wall-role override, 23-pixel board, head UV, ground, no lamp glow");
 }
 
 int main(int argc,char **argv)
 {
+    if (argc == 3 && strcmp(argv[2], "--dewford") == 0)
+    {
+        CheckDewford();
+        return 0;
+    }
     static VoxelVertex vertices[4096];
     VoxelBuilder b = {.vertices=vertices,.capacity=4096};
     VoxelSignMask m = {.width=16,.height=16,.u0=.25f,.v0=1,
@@ -100,7 +193,7 @@ int main(int argc,char **argv)
     assert(argc==2);
     FILE *f=fopen(argv[1],"rb");
     unsigned char header[8], key[6];
-    assert(f && fread(header,1,8,f)==8 && memcmp(header,"VXS2",4)==0);
+    assert(f && fread(header,1,8,f)==8 && memcmp(header,"VXS3",4)==0);
     assert(fread(key,1,6,f)==6); fclose(f);
     sLayout=key[0]|(key[1]<<8); sX=key[2]|(key[3]<<8); sY=key[4]|(key[5]<<8);
     VoxelMapInstance inst={.layoutId=(int)sLayout};

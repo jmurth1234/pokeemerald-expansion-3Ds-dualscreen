@@ -1,0 +1,113 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: optional settings
+Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/battle_main.c b/src/battle_main.c
+--- a/src/battle_main.c
++++ b/src/battle_main.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "battle.h"
+ #include "battle_anim.h"
+ #include "battle_ai_script_commands.h"
+diff --git a/src/battle_script_commands.c b/src/battle_script_commands.c
+--- a/src/battle_script_commands.c
++++ b/src/battle_script_commands.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "battle.h"
+ #include "battle_message.h"
+ #include "battle_anim.h"
+diff --git a/src/daycare.c b/src/daycare.c
+--- a/src/daycare.c
++++ b/src/daycare.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "pokemon.h"
+ #include "battle.h"
+ #include "daycare.h"
+diff --git a/src/evolution_scene.c b/src/evolution_scene.c
+--- a/src/evolution_scene.c
++++ b/src/evolution_scene.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "malloc.h"
+ #include "battle.h"
+ #include "battle_message.h"
+diff --git a/src/field_player_avatar.c b/src/field_player_avatar.c
+--- a/src/field_player_avatar.c
++++ b/src/field_player_avatar.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "main.h"
+ #include "bike.h"
+ #include "event_data.h"
+diff --git a/src/money.c b/src/money.c
+--- a/src/money.c
++++ b/src/money.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "money.h"
+ #include "graphics.h"
+ #include "event_data.h"
+diff --git a/src/overworld.c b/src/overworld.c
+--- a/src/overworld.c
++++ b/src/overworld.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "overworld.h"
+ #include "battle_pyramid.h"
+ #include "battle_setup.h"
+diff --git a/src/pokemon.c b/src/pokemon.c
+--- a/src/pokemon.c
++++ b/src/pokemon.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "malloc.h"
+ #include "apprentice.h"
+ #include "battle.h"
+diff --git a/src/scrcmd.c b/src/scrcmd.c
+--- a/src/scrcmd.c
++++ b/src/scrcmd.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "frontier_util.h"
+ #include "battle_setup.h"
+ #include "berry.h"
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "wild_encounter.h"
+ #include "pokemon.h"
+ #include "metatile_behavior.h"

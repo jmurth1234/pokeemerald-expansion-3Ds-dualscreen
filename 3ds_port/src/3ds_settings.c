@@ -8,11 +8,16 @@
  * keys are ignored, so older and newer builds can share the file.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <3ds.h>
 #include "3ds_platform.h"
+#include "3ds_daynight.h"
+#include "3ds_data.h"
 
 #define SETTINGS_FILE "settings.txt"
+/* Written first, then put in the file's place (WriteText). */
+#define SETTINGS_TEMP "settings.txt.tmp"
 
 /* The voxel overworld is opt-in: the classic 2D field is the default. */
 static bool sVoxel = false;
@@ -27,15 +32,46 @@ static const int sPitches[] = {34, 37, 40, 43, 46};
 static const int sZooms[] = {90, 100, 110, 120};
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 static int sPitch = 2, sZoom = 1;
-/* The HD-2D tilt-shift blur over the voxel picture (3ds_video.c): on unless
- * turned off. */
-static bool sVoxelBlur = true;
+/* The HD-2D tilt-shift blur over the voxel picture (3ds_video.c): its
+ * strength in percent, full unless turned down; 0 turns it off. Settings
+ * written before it had a strength say 1 for on. */
+static const int sBlurs[] = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
+static int sBlur = 10;
 /* Battles in front of the voxel world rather than the GBA's scenery
  * (3ds_video.c, RenderBattleWorld): off unless turned on. */
 static bool sVoxelBattle = false;
 /* The FPS counter in the top screen's corner (3ds_video.c): off unless
  * turned on. */
 static bool sShowFps = false;
+/* Running without holding B (the bottom screen's RUN button; B then walks):
+ * off unless turned on. */
+static bool sRunAlways = false;
+/* Fast-forward: game frames per shown frame (3ds_platform.c, FrameShown),
+ * in halves so 1.5x fits; 2 is normal speed. settings.txt writes it as
+ * speed=1, speed=1.5, speed=2 ... */
+static const int sSpeeds[] = {2, 3, 4, 6, 8};
+static int sSpeed = 0;
+
+/*
+ * Settings without a variable of their own (the ENHANCEMENTS and CHEATS pages,
+ * 3ds_extras.c): "key=number" lines kept as read and written back with the
+ * rest. A key no build knows yet survives in the file too.
+ */
+#define EXTRA_KEYS 48
+static struct { char key[24]; int value; } sExtra[EXTRA_KEYS];
+static int sExtraCount;
+
+static int ExtraIndex(const char *key, bool add)
+{
+    for (int i = 0; i < sExtraCount; ++i)
+        if (strcmp(sExtra[i].key, key) == 0)
+            return i;
+    if (!add || sExtraCount == EXTRA_KEYS || strlen(key) >= sizeof(sExtra[0].key))
+        return -1;
+    strcpy(sExtra[sExtraCount].key, key);
+    sExtra[sExtraCount].value = 0;
+    return sExtraCount++;
+}
 
 static int Find(const int *values, int count, int value, int fallback)
 {
@@ -45,37 +81,78 @@ static int Find(const int *values, int count, int value, int fallback)
     return fallback;
 }
 
+/*
+ * Every setting as a new card has it, the extras included. A measured
+ * scenario starts from here: its meta.txt holds what the recording's card
+ * had, and a key that card never had is at its default there - not at
+ * whatever this card says (an EXP Share on here made the same battle 437
+ * frames longer than on the console it was recorded on).
+ */
+void CtrSettings_Defaults(void)
+{
+    sVoxel = false;
+    sPitch = 2;
+    sZoom = 1;
+    sBlur = COUNT(sBlurs) - 1;
+    sVoxelBattle = false;
+    sShowFps = false;
+    sRunAlways = false;
+    sSpeed = 0;
+    sExtraCount = 0;
+}
+
+/* One "key=value" line, from settings.txt or a measured scenario. */
+void CtrSettings_ApplyLine(const char *line)
+{
+    int value;
+
+    if (strncmp(line, "voxel=", 6) == 0)
+        sVoxel = line[6] == '1';
+    else if (sscanf(line, "voxel_pitch=%d", &value) == 1)
+        sPitch = Find(sPitches, COUNT(sPitches), value, sPitch);
+    else if (sscanf(line, "voxel_zoom=%d", &value) == 1)
+        sZoom = Find(sZooms, COUNT(sZooms), value, sZoom);
+    else if (sscanf(line, "voxel_blur=%d", &value) == 1)
+        sBlur = Find(sBlurs, COUNT(sBlurs), value == 1 ? 100 : value, sBlur);
+    else if (strncmp(line, "voxel_battle=", 13) == 0)
+        sVoxelBattle = line[13] == '1';
+    else if (strncmp(line, "fps=", 4) == 0)
+        sShowFps = line[4] == '1';
+    else if (strncmp(line, "run=", 4) == 0)
+        sRunAlways = line[4] == '1';
+    else if (strncmp(line, "speed=", 6) == 0)
+        sSpeed = Find(sSpeeds, COUNT(sSpeeds), (int)(strtof(line + 6, NULL) * 2 + 0.5f), sSpeed);
+    else
+    {
+        char key[sizeof(sExtra[0].key)];
+        int index;
+
+        if (sscanf(line, "%23[a-z0-9_]=%d", key, &value) == 2 && (index = ExtraIndex(key, true)) >= 0)
+            sExtra[index].value = value;
+    }
+}
+
 void CtrSettings_Load(void)
 {
     FILE *file = CtrFs_OpenData(SETTINGS_FILE, "r");
     char line[64];
 
+    /* A power cut between WriteText's remove and rename leaves only the
+       temp file, complete. */
+    if (file == NULL)
+        file = CtrFs_OpenData(SETTINGS_TEMP, "r");
     if (file == NULL)
     {
         CtrLog_Write(CTR_LOG_FS, "settings: none yet, defaults (voxel=0 fps=0)");
         return;
     }
     while (fgets(line, sizeof(line), file))
-    {
-        int value;
-
-        if (strncmp(line, "voxel=", 6) == 0)
-            sVoxel = line[6] == '1';
-        else if (sscanf(line, "voxel_pitch=%d", &value) == 1)
-            sPitch = Find(sPitches, COUNT(sPitches), value, sPitch);
-        else if (sscanf(line, "voxel_zoom=%d", &value) == 1)
-            sZoom = Find(sZooms, COUNT(sZooms), value, sZoom);
-        else if (strncmp(line, "voxel_blur=", 11) == 0)
-            sVoxelBlur = line[11] != '0';
-        else if (strncmp(line, "voxel_battle=", 13) == 0)
-            sVoxelBattle = line[13] == '1';
-        else if (strncmp(line, "fps=", 4) == 0)
-            sShowFps = line[4] == '1';
-    }
+        CtrSettings_ApplyLine(line);
     fclose(file);
-    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d battle=%d fps=%d",
-                 sVoxel ? 1 : 0, sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0,
-                 sVoxelBattle ? 1 : 0, sShowFps ? 1 : 0);
+    CtrLog_Write(CTR_LOG_FS, "settings: voxel=%d pitch=%d zoom=%d blur=%d battle=%d fps=%d run=%d speed=%d%s",
+                 sVoxel ? 1 : 0, sPitches[sPitch], sZooms[sZoom], sBlurs[sBlur],
+                 sVoxelBattle ? 1 : 0, sShowFps ? 1 : 0, sRunAlways ? 1 : 0,
+                 sSpeeds[sSpeed] / 2, sSpeeds[sSpeed] & 1 ? ".5" : "");
 }
 
 /*
@@ -88,23 +165,33 @@ void CtrSettings_Load(void)
 static Thread sSaver;
 static LightEvent sSaveWake;
 static LightLock sSaveLock = 1;
-static char sSaveText[160];
+static char sSaveText[160 + EXTRA_KEYS * 32];
 static bool sSavePending, sSaveQuit;
 
+/* Into a temp file, then in place of the old one: rewritten in place, a power
+ * cut mid-write lost every setting. FAT's rename does not replace, so the old
+ * file goes first; until the rename, Load reads the temp file. */
 static void WriteText(const char *text)
 {
-    FILE *file = CtrFs_OpenData(SETTINGS_FILE, "w");
+    FILE *file = CtrFs_OpenData(SETTINGS_TEMP, "w");
 
     if (file == NULL)
     {
-        CtrLog_Write(CTR_LOG_ERROR, "settings: could not open %s", SETTINGS_FILE);
+        CtrLog_Write(CTR_LOG_ERROR, "settings: could not open %s", SETTINGS_TEMP);
         return;
     }
     bool ok = fputs(text, file) >= 0;
     if (fclose(file) != 0)
         ok = false;
     if (!ok)
-        CtrLog_Write(CTR_LOG_ERROR, "settings: write failed for %s", SETTINGS_FILE);
+    {
+        CtrLog_Write(CTR_LOG_ERROR, "settings: write failed for %s", SETTINGS_TEMP);
+        remove(CTR_DATA_DIR SETTINGS_TEMP);
+        return;
+    }
+    remove(CTR_DATA_DIR SETTINGS_FILE);
+    if (rename(CTR_DATA_DIR SETTINGS_TEMP, CTR_DATA_DIR SETTINGS_FILE) != 0)
+        CtrLog_Write(CTR_LOG_ERROR, "settings: could not replace %s", SETTINGS_FILE);
 }
 
 static void Saver(void *arg)
@@ -130,18 +217,34 @@ static void Saver(void *arg)
     }
 }
 
+/* A measured scenario's settings are for its session alone. */
+static bool sFrozen;
+
+void CtrSettings_Freeze(void)
+{
+    sFrozen = true;
+}
+
+int CtrSettings_Text(char *text, unsigned size)
+{
+    int used = snprintf(text, size,
+             "voxel=%d\nvoxel_pitch=%d\nvoxel_zoom=%d\nvoxel_blur=%d\nvoxel_battle=%d\nfps=%d\nrun=%d\n"
+             "speed=%d%s\n",
+             sVoxel ? 1 : 0, sPitches[sPitch], sZooms[sZoom], sBlurs[sBlur], sVoxelBattle ? 1 : 0,
+             sShowFps ? 1 : 0, sRunAlways ? 1 : 0, sSpeeds[sSpeed] / 2, sSpeeds[sSpeed] & 1 ? ".5" : "");
+    for (int i = 0; i < sExtraCount && used >= 0 && used < (int)size; ++i)
+        used += snprintf(text + used, size - used, "%s=%d\n", sExtra[i].key, sExtra[i].value);
+    return used;
+}
+
 static void Save(void)
 {
     char text[sizeof(sSaveText)] = {0};
 
     /* Settings and shutdown are submitted by the game thread. */
-    if (sSaveQuit)
+    if (sSaveQuit || sFrozen)
         return;
-
-    snprintf(text, sizeof(text),
-             "voxel=%d\nvoxel_pitch=%d\nvoxel_zoom=%d\nvoxel_blur=%d\nvoxel_battle=%d\nfps=%d\n",
-             sVoxel ? 1 : 0, sPitches[sPitch], sZooms[sZoom], sVoxelBlur ? 1 : 0, sVoxelBattle ? 1 : 0,
-             sShowFps ? 1 : 0);
+    CtrSettings_Text(text, sizeof(text));
     if (sSaver == NULL)
     {
         s32 priority = 0x30;
@@ -181,6 +284,26 @@ bool CtrSettings_Voxel(void)
     return sVoxel;
 }
 
+int CtrSettings_GetInt(const char *key, int fallback)
+{
+    int index = ExtraIndex(key, false);
+
+    return index >= 0 ? sExtra[index].value : fallback;
+}
+
+void CtrSettings_SetInt(const char *key, int value)
+{
+    int index = ExtraIndex(key, true);
+
+    if (index < 0 || sExtra[index].value == value)
+        return;
+    if (strcmp(key, "clock_speed") == 0)
+        CtrDayNight_Update();
+    sExtra[index].value = value;
+    Save();
+    CtrLog_Write(CTR_LOG_FS, "settings: %s=%d", key, value);
+}
+
 void CtrSettings_SetVoxel(bool on)
 {
     if (sVoxel == on)
@@ -217,16 +340,43 @@ void CtrSettings_StepVoxelZoom(int direction)
     Step(&sZoom, COUNT(sZooms), direction);
 }
 
-bool CtrSettings_VoxelBlur(void)
+int CtrSettings_SpeedHalves(void)
 {
-    return sVoxelBlur;
+    return sSpeeds[sSpeed];
 }
 
+/* The OPTIONS cell wraps round like the others; ZR and ZL stop at the ends. */
+void CtrSettings_StepSpeed(int direction, bool wrap)
+{
+    int next = sSpeed + (direction < 0 ? -1 : 1);
+
+    if (!wrap && (next < 0 || next >= COUNT(sSpeeds)))
+        return;
+    Step(&sSpeed, COUNT(sSpeeds), direction);
+    CtrLog_Write(CTR_LOG_FS, "settings: speed=%d%s", sSpeeds[sSpeed] / 2, sSpeeds[sSpeed] & 1 ? ".5" : "");
+}
+
+bool CtrSettings_VoxelBlur(void)
+{
+    return sBlurs[sBlur] > 0;
+}
+
+int CtrSettings_VoxelBlurStrength(void)
+{
+    return sBlurs[sBlur];
+}
+
+void CtrSettings_StepVoxelBlur(int direction)
+{
+    Step(&sBlur, COUNT(sBlurs), direction);
+}
+
+/* On is the full blur, unless a strength was chosen already. */
 void CtrSettings_SetVoxelBlur(bool on)
 {
-    if (sVoxelBlur == on)
+    if (CtrSettings_VoxelBlur() == on)
         return;
-    sVoxelBlur = on;
+    sBlur = on ? COUNT(sBlurs) - 1 : 0;
     Save();
 }
 
@@ -253,5 +403,18 @@ void CtrSettings_SetShowFps(bool on)
     if (sShowFps == on)
         return;
     sShowFps = on;
+    Save();
+}
+
+bool CtrSettings_RunAlways(void)
+{
+    return sRunAlways;
+}
+
+void CtrSettings_SetRunAlways(bool on)
+{
+    if (sRunAlways == on)
+        return;
+    sRunAlways = on;
     Save();
 }

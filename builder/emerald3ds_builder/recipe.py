@@ -65,7 +65,7 @@ class Recipe:
     @classmethod
     def from_bytes(cls, data: bytes) -> "Recipe":
         if data[:8] != MAGIC:
-            raise RecipeError("not a Pokémon Emerald 3Ds Dual Screen recipe")
+            raise RecipeError("not a Emerald 3DS recipe")
         (size,) = struct.unpack_from("<I", data, 8)
         meta = json.loads(lzma.decompress(data[12:12 + size]))
         if meta.get("schema") != SCHEMA:
@@ -81,6 +81,17 @@ class Recipe:
     @classmethod
     def load(cls, path: Path) -> "Recipe":
         return cls.from_bytes(Path(path).read_bytes())
+
+
+def recipe_rom_sha1(path: Path) -> str:
+    """The SHA-1 of the ROM a recipe is made from, reading only its header."""
+    with open(path, "rb") as f:
+        head = f.read(12)
+        if head[:8] != MAGIC:
+            raise RecipeError("not a Emerald 3DS recipe")
+        (size,) = struct.unpack_from("<I", head, 8)
+        meta = json.loads(lzma.decompress(f.read(size)))
+    return meta["rom_sha1"]
 
 
 def lz77_decompress(src: bytes, offset: int) -> bytes:
@@ -101,8 +112,12 @@ def lz77_decompress(src: bytes, offset: int) -> bytes:
                 pos += 2
                 length = (a >> 4) + 3
                 back = ((a & 0xF) << 8 | b) + 1
-                for _ in range(length):
-                    out.append(out[-back])
+                if length <= back <= len(out):      # no overlap: one slice
+                    start = len(out) - back
+                    out += out[start:start + length]
+                else:
+                    for _ in range(length):
+                        out.append(out[-back])
             else:
                 out.append(src[pos])
                 pos += 1

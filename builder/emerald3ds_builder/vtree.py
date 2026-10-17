@@ -92,10 +92,13 @@ def build_tree(rom: bytes, recipe: Recipe, root: Path, progress=None) -> None:
     if not meta or not recipe.inputs:
         raise BuilderError("This release's recipe does not describe the voxel inputs.")
     total = len(recipe.inputs)
+    made = set()
     for i, entry in enumerate(recipe.inputs):
         data = build_entry(entry, rom, recipe.literals, recipe.bitmaps)
         dst = root / entry["path"]
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.parent not in made:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            made.add(dst.parent)
         dst.write_bytes(data)
         if progress and i % 50 == 0:
             progress(i / total)
@@ -107,6 +110,8 @@ def build_tree(rom: bytes, recipe: Recipe, root: Path, progress=None) -> None:
             layouts.append({"id": item["id"]})
             continue
         entry = {"id": item["id"], "name": item["name"]}
+        if "layout_version" in item:
+            entry["layout_version"] = item["layout_version"]
         entry.update(read_layout(rom, item["rom"], tilesets))
         entry["border_filepath"] = item["border_filepath"]
         entry["blockdata_filepath"] = item["blockdata_filepath"]

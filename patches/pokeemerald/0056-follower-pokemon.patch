@@ -1,0 +1,2659 @@
+Optional follower Pokemon (OPTIONS > ENHANCEMENTS > FOLLOWER), on the
+HeartGold/SoulSilver sprites and texts the builder puts in the data pack:
+it follows, talks, finds items, comes out of and goes back into its Poke Ball,
+and walks in through doors behind the player. The visible wild Pokemon (0014)
+use the same sprites where the pack has them, keep their places through
+battles, menus and map crossings, grow in where they appear, and on FEW or
+SOME come on top of the random encounters.
+Applies after 0054-pokedex-capture-layout.patch; apply with tools/bootstrap.py.
+
+diff --git a/include/follower_mon.h b/include/follower_mon.h
+new file mode 100644
+--- /dev/null
++++ b/include/follower_mon.h
+@@ -0,0 +1,41 @@
++#ifndef GUARD_FOLLOWER_MON_H
++#define GUARD_FOLLOWER_MON_H
++
++#ifdef PLATFORM_3DS
++/*
++ * Port: the party's lead Pokemon walking behind the player (OPTIONS >
++ * ENHANCEMENTS > FOLLOWER), drawn with HeartGold/SoulSilver's overworld
++ * sprites that the builder puts in the data pack (followers/mon/KEY.bin,
++ * builder/emerald3ds_builder/followers.py). It is an object event of its own
++ * graphics id and local id, never saved: SaveObjectEvents leaves it out and
++ * the field brings it back.
++ */
++#define OBJ_EVENT_GFX_FOLLOWER NUM_OBJ_EVENT_GFX   /* the one id no object uses */
++#define LOCALID_FOLLOWER       254
++
++struct ObjectEvent;
++struct ObjectEventGraphicsInfo;
++struct Sprite;
++
++void FollowerMon_Update(void);
++const struct ObjectEventGraphicsInfo *FollowerMon_GraphicsInfo(void);
++void FollowerMon_BindSprite(struct Sprite *sprite);
++bool8 FollowerMon_IsFollower(const struct ObjectEvent *objectEvent);
++const u8 *FollowerMon_TalkScript(void);
++void FollowerMon_CameraShift(s16 dx, s16 dy);
++/* A door warp (field_screen_effect.c): it walks in behind the player. */
++void FollowerMon_DoorBegin(void);
++bool8 FollowerMon_DoorDone(void);
++/* The visible wild Pokemon (wild_encounter.c) on the same sprites, a slot each:
++ * MAX_SPRITES when there is none for it (they keep their icons then). */
++u8 FollowerMon_WildSprite(u32 slot, u16 species, u32 personality, bool8 shiny);
++void FollowerMon_WildFace(struct Sprite *sprite, s8 dx, s8 dy, bool8 walking);
++void FollowerMon_WildFree(u32 slot, struct Sprite *sprite);
++/* No palette fade running: an ext palette loaded now keeps its colours. */
++bool8 FollowerMon_PalettesSettled(void);
++/* The soft reset (3ds_game_full.c): every file it holds freed, before the
++ * game's variables go back to their boot values. */
++void FollowerMon_ReleaseAll(void);
++#endif
++
++#endif // GUARD_FOLLOWER_MON_H
+diff --git a/include/wild_encounter.h b/include/wild_encounter.h
+--- a/include/wild_encounter.h
++++ b/include/wild_encounter.h
+@@ -36,5 +36,13 @@ void FishingWildEncounter(u8 rod);
+ u16 GetLocalWildMon(bool8 *isWaterMon);
+ u16 GetLocalWaterMon(void);
+ bool8 UpdateRepelCounter(void);
++#ifdef PLATFORM_3DS
++/* The visible wild Pokemon's tiles, shifted as the camera crosses into the next map. */
++void VisibleWild_CameraShift(s16 dx, s16 dy);
++/* A step of the player's ended on a visible wild Pokemon: its battle, TRUE. */
++bool8 VisibleWild_StepOnto(void);
++/* The sprite is a visible wild Pokemon's. */
++bool8 VisibleWild_IsSprite(u8 spriteId);
++#endif
+ 
+ #endif // GUARD_WILD_ENCOUNTER_H
+diff --git a/src/event_object_movement.c b/src/event_object_movement.c
+--- a/src/event_object_movement.c
++++ b/src/event_object_movement.c
+@@ -25,6 +25,10 @@
+ #ifdef PORT_BRIDGE
+ #include "port_platform.h"
+ #endif
++#ifdef PLATFORM_3DS
++#include "follower_mon.h"
++#include "wild_encounter.h"
++#endif
+ #include "constants/event_object_movement.h"
+ #include "constants/event_objects.h"
+ #include "constants/field_effects.h"
+@@ -1466,6 +1470,10 @@ static u8 TrySetupObjectEventSprite(const struct ObjectEventTemplate *objectEven
+     sprite->x += 8;
+     sprite->y += 16 + sprite->centerToCornerVecY;
+     sprite->oam.paletteNum = paletteSlot;
++#ifdef PLATFORM_3DS
++    if (objectEvent->graphicsId == OBJ_EVENT_GFX_FOLLOWER)
++        FollowerMon_BindSprite(sprite);
++#endif
+     sprite->coordOffsetEnabled = TRUE;
+     sprite->sObjEventId = objectEventId;
+     objectEvent->spriteId = spriteId;
+@@ -1790,6 +1798,10 @@ static void SpawnObjectEventOnReturnToField(u8 objectEventId, s16 x, s16 y)
+             SetSubspriteTables(sprite, subspriteTables);
+ 
+         sprite->oam.paletteNum = paletteSlot;
++#ifdef PLATFORM_3DS
++        if (objectEvent->graphicsId == OBJ_EVENT_GFX_FOLLOWER)
++            FollowerMon_BindSprite(sprite);
++#endif
+         sprite->coordOffsetEnabled = TRUE;
+         sprite->sObjEventId = objectEventId;
+         objectEvent->spriteId = i;
+@@ -1929,12 +1941,25 @@ const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u8 graphicsId)
+         return gMauvilleOldManGraphicsInfoPointers[bard];
+     }
+ 
++#ifdef PLATFORM_3DS
++    if (graphicsId == OBJ_EVENT_GFX_FOLLOWER)
++        return FollowerMon_GraphicsInfo();
++#endif
++
+     if (graphicsId >= NUM_OBJ_EVENT_GFX)
+         graphicsId = OBJ_EVENT_GFX_NINJA_BOY;
+ 
+     return gObjectEventGraphicsInfoPointers[graphicsId];
+ }
+ 
++#ifdef PLATFORM_3DS
++// The follower's 32x32 or 64x64 sprite (follower_mon.c), split as any object's.
++const struct SubspriteTable *ObjectEventSubspriteTables(u32 dimension)
++{
++    return dimension == 64 ? sOamTables_64x64 : sOamTables_32x32;
++}
++#endif
++
+ static void SetObjectEventDynamicGraphicsId(struct ObjectEvent *objectEvent)
+ {
+     if (objectEvent->graphicsId >= OBJ_EVENT_GFX_VARS)
+@@ -2191,6 +2216,10 @@ void UpdateObjectEventCoordsForCameraUpdate(void)
+                 gObjectEvents[i].previousCoords.y -= dy;
+             }
+         }
++#ifdef PLATFORM_3DS
++        FollowerMon_CameraShift(dx, dy);
++        VisibleWild_CameraShift(dx, dy);
++#endif
+     }
+ }
+ 
+@@ -4734,6 +4763,13 @@ static bool8 DoesObjectCollideWithObjectAt(struct ObjectEvent *objectEvent, s16
+     for (i = 0; i < OBJECT_EVENTS_COUNT; i++)
+     {
+         curObject = &gObjectEvents[i];
++#ifdef PLATFORM_3DS
++        // The player walks into the follower (they swap tiles), and trainers
++        // see and walk through it.
++        if (FollowerMon_IsFollower(curObject)
++         && (objectEvent->isPlayer || objectEvent->trainerType != TRAINER_TYPE_NONE))
++            continue;
++#endif
+         if (curObject->active && curObject != objectEvent)
+         {
+             if ((curObject->currentCoords.x == x && curObject->currentCoords.y == y) || (curObject->previousCoords.x == x && curObject->previousCoords.y == y))
+diff --git a/src/field_control_avatar.c b/src/field_control_avatar.c
+--- a/src/field_control_avatar.c
++++ b/src/field_control_avatar.c
+@@ -34,6 +34,9 @@
+ #include "constants/map_types.h"
+ #include "constants/songs.h"
+ #include "constants/trainer_hill.h"
++#ifdef PLATFORM_3DS
++#include "follower_mon.h"
++#endif
+ 
+ static EWRAM_DATA u8 sWildEncounterImmunitySteps = 0;
+ static EWRAM_DATA u16 sPrevMetatileBehavior = 0;
+@@ -308,6 +311,10 @@ static const u8 *GetInteractedObjectEventScript(struct MapPosition *position, u8
+     gSpecialVar_LastTalked = gObjectEvents[objectEventId].localId;
+     gSpecialVar_Facing = direction;
+ 
++#ifdef PLATFORM_3DS
++    if (FollowerMon_IsFollower(&gObjectEvents[objectEventId]))
++        return FollowerMon_TalkScript();
++#endif
+     if (InTrainerHill() == TRUE)
+         script = GetTrainerHillTrainerScript();
+     else
+@@ -671,6 +678,15 @@ void RestartWildEncounterImmunitySteps(void)
+ 
+ static bool8 CheckStandardWildEncounter(u16 metatileBehavior)
+ {
++#ifdef PLATFORM_3DS
++    // Onto a visible wild Pokemon: met at once, whatever the steps since the last battle.
++    if (VisibleWild_StepOnto())
++    {
++        sWildEncounterImmunitySteps = 0;
++        sPrevMetatileBehavior = metatileBehavior;
++        return TRUE;
++    }
++#endif
+     if (sWildEncounterImmunitySteps < 4)
+     {
+         sWildEncounterImmunitySteps++;
+diff --git a/src/field_effect_helpers.c b/src/field_effect_helpers.c
+--- a/src/field_effect_helpers.c
++++ b/src/field_effect_helpers.c
+@@ -13,6 +13,9 @@
+ #ifdef PORT_BRIDGE
+ #include "port_platform.h"
+ #endif
++#ifdef PLATFORM_3DS
++#include "follower_mon.h"
++#endif
+ #include "constants/field_effects.h"
+ #include "constants/songs.h"
+ 
+@@ -65,6 +68,12 @@ void SetUpReflection(struct ObjectEvent *objectEvent, struct Sprite *sprite, boo
+     reflectionSprite->sReflectionObjEventLocalId = objectEvent->localId;
+     reflectionSprite->sIsStillReflection = stillReflection;
+     LoadObjectReflectionPalette(objectEvent, reflectionSprite);
++#ifdef PLATFORM_3DS
++    // A copy is not bound to the ext palette (CreateCopySpriteAt): the
++    // follower's reflection takes its own colours.
++    if (FollowerMon_IsFollower(objectEvent))
++        SetSpriteExtPalette(reflectionSprite, GetSpriteExtPalette(sprite));
++#endif
+ 
+     if (!stillReflection)
+         reflectionSprite->oam.affineMode = ST_OAM_AFFINE_NORMAL;
+diff --git a/src/field_screen_effect.c b/src/field_screen_effect.c
+--- a/src/field_screen_effect.c
++++ b/src/field_screen_effect.c
+@@ -34,6 +34,9 @@
+ #include "constants/rgb.h"
+ #include "trainer_hill.h"
+ #include "fldeff.h"
++#ifdef PLATFORM_3DS
++#include "follower_mon.h"
++#endif
+ 
+ static void Task_ExitNonAnimDoor(u8);
+ static void Task_ExitNonDoor(u8);
+@@ -684,6 +687,9 @@ static void Task_DoDoorWarp(u8 taskId)
+     {
+     case 0:
+         FreezeObjectEvents();
++#ifdef PLATFORM_3DS
++        FollowerMon_DoorBegin();
++#endif
+         PlayerGetDestCoords(x, y);
+         PlaySE(GetDoorSoundEffect(*x, *y - 1));
+         task->data[1] = FieldAnimateDoorOpen(*x, *y - 1);
+@@ -704,6 +710,12 @@ static void Task_DoDoorWarp(u8 taskId)
+         if (IsPlayerStandingStill())
+         {
+             u8 objEventId;
++#ifdef PLATFORM_3DS
++            // The follower goes in behind the player before the door closes.
++            SetPlayerVisibility(FALSE);
++            if (!FollowerMon_DoorDone())
++                break;
++#endif
+             task->data[1] = FieldAnimateDoorClose(*x, *y - 1);
+             objEventId = GetObjectEventIdByLocalIdAndMap(LOCALID_PLAYER, 0, 0);
+             ObjectEventClearHeldMovementIfFinished(&gObjectEvents[objEventId]);
+diff --git a/src/follower_mon.c b/src/follower_mon.c
+new file mode 100644
+--- /dev/null
++++ b/src/follower_mon.c
+@@ -0,0 +1,1575 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_data.h"
++#include "3ds_daynight.h"
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#include "3ds_log.h"
++#include "event_data.h"
++#include "event_object_lock.h"
++#include "event_object_movement.h"
++#include "field_player_avatar.h"
++#include "field_weather.h"
++#include "fieldmap.h"
++#include "item.h"
++#include "decompress.h"
++#include "pokeball.h"
++#include "follower_mon.h"
++#include "malloc.h"
++#include "metatile_behavior.h"
++#include "overworld.h"
++#include "palette.h"
++#include "pokemon.h"
++#include "random.h"
++#include "rtc.h"
++#include "script.h"
++#include "sound.h"
++#include "sprite.h"
++#include "string_util.h"
++#include "task.h"
++#include "text.h"
++#include "constants/battle.h"
++#include "constants/characters.h"
++#include "constants/event_object_movement.h"
++#include "constants/event_objects.h"
++#include "constants/flags.h"
++#include "constants/items.h"
++#include "constants/layouts.h"
++#include "constants/map_groups.h"
++#include "constants/map_types.h"
++#include "constants/pokemon.h"
++#include "constants/region_map_sections.h"
++#include "constants/songs.h"
++#include "constants/sound.h"
++#include "constants/species.h"
++#include "constants/vars.h"
++#include "constants/weather.h"
++
++/*
++ * The follower: the party's first Pokemon, unless it is an egg or has
++ * fainted, walks onto each tile the player leaves, at the player's pace. It
++ * stands on the player's own tile, unseen, when it has just come out (a warp,
++ * the field after a menu or a battle) and while it cannot follow: surfing,
++ * diving, on a bike, indoors for a Pokemon HGSS keeps in its ball there (the
++ * too-tall flag), or while the player is hidden. Talking to it turns it to the
++ * player with its cry and a hop.
++ *
++ * Its sprite is one followers/mon/KEY.bin of the data pack (FMN1: width,
++ * height, 8 frames, flags, the normal and the shiny palette, then the frames
++ * as 4bpp tiles, up, up, down, down, left, left, right, right), on an ext
++ * palette of its own tag (include/palette.h). Without the file, no follower.
++ */
++
++#define FMN_HEADER   8
++#define FMN_PALETTES (2 * 16 * 2)
++#define FMN_FRAMES   8
++#define FMN_FLAG_TOO_TALL 1
++#define FMN_FLAG_HOVER    4
++
++#define FOLLOWER_PAL_TAG 0x7F00
++#define OBJ_EVENT_PAL_TAG_NONE 0x11FF   /* as event_object_movement.c: no reflection palette of its own */
++#define FOLLOWER_QUEUE   4        /* player steps it may lag behind before it jumps to them */
++
++enum { SPEED_SLOW, SPEED_NORMAL, SPEED_FAST, SPEED_FASTER };
++
++struct FollowerStep
++{
++    s16 x, y;
++    u8 speed;
++};
++
++static struct
++{
++    u8 *file;                     /* the FMN1 file, the frames point into it */
++    u8 *previous;                 /* the one before: its last frame copy may still be queued */
++    char key[8];
++    u16 species;
++    u8 flags;
++    bool8 shiny;
++    u8 objectEventId;
++    bool8 hidden;
++    s16 lastX, lastY;             /* where the player stood */
++    u8 queued;
++    struct FollowerStep queue[FOLLOWER_QUEUE];
++    u8 checkTimer;
++    bool8 talking;                /* a talk script moves it */
++    u8 bob;
++    char missing[8];              /* a sprite already reported missing */
++    u8 waitLog;
++    bool8 inBall;                 /* unseen on the player's tile until it comes out */
++    u8 popTimer;                  /* coming out of its ball: unseen until the ball opens */
++    bool8 door;                   /* walking in through a door behind the player */
++    u8 doorTimer;
++    u8 swapTimer;                 /* going into its ball where it stands, for another lead */
++} sFollower = {.objectEventId = OBJECT_EVENTS_COUNT};
++
++static struct ObjectEventGraphicsInfo sGraphicsInfo;
++static struct SpriteFrameImage sFrames[FMN_FRAMES];
++
++const struct SubspriteTable *ObjectEventSubspriteTables(u32 dimension); // event_object_movement.c
++extern const struct OamData gObjectEventBaseOam_64x64;
++static void FollowerStepped(void);
++
++/* HGSS's frames: two a direction, both drawn while it walks; standing, it
++ * holds the first, still (no step in place). Laid out as sAnimTable_Standard,
++ * so the engine's anim numbers pick them. */
++#define FRAME_UP    0
++#define FRAME_DOWN  2
++#define FRAME_LEFT  4
++#define FRAME_RIGHT 6
++
++#define FOLLOWER_ANIM(name, frame, duration)       \
++static const union AnimCmd name[] =                \
++{                                                  \
++    ANIMCMD_FRAME((frame), (duration)),            \
++    ANIMCMD_FRAME((frame) + 1, (duration)),        \
++    ANIMCMD_FRAME((frame), (duration)),            \
++    ANIMCMD_FRAME((frame) + 1, (duration)),        \
++    ANIMCMD_JUMP(0),                               \
++}
++
++#define FOLLOWER_STAND(name, frame)                \
++static const union AnimCmd name[] =                \
++{                                                  \
++    ANIMCMD_FRAME((frame), 16),                    \
++    ANIMCMD_END,                                   \
++}
++
++FOLLOWER_STAND(sAnim_FaceSouth, FRAME_DOWN);
++FOLLOWER_STAND(sAnim_FaceNorth, FRAME_UP);
++FOLLOWER_STAND(sAnim_FaceWest, FRAME_LEFT);
++FOLLOWER_STAND(sAnim_FaceEast, FRAME_RIGHT);
++FOLLOWER_ANIM(sAnim_GoSouth, FRAME_DOWN, 8);
++FOLLOWER_ANIM(sAnim_GoNorth, FRAME_UP, 8);
++FOLLOWER_ANIM(sAnim_GoWest, FRAME_LEFT, 8);
++FOLLOWER_ANIM(sAnim_GoEast, FRAME_RIGHT, 8);
++FOLLOWER_ANIM(sAnim_GoFastSouth, FRAME_DOWN, 4);
++FOLLOWER_ANIM(sAnim_GoFastNorth, FRAME_UP, 4);
++FOLLOWER_ANIM(sAnim_GoFastWest, FRAME_LEFT, 4);
++FOLLOWER_ANIM(sAnim_GoFastEast, FRAME_RIGHT, 4);
++FOLLOWER_ANIM(sAnim_GoFasterSouth, FRAME_DOWN, 2);
++FOLLOWER_ANIM(sAnim_GoFasterNorth, FRAME_UP, 2);
++FOLLOWER_ANIM(sAnim_GoFasterWest, FRAME_LEFT, 2);
++FOLLOWER_ANIM(sAnim_GoFasterEast, FRAME_RIGHT, 2);
++FOLLOWER_ANIM(sAnim_GoFastestSouth, FRAME_DOWN, 1);
++FOLLOWER_ANIM(sAnim_GoFastestNorth, FRAME_UP, 1);
++FOLLOWER_ANIM(sAnim_GoFastestWest, FRAME_LEFT, 1);
++FOLLOWER_ANIM(sAnim_GoFastestEast, FRAME_RIGHT, 1);
++
++static const union AnimCmd *const sAnimTable_Follower[] = {
++    [ANIM_STD_FACE_SOUTH] = sAnim_FaceSouth,
++    [ANIM_STD_FACE_NORTH] = sAnim_FaceNorth,
++    [ANIM_STD_FACE_WEST] = sAnim_FaceWest,
++    [ANIM_STD_FACE_EAST] = sAnim_FaceEast,
++    [ANIM_STD_GO_SOUTH] = sAnim_GoSouth,
++    [ANIM_STD_GO_NORTH] = sAnim_GoNorth,
++    [ANIM_STD_GO_WEST] = sAnim_GoWest,
++    [ANIM_STD_GO_EAST] = sAnim_GoEast,
++    [ANIM_STD_GO_FAST_SOUTH] = sAnim_GoFastSouth,
++    [ANIM_STD_GO_FAST_NORTH] = sAnim_GoFastNorth,
++    [ANIM_STD_GO_FAST_WEST] = sAnim_GoFastWest,
++    [ANIM_STD_GO_FAST_EAST] = sAnim_GoFastEast,
++    [ANIM_STD_GO_FASTER_SOUTH] = sAnim_GoFasterSouth,
++    [ANIM_STD_GO_FASTER_NORTH] = sAnim_GoFasterNorth,
++    [ANIM_STD_GO_FASTER_WEST] = sAnim_GoFasterWest,
++    [ANIM_STD_GO_FASTER_EAST] = sAnim_GoFasterEast,
++    [ANIM_STD_GO_FASTEST_SOUTH] = sAnim_GoFastestSouth,
++    [ANIM_STD_GO_FASTEST_NORTH] = sAnim_GoFastestNorth,
++    [ANIM_STD_GO_FASTEST_WEST] = sAnim_GoFastestWest,
++    [ANIM_STD_GO_FASTEST_EAST] = sAnim_GoFastestEast,
++};
++
++static bool8 Enabled(void)
++{
++    return CtrExtras_Get("follower") == 1;
++}
++
++bool8 FollowerMon_IsFollower(const struct ObjectEvent *objectEvent)
++{
++    return objectEvent->active && objectEvent->localId == LOCALID_FOLLOWER
++        && objectEvent->graphicsId == OBJ_EVENT_GFX_FOLLOWER;
++}
++
++static struct ObjectEvent *FindFollower(void)
++{
++    u32 i;
++
++    if (sFollower.objectEventId < OBJECT_EVENTS_COUNT
++     && FollowerMon_IsFollower(&gObjectEvents[sFollower.objectEventId]))
++        return &gObjectEvents[sFollower.objectEventId];
++    for (i = 0; i < OBJECT_EVENTS_COUNT; i++)
++    {
++        if (FollowerMon_IsFollower(&gObjectEvents[i]))
++        {
++            sFollower.objectEventId = i;
++            return &gObjectEvents[i];
++        }
++    }
++    sFollower.objectEventId = OBJECT_EVENTS_COUNT;
++    return NULL;
++}
++
++/* A Pokemon's sprite: "025", "025_f" where HGSS draws the female apart, Unown
++ * by letter ("201", "201_01".."201_27"). Empty if it has none. */
++static void MonKey(char *key, u16 species, u32 personality)
++{
++    u16 national;
++
++    key[0] = '\0';
++    if (species == SPECIES_NONE || species >= NUM_SPECIES)
++        return;
++    national = SpeciesToNationalPokedexNum(species);
++    if (national == 0 || national > 999)
++        return;
++    if (species == SPECIES_UNOWN && GET_UNOWN_LETTER(personality) != 0)
++    {
++        snprintf(key, 8, "%03u_%02u", national, (unsigned)GET_UNOWN_LETTER(personality));
++        return;
++    }
++    snprintf(key, 8, "%03u", national);
++    if (GetGenderFromSpeciesAndPersonality(species, personality) == MON_FEMALE)
++    {
++        char path[40];
++
++        snprintf(path, sizeof(path), "followers/mon/%03u_f.bin", national);
++        if (CtrData_Exists(path))
++            snprintf(key, 8, "%03u_f", national);
++    }
++}
++
++/* The lead's: empty if none may follow. */
++static void LeadKey(char *key, u16 *species, bool8 *shiny)
++{
++    struct Pokemon *mon = &gPlayerParty[0];
++
++    key[0] = '\0';
++    *species = GetMonData(mon, MON_DATA_SPECIES);
++    if (GetMonData(mon, MON_DATA_IS_EGG) || GetMonData(mon, MON_DATA_HP) == 0)
++        return;
++    *shiny = IsMonShiny(mon);
++    MonKey(key, *species, GetMonData(mon, MON_DATA_PERSONALITY));
++}
++
++/* An FMN1 file read and checked: its frame size, 0 if it is not one. */
++static u32 LoadFmn(const char *key, u8 **out)
++{
++    char path[40];
++    u32 size, frameBytes;
++    u8 *file;
++    u8 w, h;
++
++    *out = NULL;
++    snprintf(path, sizeof(path), "followers/mon/%s.bin", key);
++    file = CtrData_Load(path, &size);
++    if (file == NULL)
++        return 0;
++    w = file[4];
++    h = file[5];
++    frameBytes = (u32)w * h / 2;
++    if (size < FMN_HEADER + FMN_PALETTES || memcmp(file, "FMN1", 4) != 0 || file[6] != FMN_FRAMES
++     || !((w == 32 && h == 32) || (w == 64 && h == 64))
++     || size < FMN_HEADER + FMN_PALETTES + FMN_FRAMES * frameBytes)
++    {
++        free(file);
++        return 0;
++    }
++    *out = file;
++    return frameBytes;
++}
++
++static void FreeFile(void)
++{
++    free(sFollower.previous);
++    sFollower.previous = sFollower.file;
++    sFollower.file = NULL;
++    sFollower.key[0] = '\0';
++}
++
++/* Reads KEY.bin and builds the graphics info over it. */
++static bool8 LoadSprite(const char *key)
++{
++    u32 frameBytes, i;
++    u8 *file;
++    u8 w;
++
++    if (sFollower.file != NULL && strcmp(sFollower.key, key) == 0)
++        return TRUE;
++    FreeFile();
++    frameBytes = LoadFmn(key, &file);
++    if (frameBytes == 0)
++        return FALSE;
++    w = file[4];
++    sFollower.file = file;
++    sFollower.flags = file[7];
++    strcpy(sFollower.key, key);
++    for (i = 0; i < FMN_FRAMES; i++)
++    {
++        sFrames[i].data = file + FMN_HEADER + FMN_PALETTES + i * frameBytes;
++        sFrames[i].size = frameBytes;
++        sFrames[i].offset = 0;
++    }
++    sGraphicsInfo.tileTag = TAG_NONE;
++    sGraphicsInfo.paletteTag = FOLLOWER_PAL_TAG;
++    sGraphicsInfo.reflectionPaletteTag = OBJ_EVENT_PAL_TAG_NONE;
++    sGraphicsInfo.size = frameBytes;
++    sGraphicsInfo.width = w;
++    sGraphicsInfo.height = w;
++    sGraphicsInfo.paletteSlot = PALSLOT_NPC_1;   /* PLTT_EXT_MODEL: the weather's rule for ext palettes */
++    sGraphicsInfo.shadowSize = w == 64 ? SHADOW_SIZE_L : SHADOW_SIZE_M;
++    sGraphicsInfo.inanimate = FALSE;
++    sGraphicsInfo.disableReflectionPaletteLoad = TRUE;
++    sGraphicsInfo.tracks = TRACKS_FOOT;
++    sGraphicsInfo.oam = w == 64 ? &gObjectEventBaseOam_64x64 : &gObjectEventBaseOam_32x32;
++    sGraphicsInfo.subspriteTables = ObjectEventSubspriteTables(w);
++    sGraphicsInfo.anims = sAnimTable_Follower;
++    sGraphicsInfo.images = sFrames;
++    sGraphicsInfo.affineAnims = gDummySpriteAffineAnimTable;
++    return TRUE;
++}
++
++const struct ObjectEventGraphicsInfo *FollowerMon_GraphicsInfo(void)
++{
++    if (sFollower.file == NULL)
++        return GetObjectEventGraphicsInfo(OBJ_EVENT_GFX_NINJA_BOY);
++    return &sGraphicsInfo;
++}
++
++/* Each time the follower's sprite is made (event_object_movement.c): its ext
++ * palette, loaded again if the field freed it (a battle, a menu). */
++void FollowerMon_BindSprite(struct Sprite *sprite)
++{
++    u8 slot = IndexOfSpritePaletteExtTag(FOLLOWER_PAL_TAG);
++
++    if (sFollower.file == NULL)
++        return;
++    if (slot == 0xFF)
++    {
++        const u16 *colors = (const u16 *)(sFollower.file + FMN_HEADER) + (sFollower.shiny ? 16 : 0);
++
++        slot = LoadSpritePaletteExt(&(const struct SpritePalette){colors, FOLLOWER_PAL_TAG});
++        if (slot == 0xFF)
++            return;
++        // Coming back to the field (a menu, a battle) the weather is still in
++        // the fade-out that left it: its colours would stay black. There the
++        // field's own fade-in brings them in, as the NPCs' palettes.
++        if (gMain.callback2 == CB2_Overworld)
++            UpdateSpritePaletteExtWithWeather(slot);
++    }
++    SetSpriteExtPalette(sprite, slot);
++}
++
++static void RemoveFollower(void)
++{
++    struct ObjectEvent *follower = FindFollower();
++
++    if (follower != NULL)
++        RemoveObjectEventByLocalIdAndMap(LOCALID_FOLLOWER, follower->mapNum, follower->mapGroup);
++    sFollower.objectEventId = OBJECT_EVENTS_COUNT;
++    FreeSpritePaletteByTag(FOLLOWER_PAL_TAG);
++}
++
++/*
++ * The visible wild Pokemon (wild_encounter.c) on the same sprites: a plain
++ * map-anchored sprite a slot, its file and an ext palette of the slot's tag.
++ * A file let go is freed one creation later, as the follower's: a frame copy
++ * from it may still be queued for VBlank.
++ */
++#define WILD_SLOTS       6
++#define WILD_PAL_TAG     0x7F01   /* + slot */
++
++static struct
++{
++    u8 *file, *stale;
++    struct SpriteFrameImage frames[FMN_FRAMES];
++} sWild[WILD_SLOTS];
++
++/* Why one has no HGSS sprite (it takes its icon then), once per species and
++ * reason: port.log tells a console run's missing pictures from the rest. */
++static void WildFail(const char *why, u16 species)
++{
++    static const char *sLastWhy;
++    static u16 sLastSpecies;
++
++    if (why == sLastWhy && species == sLastSpecies)
++        return;
++    sLastWhy = why;
++    sLastSpecies = species;
++    CtrLog_Write(CTR_LOG_GAME, "visible wild: species %u without its HGSS sprite: %s", species, why);
++}
++
++u8 FollowerMon_WildSprite(u32 slot, u16 species, u32 personality, bool8 shiny)
++{
++    struct SpriteTemplate template = {0};
++    char key[8];
++    u32 frameBytes, i;
++    u8 *file, spriteId, pal;
++
++    if (slot >= WILD_SLOTS)
++        return MAX_SPRITES;
++    free(sWild[slot].stale);
++    sWild[slot].stale = NULL;
++    MonKey(key, species, personality);
++    if (key[0] == '\0')
++    {
++        WildFail("no key", species);
++        return MAX_SPRITES;
++    }
++    frameBytes = LoadFmn(key, &file);
++    if (frameBytes == 0)
++    {
++        WildFail("no file in the data pack (or unreadable)", species);
++        return MAX_SPRITES;
++    }
++    FreeSpritePaletteByTag(WILD_PAL_TAG + slot);    /* another one's colours, left by a reset field */
++    pal = LoadSpritePaletteExt(&(const struct SpritePalette){
++        (const u16 *)(file + FMN_HEADER) + (shiny ? 16 : 0), WILD_PAL_TAG + slot});
++    if (pal == 0xFF)
++    {
++        WildFail("no ext palette free", species);
++        free(file);
++        return MAX_SPRITES;
++    }
++    UpdateSpritePaletteExtWithWeather(pal);
++    for (i = 0; i < FMN_FRAMES; i++)
++    {
++        sWild[slot].frames[i].data = file + FMN_HEADER + FMN_PALETTES + i * frameBytes;
++        sWild[slot].frames[i].size = frameBytes;
++        sWild[slot].frames[i].offset = 0;
++    }
++    template.tileTag = TAG_NONE;
++    template.paletteTag = TAG_NONE;
++    template.oam = file[4] == 64 ? &gObjectEventBaseOam_64x64 : &gObjectEventBaseOam_32x32;
++    template.anims = sAnimTable_Follower;
++    template.images = sWild[slot].frames;
++    template.affineAnims = gDummySpriteAffineAnimTable;
++    template.callback = SpriteCallbackDummy;
++    spriteId = CreateSprite(&template, 0, 0, 0);
++    if (spriteId >= MAX_SPRITES)
++    {
++        WildFail("no sprite free", species);
++        FreeSpritePaletteByTag(WILD_PAL_TAG + slot);
++        free(file);
++        return MAX_SPRITES;
++    }
++    SetSpriteExtPalette(&gSprites[spriteId], pal);
++    StartSpriteAnim(&gSprites[spriteId], ANIM_STD_FACE_SOUTH);
++    sWild[slot].file = file;
++    return spriteId;
++}
++
++/* Which way it looks, walking or standing. */
++void FollowerMon_WildFace(struct Sprite *sprite, s8 dx, s8 dy, bool8 walking)
++{
++    u8 anim;
++
++    if (dy < 0)
++        anim = ANIM_STD_FACE_NORTH;
++    else if (dx < 0)
++        anim = ANIM_STD_FACE_WEST;
++    else if (dx > 0)
++        anim = ANIM_STD_FACE_EAST;
++    else
++        anim = ANIM_STD_FACE_SOUTH;
++    if (walking)
++        anim += ANIM_STD_GO_SOUTH - ANIM_STD_FACE_SOUTH;
++    if (sprite->animNum != anim)
++        StartSpriteAnim(sprite, anim);
++}
++
++/* Its sprite gone (or, if still there, destroyed now). */
++void FollowerMon_WildFree(u32 slot, struct Sprite *sprite)
++{
++    if (slot >= WILD_SLOTS)
++        return;
++    if (sprite != NULL)
++        DestroySprite(sprite);
++    FreeSpritePaletteByTag(WILD_PAL_TAG + slot);
++    free(sWild[slot].stale);
++    sWild[slot].stale = sWild[slot].file;
++    sWild[slot].file = NULL;
++}
++
++/*
++ * Its Poke Ball, a moment where it goes in or comes out: Emerald's own ball
++ * picture (the battle's) on an ext palette, opening or closing on the tile.
++ */
++#define BALL_PAL_TAG 0x7F07
++#define BALL_FRAMES  24           /* going in: the ball closes and stays a moment */
++#define POP_FRAMES   10           /* coming out: the follower shows, the ball goes, once it is open */
++
++static const struct OamData sBallOam =
++{
++    .shape = SPRITE_SHAPE(16x16),
++    .size = SPRITE_SIZE(16x16),
++    .priority = 2,
++};
++
++/* The sheet's two pictures: closed (tile 0) and open (4); its third is the
++ * empty one the battle shows once the Pokemon is out. */
++static const union AnimCmd sBallOpen[] =
++{
++    ANIMCMD_FRAME(0, 5),
++    ANIMCMD_FRAME(4, 8),
++    ANIMCMD_END,
++};
++
++static const union AnimCmd sBallClose[] =
++{
++    ANIMCMD_FRAME(4, 6),
++    ANIMCMD_FRAME(0, 18),
++    ANIMCMD_END,
++};
++
++static const union AnimCmd *const sBallAnims[] = {sBallOpen, sBallClose};
++
++static u8 sBall = MAX_SPRITES;
++
++/* On its tile (map coordinates in data 1 and 2), placed each frame as the
++ * field's effects are: the camera moves the screen under it. */
++static void PlaceBall(struct Sprite *sprite)
++{
++    s16 x, y;
++
++    SetSpritePosToMapCoords(sprite->data[1], sprite->data[2], &x, &y);
++    sprite->x = x + 8;
++    sprite->y = y + 8;
++}
++
++static void SpriteCB_FollowerBall(struct Sprite *sprite)
++{
++    PlaceBall(sprite);
++    if (++sprite->data[0] < sprite->data[3])
++        return;
++    DestroySprite(sprite);
++    FreeSpriteTilesByTag(gBallSpriteSheets[BALL_POKE].tag);
++    FreeSpritePaletteByTag(BALL_PAL_TAG);
++    sBall = MAX_SPRITES;
++}
++
++static void ShowBall(struct ObjectEvent *follower, bool8 opening)
++{
++    struct SpriteTemplate template = {0};
++    const struct CompressedSpritePalette *palette = &gBallSpritePalettes[BALL_POKE];
++    u16 colors[16];
++    u8 pal;
++
++    if (sBall < MAX_SPRITES && gSprites[sBall].inUse && gSprites[sBall].callback == SpriteCB_FollowerBall)
++        DestroySprite(&gSprites[sBall]);
++    sBall = MAX_SPRITES;
++    if (GetDecompressedDataSize(palette->data) > sizeof(colors))
++        return;
++    LZ77UnCompWram(palette->data, colors);
++    FreeSpritePaletteByTag(BALL_PAL_TAG);
++    pal = LoadSpritePaletteExt(&(const struct SpritePalette){colors, BALL_PAL_TAG});
++    if (pal == 0xFF)
++        return;
++    UpdateSpritePaletteExtWithWeather(pal);
++    if (GetSpriteTileStartByTag(gBallSpriteSheets[BALL_POKE].tag) == 0xFFFF)
++        LoadCompressedSpriteSheetUsingHeap(&gBallSpriteSheets[BALL_POKE]);
++    template.tileTag = gBallSpriteSheets[BALL_POKE].tag;
++    template.paletteTag = TAG_NONE;
++    template.oam = &sBallOam;
++    template.anims = sBallAnims;
++    template.images = NULL;
++    template.affineAnims = gDummySpriteAffineAnimTable;
++    template.callback = SpriteCB_FollowerBall;
++    /* On its tile, in front of all for its moment: the objects' depth is
++     * worked out again each frame, and right behind the player its tile is
++     * under the player's head. */
++    {
++        struct Sprite *player = &gSprites[gObjectEvents[gPlayerAvatar.objectEventId].spriteId];
++
++        sBall = CreateSprite(&template, 0, 0, 1);
++        if (sBall >= MAX_SPRITES)
++        {
++            FreeSpritePaletteByTag(BALL_PAL_TAG);
++            return;
++        }
++        gSprites[sBall].oam.priority = player->oam.priority;
++    }
++    gSprites[sBall].coordOffsetEnabled = TRUE;
++    gSprites[sBall].data[1] = follower->currentCoords.x;
++    gSprites[sBall].data[2] = follower->currentCoords.y;
++    gSprites[sBall].data[3] = opening ? POP_FRAMES + 2 : BALL_FRAMES;
++    PlaceBall(&gSprites[sBall]);
++    SetSpriteExtPalette(&gSprites[sBall], pal);
++    StartSpriteAnim(&gSprites[sBall], opening ? 0 : 1);
++    PlaySE(opening ? SE_BALL_OPEN : SE_BALL);
++}
++
++static struct ObjectEvent *SpawnFollower(struct ObjectEvent *player)
++{
++    u8 id;
++    struct ObjectEvent *follower;
++
++    /* Every room taken by people further up the view: one of them makes way. */
++    FreeObjectEventSlotNearPlayer();
++    id = SpawnSpecialObjectEventParameterized(OBJ_EVENT_GFX_FOLLOWER, MOVEMENT_TYPE_NONE, LOCALID_FOLLOWER,
++                                              player->currentCoords.x, player->currentCoords.y,
++                                              player->currentElevation);
++    if (id >= OBJECT_EVENTS_COUNT)
++        return NULL;
++    follower = &gObjectEvents[id];
++    sFollower.objectEventId = id;
++    follower->invisible = TRUE;
++    follower->facingDirection = follower->movementDirection = player->facingDirection;
++    sFollower.lastX = player->currentCoords.x;
++    sFollower.lastY = player->currentCoords.y;
++    sFollower.queued = 0;
++    sFollower.inBall = TRUE;
++    sFollower.popTimer = 0;
++    sFollower.door = FALSE;
++    return follower;
++}
++
++static bool8 PalettesSettled(void)
++{
++    return !gPaletteFade.active
++        && (gWeatherPtr->palProcessingState == WEATHER_PAL_STATE_IDLE
++         || gWeatherPtr->palProcessingState == WEATHER_PAL_STATE_CHANGING_WEATHER);
++}
++
++bool8 FollowerMon_PalettesSettled(void)
++{
++    return PalettesSettled();
++}
++
++/* Where it cannot follow: it waits on the player's tile, unseen. */
++static bool8 MustHide(struct ObjectEvent *player)
++{
++    if (TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_SURFING | PLAYER_AVATAR_FLAG_UNDERWATER
++                            | PLAYER_AVATAR_FLAG_MACH_BIKE | PLAYER_AVATAR_FLAG_ACRO_BIKE))
++        return TRUE;
++    /* Through a door the player goes first, unseen; it follows (FollowerMon_DoorBegin). */
++    if ((player->invisible && !sFollower.door) || gMapHeader.mapType == MAP_TYPE_UNDERWATER)
++        return TRUE;
++    if ((sFollower.flags & FMN_FLAG_TOO_TALL) && IsMapTypeIndoors(gMapHeader.mapType))
++        return TRUE;
++    return FALSE;
++}
++
++/* The pace of the player's step, read from its movement action. */
++static u8 PlayerSpeed(struct ObjectEvent *player)
++{
++    u8 action = player->movementActionId;
++    u8 dir = player->movementDirection;
++
++    if (action == GetWalkSlowMovementAction(dir))
++        return SPEED_SLOW;
++    if (action == GetWalkFastMovementAction(dir) || action == GetPlayerRunMovementAction(dir)
++     || action == GetRideWaterCurrentMovementAction(dir))
++        return SPEED_FAST;
++    if (action == GetWalkFasterMovementAction(dir))
++        return SPEED_FASTER;
++    return SPEED_NORMAL;
++}
++
++static u8 WalkAction(u8 speed, u8 dir)
++{
++    switch (speed)
++    {
++    case SPEED_SLOW:
++        return GetWalkSlowMovementAction(dir);
++    case SPEED_FAST:
++        return GetWalkFastMovementAction(dir);
++    case SPEED_FASTER:
++        return GetWalkFasterMovementAction(dir);
++    default:
++        return GetWalkNormalMovementAction(dir);
++    }
++}
++
++static void Teleport(struct ObjectEvent *follower, s16 x, s16 y)
++{
++    MoveObjectEventToMapCoords(follower, x, y);
++    sFollower.queued = 0;
++}
++
++static void Enqueue(struct ObjectEvent *follower, s16 x, s16 y, u8 speed)
++{
++    if (sFollower.queued == FOLLOWER_QUEUE)
++    {
++        /* Too far behind (frozen by a script, a long scene): straight to it. */
++        Teleport(follower, x, y);
++        return;
++    }
++    sFollower.queue[sFollower.queued].x = x;
++    sFollower.queue[sFollower.queued].y = y;
++    sFollower.queue[sFollower.queued].speed = speed;
++    sFollower.queued++;
++}
++
++/* Starts the next queued step if the last one is over. */
++static void Advance(struct ObjectEvent *follower)
++{
++    struct FollowerStep step;
++    s16 dx, dy;
++    u8 dir;
++
++    if (follower->heldMovementActive && !ObjectEventClearHeldMovementIfFinished(follower))
++        return;
++    if (sFollower.queued == 0)
++        return;
++    step = sFollower.queue[0];
++    memmove(&sFollower.queue[0], &sFollower.queue[1], --sFollower.queued * sizeof(step));
++    dx = step.x - follower->currentCoords.x;
++    dy = step.y - follower->currentCoords.y;
++    if (dx == 0 && dy == 0)
++        return;
++    if (dx > 0)
++        dir = DIR_EAST;
++    else if (dx < 0)
++        dir = DIR_WEST;
++    else if (dy > 0)
++        dir = DIR_SOUTH;
++    else
++        dir = DIR_NORTH;
++    if (abs(dx) + abs(dy) == 1)
++    {
++        /* Behind by more than this step: a little faster, to catch up. */
++        u8 speed = step.speed;
++
++        if (sFollower.queued > 0 && speed < SPEED_FASTER)
++            speed++;
++        ObjectEventSetHeldMovement(follower, WalkAction(speed, dir));
++        gSprites[follower->spriteId].y2 = 0;   /* off the hover bob */
++    }
++    else if ((dx == 0 || dy == 0) && abs(dx) + abs(dy) == 2)
++    {
++        /* Where the player jumped a ledge. */
++        ObjectEventSetHeldMovement(follower, GetJump2MovementAction(dir));
++    }
++    else
++    {
++        Teleport(follower, step.x, step.y);
++    }
++}
++
++/*
++ * A door warp (field_screen_effect.c, Task_DoDoorWarp) freezes every object
++ * but the player: the follower is let go, walks onto the door behind the
++ * player and is gone in it before the door closes.
++ */
++void FollowerMon_DoorBegin(void)
++{
++    struct ObjectEvent *follower = FindFollower();
++
++    if (follower == NULL || sFollower.hidden || sFollower.inBall)
++        return;
++    UnfreezeObjectEvent(follower);
++    sFollower.door = TRUE;
++    sFollower.doorTimer = 0;
++}
++
++bool8 FollowerMon_DoorDone(void)
++{
++    struct ObjectEvent *follower = FindFollower();
++    struct ObjectEvent *player = &gObjectEvents[gPlayerAvatar.objectEventId];
++
++    if (!sFollower.door)
++        return TRUE;
++    if (follower == NULL || ++sFollower.doorTimer > 90
++     || (follower->currentCoords.x == player->currentCoords.x && follower->currentCoords.y == player->currentCoords.y
++      && !follower->heldMovementActive && sFollower.queued == 0))
++    {
++        sFollower.door = FALSE;
++        sFollower.inBall = TRUE;
++        return TRUE;
++    }
++    return FALSE;
++}
++
++void FollowerMon_CameraShift(s16 dx, s16 dy)
++{
++    u32 i;
++
++    sFollower.lastX -= dx;
++    sFollower.lastY -= dy;
++    if (sBall < MAX_SPRITES && gSprites[sBall].inUse && gSprites[sBall].callback == SpriteCB_FollowerBall)
++    {
++        gSprites[sBall].data[1] -= dx;
++        gSprites[sBall].data[2] -= dy;
++    }
++    for (i = 0; i < sFollower.queued; i++)
++    {
++        sFollower.queue[i].x -= dx;
++        sFollower.queue[i].y -= dy;
++    }
++}
++
++void FollowerMon_Update(void)
++{
++    struct ObjectEvent *player, *follower;
++    struct Sprite *sprite;
++    bool8 hide, playerMoved;
++
++    if (gMain.callback2 != CB2_Overworld)
++        return;
++    if (!Enabled())
++    {
++        if (FindFollower() != NULL)
++            RemoveFollower();
++        return;
++    }
++    player = &gObjectEvents[gPlayerAvatar.objectEventId];
++    follower = FindFollower();
++
++    /* Its ball closed on it: the new lead comes out where it stood. */
++    if (sFollower.swapTimer > 0 && (follower == NULL || --sFollower.swapTimer == 0))
++    {
++        sFollower.swapTimer = 0;
++        if (follower != NULL)
++        {
++            s16 x = follower->currentCoords.x, y = follower->currentCoords.y;
++            u8 facing = follower->facingDirection;
++            char key[8];
++            u16 species = SPECIES_NONE;
++            bool8 shiny = FALSE;
++
++            RemoveFollower();
++            follower = NULL;
++            LeadKey(key, &species, &shiny);
++            if (key[0] != '\0' && LoadSprite(key))
++            {
++                sFollower.species = species;
++                sFollower.shiny = shiny;
++                follower = SpawnFollower(player);
++            }
++            if (follower != NULL)
++            {
++                /* off the player's tile, still in its ball: it pops out below */
++                Teleport(follower, x, y);
++                follower->facingDirection = follower->movementDirection = facing;
++                CtrLog_Write(CTR_LOG_GAME, "follower: %s%s out in its place", key, shiny ? " (shiny)" : "");
++            }
++        }
++    }
++
++    /* The lead changed (a swap, an evolution, it fainted): another sprite. */
++    if (follower == NULL && !PalettesSettled() && ++sFollower.waitLog == 240)
++        CtrLog_Write(CTR_LOG_GAME, "follower: waiting on the palettes (fade %d, weather state %d)",
++                     gPaletteFade.active, gWeatherPtr->palProcessingState);
++    /* Never mid-fade: a palette loaded then is left to a fade that is over. */
++    if ((follower == NULL || ++sFollower.checkTimer >= 16) && PalettesSettled() && sFollower.swapTimer == 0)
++    {
++        char key[8];
++        u16 species = SPECIES_NONE;
++        bool8 shiny = FALSE;
++
++        sFollower.checkTimer = 0;
++        LeadKey(key, &species, &shiny);
++        if (follower != NULL && (strcmp(key, sFollower.key) != 0 || shiny != sFollower.shiny))
++        {
++            /* In sight (back from the party menu, an evolution): it goes into
++             * its ball where it stands and the new lead comes out there. */
++            if (!sFollower.hidden && !sFollower.inBall && sFollower.popTimer == 0 && !sFollower.door
++             && !sFollower.talking && !follower->invisible)
++            {
++                ShowBall(follower, FALSE);
++                sFollower.swapTimer = BALL_FRAMES;
++            }
++            else
++            {
++                RemoveFollower();
++                follower = NULL;
++            }
++        }
++        if (follower == NULL)
++        {
++            if (key[0] == '\0')
++                return;
++            if (!LoadSprite(key))
++            {
++                if (strcmp(sFollower.missing, key) != 0)
++                    CtrLog_Write(CTR_LOG_GAME, "follower: no sprite %s in the data", key);
++                strcpy(sFollower.missing, key);
++                return;
++            }
++            sFollower.species = species;
++            sFollower.shiny = shiny;
++            follower = SpawnFollower(player);
++            if (follower == NULL)
++                return;
++            CtrLog_Write(CTR_LOG_GAME, "follower: %s%s out", key, shiny ? " (shiny)" : "");
++        }
++    }
++    /* None out yet: a fade still running (a save being loaded) holds it back. */
++    if (follower == NULL)
++        return;
++
++    playerMoved = player->currentCoords.x != sFollower.lastX || player->currentCoords.y != sFollower.lastY;
++    hide = MustHide(player);
++    if (hide != sFollower.hidden)
++    {
++        sFollower.hidden = hide;
++        if (hide)
++        {
++            /* Into its ball (surf, a bike, a building too small): not where
++             * the player itself vanished. */
++            if (!sFollower.inBall && !player->invisible && sFollower.swapTimer == 0)
++                ShowBall(follower, FALSE);
++            sFollower.inBall = TRUE;
++            Teleport(follower, player->currentCoords.x, player->currentCoords.y);
++        }
++    }
++    /* Its map is the player's: scripts find it by local id on that map. */
++    follower->mapNum = gSaveBlock1Ptr->location.mapNum;
++    follower->mapGroup = gSaveBlock1Ptr->location.mapGroup;
++    if (sFollower.talking && !ScriptContext_IsEnabled() && !ArePlayerFieldControlsLocked())
++        sFollower.talking = FALSE;
++
++    if (playerMoved)
++    {
++        if (hide)
++        {
++            Teleport(follower, player->currentCoords.x, player->currentCoords.y);
++        }
++        else
++        {
++            Enqueue(follower, sFollower.lastX, sFollower.lastY, PlayerSpeed(player));
++            FollowerStepped();
++        }
++        sFollower.lastX = player->currentCoords.x;
++        sFollower.lastY = player->currentCoords.y;
++    }
++    /* At a door: the last step, onto the door the player went through. */
++    if (sFollower.door && player->invisible && sFollower.queued == 0 && !follower->heldMovementActive
++     && abs(follower->currentCoords.x - player->currentCoords.x)
++      + abs(follower->currentCoords.y - player->currentCoords.y) == 1)
++        Enqueue(follower, player->currentCoords.x, player->currentCoords.y, SPEED_NORMAL);
++    if (!sFollower.talking)
++        Advance(follower);
++
++    /* In its ball on the player's tile (after a warp, a surf, a ride) until
++     * the player steps off, then out of it; gone in a door at its last step's
++     * end. Standing, it stands still. */
++    {
++        bool8 onPlayer = follower->currentCoords.x == player->currentCoords.x
++                      && follower->currentCoords.y == player->currentCoords.y;
++
++        if (!hide && sFollower.inBall && !onPlayer && !sFollower.door)
++        {
++            ShowBall(follower, TRUE);
++            sFollower.popTimer = POP_FRAMES;
++            sFollower.inBall = FALSE;
++        }
++        if (sFollower.popTimer > 0)
++            sFollower.popTimer--;
++        follower->invisible = hide || sFollower.inBall || sFollower.popTimer > 0 || sFollower.swapTimer > 0
++                           || (sFollower.door && onPlayer && !follower->heldMovementActive);
++    }
++    sprite = &gSprites[follower->spriteId];
++    if (!follower->heldMovementActive && sFollower.queued == 0 && !sFollower.talking)
++    {
++        StartSpriteAnimIfDifferent(sprite, GetFaceDirectionAnimNum(follower->facingDirection));
++        sprite->animPaused = FALSE;
++    }
++    /* A Pokemon that floats bobs, a pixel up and down. */
++    if ((sFollower.flags & FMN_FLAG_HOVER) && !follower->heldMovementActive)
++    {
++        sFollower.bob++;
++        sprite->y2 = (sFollower.bob & 0x20) ? -2 : ((sFollower.bob & 0x10) ? -1 : 0);
++    }
++}
++
++
++/*
++ * Talking to it. HGSS's own messages (bank 265, followers/text/LL.bin in the
++ * game's language), chosen by conditions of our own: HGSS picks them in code
++ * that is not decompiled, and many are about Johto's places. Its state
++ * first (a status, low HP), then, more often than not, something about where
++ * it is (weather, the ground, the sea, a cave, a forest, a mountain, a
++ * machine, a boat, the time of day) or what it is (its type), else how much
++ * it likes the player. Now and then it has found an item, as in HGSS.
++ */
++#define TEXT_COUNT 759
++#define TEXT_WIDTH 208            /* the field message box's text, in pixels */
++#define TEXT_MAX   400
++
++/* HGSS's message numbers. */
++static const u16 sMsgHappy[] = {18, 20, 21, 22, 24, 29, 48, 49, 50, 52, 53, 54, 55, 59, 61, 62, 63, 64, 69, 115, 116,
++    117, 118, 119, 171, 176, 204, 247, 264, 270, 272, 385, 396, 397, 405, 457, 486, 500, 519, 533, 543, 544, 552,
++    561, 629, 631, 637, 641, 669, 671, 675, 687, 706, 720};
++static const u16 sMsgNeutral[] = {5, 7, 12, 23, 43, 51, 56, 57, 58, 60, 65, 68, 86, 87, 88, 100, 105, 109, 145, 146,
++    147, 150, 153, 166, 168, 170, 175, 177, 179, 202, 206, 209, 225, 273, 287, 306, 322, 343, 344, 349, 353, 354,
++    356, 365, 394, 400, 420, 458, 470, 484, 487, 530, 534, 541, 577, 624, 642, 655, 705, 718, 719, 728, 755, 757};
++static const u16 sMsgSad[] = {15, 66, 203, 205, 208, 232, 233, 234, 236, 265, 266, 269, 523, 542, 557, 576, 625,
++    633, 649, 653, 670, 703};
++static const u16 sMsgTired[] = {95, 165, 208, 345, 359, 401, 634};
++static const u16 sMsgPoison[] = {395, 626};
++static const u16 sMsgBurn[] = {328};
++static const u16 sMsgParalysis[] = {47, 235, 622, 662};
++static const u16 sMsgSleep[] = {402, 403, 404, 488};
++static const u16 sMsgFreeze[] = {628};
++static const u16 sMsgHeldItem[] = {9, 323, 324, 325, 485};
++static const u16 sMsgRain[] = {94, 194, 515, 594};
++static const u16 sMsgRainWater[] = {92, 93, 514, 593, 595};
++static const u16 sMsgRainGrass[] = {371, 373};
++static const u16 sMsgHot[] = {89, 90, 245, 453, 549};
++static const u16 sMsgHotFire[] = {91, 452};
++static const u16 sMsgFineDay[] = {459, 367, 218};
++static const u16 sMsgSandstorm[] = {133, 147, 311};
++static const u16 sMsgSandstormGround[] = {447};
++static const u16 sMsgFog[] = {147, 309, 311, 312};
++static const u16 sMsgAsh[] = {493};
++static const u16 sMsgCold[] = {17, 183, 185, 248, 267, 294, 386, 424, 508, 509};
++static const u16 sMsgColdIce[] = {182, 184, 507, 524};
++static const u16 sMsgIceFloor[] = {172, 173, 389, 390, 456, 502, 528};
++static const u16 sMsgSea[] = {113, 114, 167, 186, 255, 261, 262, 476, 556, 739};
++static const u16 sMsgSand[] = {250, 448, 449};
++static const u16 sMsgPuddle[] = {315, 415, 416};
++static const u16 sMsgGrass[] = {157, 158, 159, 251, 252, 253, 254, 369, 372, 374, 376, 377, 378, 379};
++static const u16 sMsgForest[] = {130, 151, 154, 178, 279, 280, 281, 282, 327};
++static const u16 sMsgCave[] = {127, 128, 212, 213, 241, 242, 243, 263, 314, 547, 550, 742, 750};
++static const u16 sMsgEerie[] = {226, 256, 258, 259, 398, 399, 592};
++static const u16 sMsgIndoors[] = {214, 216, 217, 228, 338, 341, 342, 384};
++static const u16 sMsgMart[] = {240, 466, 491, 510};
++static const u16 sMsgPokemonCenter[] = {273, 319, 417, 487, 488};
++static const u16 sMsgMountain[] = {219, 220, 331, 333, 605, 621};
++static const u16 sMsgWaterfall[] = {221, 222, 223, 224};
++static const u16 sMsgMachine[] = {140, 141, 142, 289, 413, 730};
++static const u16 sMsgBoat[] = {292, 305, 307, 347, 430};
++static const u16 sMsgMorning[] = {81, 446};
++static const u16 sMsgEvening[] = {337, 429, 606};
++static const u16 sMsgNight[] = {348, 584, 607};
++static const u16 sMsgFire[] = {96, 189, 302, 303, 358, 410, 411, 412, 612};
++static const u16 sMsgElectric[] = {135, 716};
++static const u16 sMsgGrassType[] = {238, 239, 299, 406, 407, 408, 722};
++static const u16 sMsgWater[] = {120, 284, 317, 565, 596, 619};
++static const u16 sMsgGround[] = {174, 199, 467, 531, 553};
++static const u16 sMsgRock[] = {468, 469, 753};
++static const u16 sMsgDragon[] = {711, 712, 714};
++static const u16 sMsgPsychic[] = {705, 757};
++static const u16 sMsgFighting[] = {201, 231, 690};
++static const u16 sMsgFlying[] = {336};
++static const u16 sMsgGhost[] = {226, 259};
++
++/* The item it found: asked (yes/no), then handed over or kept. */
++#define MSG_FOUND_ASK  0
++#define MSG_FOUND_NO   1
++#define MSG_FOUND_YES  3
++
++struct MsgPool
++{
++    const u16 *ids;
++    u8 count;
++};
++
++#define POOL(list) ((struct MsgPool){list, ARRAY_COUNT(list)})
++
++static u8 *sTexts;
++static u32 sTextsSize;
++static bool8 sTextsTried;
++static u8 sText[TEXT_MAX], sTextNo[TEXT_MAX], sTextYes[TEXT_MAX];
++static u8 sScript[96];
++static u8 sHop[2];
++
++static const char *LanguageCode(void)
++{
++#if GAME_LANGUAGE == LANGUAGE_SPANISH
++    return "es";
++#elif GAME_LANGUAGE == LANGUAGE_FRENCH
++    return "fr";
++#elif GAME_LANGUAGE == LANGUAGE_ITALIAN
++    return "it";
++#else
++    return "en";
++#endif
++}
++
++static bool8 LoadTexts(void)
++{
++    char path[40];
++    u32 size;
++
++    if (sTexts != NULL || sTextsTried)
++        return sTexts != NULL;
++    sTextsTried = TRUE;
++    snprintf(path, sizeof(path), "followers/text/%s.bin", LanguageCode());
++    sTexts = CtrData_Load(path, &size);
++    /* the last string ends the file: any offset inside it reads to an EOS */
++    if (sTexts != NULL && (size < 8 + 4 * TEXT_COUNT || memcmp(sTexts, "FMT1", 4) != 0
++                           || (sTexts[4] | (sTexts[5] << 8)) != TEXT_COUNT || sTexts[size - 1] != EOS))
++    {
++        free(sTexts);
++        sTexts = NULL;
++    }
++    sTextsSize = sTexts != NULL ? size : 0;
++    return sTexts != NULL;
++}
++
++static const u8 *RawMessage(u16 id)
++{
++    u32 offset;
++
++    if (sTexts == NULL || id >= TEXT_COUNT)
++        return NULL;
++    offset = sTexts[8 + 4 * id] | (sTexts[9 + 4 * id] << 8) | (sTexts[10 + 4 * id] << 16) | (sTexts[11 + 4 * id] << 24);
++    if (offset < 8 + 4 * TEXT_COUNT || offset >= sTextsSize)
++        return NULL;    /* a damaged file: no message rather than a read past it */
++    return sTexts + offset;
++}
++
++/* A soft reset puts this file's variables back as they were at boot, these
++ * pointers with them: what they hold is freed first, or each reset leaks the
++ * follower's and the wild sprites' files and the texts. No sprite may still
++ * use the frames (none does then: the game's sprites go back with the rest). */
++void FollowerMon_ReleaseAll(void)
++{
++    u32 i;
++
++    free(sFollower.file);
++    free(sFollower.previous);
++    sFollower.file = sFollower.previous = NULL;
++    sFollower.key[0] = '\0';
++    for (i = 0; i < WILD_SLOTS; i++)
++    {
++        free(sWild[i].file);
++        free(sWild[i].stale);
++        sWild[i].file = sWild[i].stale = NULL;
++    }
++    free(sTexts);
++    sTexts = NULL;
++    sTextsSize = 0;
++    sTextsTried = FALSE;
++}
++
++/*
++ * The message with its names put in, wrapped to the box: HGSS's lines are as
++ * wide as its own box and its names as long as they come, so the breaks are
++ * made here. Two lines a box, then the text scrolls; a page break of HGSS's
++ * starts a new box.
++ */
++static void BuildMessage(u8 *dest, u16 id)
++{
++    static u8 expanded[TEXT_MAX];
++    u8 word[TEXT_MAX];
++    const u8 *raw = RawMessage(id);
++    const u8 *src;
++    u8 *out = dest;
++    s32 lineWidth = 0, spaceWidth;
++    u32 lines = 0;
++
++    if (raw == NULL)
++    {
++        *dest = EOS;
++        return;
++    }
++    StringExpandPlaceholders(expanded, raw);
++    word[0] = CHAR_SPACE;
++    word[1] = EOS;
++    spaceWidth = GetStringWidth(FONT_NORMAL, word, 0);
++    for (src = expanded; *src != EOS;)
++    {
++        u32 n = 0;
++        s32 width;
++
++        if (*src == CHAR_PROMPT_CLEAR)
++        {
++            if (out != dest)
++                *out++ = CHAR_PROMPT_CLEAR;
++            lineWidth = 0;
++            lines = 0;
++            src++;
++            continue;
++        }
++        if (*src == CHAR_SPACE)
++        {
++            src++;
++            continue;
++        }
++        while (src[n] != EOS && src[n] != CHAR_SPACE && src[n] != CHAR_PROMPT_CLEAR && n < sizeof(word) - 1)
++        {
++            word[n] = src[n];
++            n++;
++        }
++        word[n] = EOS;
++        width = GetStringWidth(FONT_NORMAL, word, 0);
++        if (out + n + 2 >= dest + TEXT_MAX)
++            break;
++        if (lineWidth > 0 && lineWidth + spaceWidth + width > TEXT_WIDTH)
++        {
++            *out++ = (lines % 2 == 0) ? CHAR_NEWLINE : CHAR_PROMPT_SCROLL;
++            lines++;
++            lineWidth = 0;
++        }
++        else if (lineWidth > 0)
++        {
++            *out++ = CHAR_SPACE;
++            lineWidth += spaceWidth;
++        }
++        memcpy(out, word, n);
++        out += n;
++        lineWidth += width;
++        src += n;
++    }
++    *out = EOS;
++}
++
++static bool8 HasType(u16 species, u8 type)
++{
++    return gSpeciesInfo[species].types[0] == type || gSpeciesInfo[species].types[1] == type;
++}
++
++static bool8 OnMap(u16 map)
++{
++    return gSaveBlock1Ptr->location.mapGroup == (map >> 8) && gSaveBlock1Ptr->location.mapNum == (map & 0xFF);
++}
++
++/* Water a few tiles around: the sea, a lake. */
++static bool8 NearWater(s16 x, s16 y)
++{
++    s16 dx, dy;
++
++    for (dy = -3; dy <= 3; dy++)
++        for (dx = -4; dx <= 4; dx++)
++            if (MetatileBehavior_IsSurfableWaterOrUnderwater(MapGridGetMetatileBehaviorAt(x + dx, y + dy)))
++                return TRUE;
++    return FALSE;
++}
++
++static u32 Hour(void)
++{
++    unsigned seconds, rate;
++
++    if (CtrDayNight_Active() && CtrDayNight_Time(&seconds, &rate))
++        return (seconds / 3600) % 24;
++    RtcCalcLocalTime();
++    return gLocalTime.hours;
++}
++
++static u16 Pick(struct MsgPool pool)
++{
++    return pool.ids[Random() % pool.count];
++}
++
++static u16 ChooseOnce(struct ObjectEvent *follower)
++{
++    struct Pokemon *mon = &gPlayerParty[0];
++    struct MsgPool pools[16];
++    u32 count = 0, status = GetMonData(mon, MON_DATA_STATUS);
++    u16 species = sFollower.species, hp = GetMonData(mon, MON_DATA_HP), maxHp = GetMonData(mon, MON_DATA_MAX_HP);
++    u8 friendship = GetMonData(mon, MON_DATA_FRIENDSHIP), weather = GetCurrentWeather();
++    u8 mapType = gMapHeader.mapType, mapsec = gMapHeader.regionMapSectionId;
++    u32 behavior = MapGridGetMetatileBehaviorAt(follower->currentCoords.x, follower->currentCoords.y);
++    bool8 outdoors = IsMapTypeOutdoors(mapType);
++    u32 hour = Hour();
++
++    if (status & STATUS1_PSN_ANY)
++        return Pick(POOL(sMsgPoison));
++    if (status & STATUS1_BURN)
++        return Pick(POOL(sMsgBurn));
++    if (status & STATUS1_PARALYSIS)
++        return Pick(POOL(sMsgParalysis));
++    if (status & STATUS1_SLEEP)
++        return Pick(POOL(sMsgSleep));
++    if (status & STATUS1_FREEZE)
++        return Pick(POOL(sMsgFreeze));
++    if (hp * 4 < maxHp && Random() % 4 != 0)
++        return Pick(POOL(sMsgTired));
++    if (GetMonData(mon, MON_DATA_HELD_ITEM) != ITEM_NONE && Random() % 8 == 0)
++        return Pick(POOL(sMsgHeldItem));
++
++    /* Where it is. */
++    switch (weather)
++    {
++    case WEATHER_RAIN:
++    case WEATHER_RAIN_THUNDERSTORM:
++    case WEATHER_DOWNPOUR:
++        pools[count++] = HasType(species, TYPE_WATER) ? POOL(sMsgRainWater) : POOL(sMsgRain);
++        if (MetatileBehavior_IsTallGrass(behavior) || MetatileBehavior_IsLongGrass(behavior))
++            pools[count++] = POOL(sMsgRainGrass);
++        break;
++    case WEATHER_DROUGHT:
++        pools[count++] = HasType(species, TYPE_FIRE) ? POOL(sMsgHotFire) : POOL(sMsgHot);
++        break;
++    case WEATHER_SANDSTORM:
++        pools[count++] = HasType(species, TYPE_GROUND) ? POOL(sMsgSandstormGround) : POOL(sMsgSandstorm);
++        break;
++    case WEATHER_FOG_HORIZONTAL:
++    case WEATHER_FOG_DIAGONAL:
++        pools[count++] = POOL(sMsgFog);
++        break;
++    case WEATHER_VOLCANIC_ASH:
++        pools[count++] = POOL(sMsgAsh);
++        break;
++    case WEATHER_SUNNY:
++        if (outdoors && hour >= 9 && hour < 17)
++            pools[count++] = POOL(sMsgFineDay);
++        break;
++    }
++    if (mapsec == MAPSEC_FIERY_PATH || mapsec == MAPSEC_FIERY_PATH2 || mapsec == MAPSEC_MT_CHIMNEY
++     || mapsec == MAPSEC_LAVARIDGE_TOWN || mapsec == MAPSEC_MAGMA_HIDEOUT)
++        pools[count++] = HasType(species, TYPE_FIRE) ? POOL(sMsgHotFire) : POOL(sMsgHot);
++    if (mapsec == MAPSEC_SHOAL_CAVE)
++        pools[count++] = HasType(species, TYPE_ICE) ? POOL(sMsgColdIce) : POOL(sMsgCold);
++    if (MetatileBehavior_IsIce(behavior))
++        pools[count++] = POOL(sMsgIceFloor);
++    if (MetatileBehavior_IsTallGrass(behavior) || MetatileBehavior_IsLongGrass(behavior))
++        pools[count++] = POOL(sMsgGrass);
++    if (MetatileBehavior_IsSandOrDeepSand(behavior))
++        pools[count++] = POOL(sMsgSand);
++    if (MetatileBehavior_IsPuddle(behavior))
++        pools[count++] = POOL(sMsgPuddle);
++    if (outdoors && NearWater(follower->currentCoords.x, follower->currentCoords.y))
++        pools[count++] = POOL(sMsgSea);
++    if (mapsec == MAPSEC_PETALBURG_WOODS)
++        pools[count++] = POOL(sMsgForest);
++    if (mapsec == MAPSEC_METEOR_FALLS || mapsec == MAPSEC_METEOR_FALLS2)
++        pools[count++] = POOL(sMsgWaterfall);
++    if (mapsec == MAPSEC_MT_PYRE || mapsec == MAPSEC_ABANDONED_SHIP || mapsec == MAPSEC_SKY_PILLAR)
++        pools[count++] = POOL(sMsgEerie);
++    if (mapsec == MAPSEC_MT_CHIMNEY || mapsec == MAPSEC_JAGGED_PASS || mapsec == MAPSEC_JAGGED_PASS2
++     || mapsec == MAPSEC_ROUTE_112)
++        pools[count++] = POOL(sMsgMountain);
++    if (mapsec == MAPSEC_NEW_MAUVILLE || OnMap(MAP_MOSSDEEP_CITY_SPACE_CENTER_1F) || OnMap(MAP_MOSSDEEP_CITY_SPACE_CENTER_2F)
++     || OnMap(MAP_ROUTE119_WEATHER_INSTITUTE_1F) || OnMap(MAP_ROUTE119_WEATHER_INSTITUTE_2F)
++     || OnMap(MAP_RUSTBORO_CITY_DEVON_CORP_1F) || OnMap(MAP_RUSTBORO_CITY_DEVON_CORP_2F)
++     || OnMap(MAP_RUSTBORO_CITY_DEVON_CORP_3F))
++        pools[count++] = POOL(sMsgMachine);
++    if (OnMap(MAP_SS_TIDAL_CORRIDOR) || OnMap(MAP_SS_TIDAL_LOWER_DECK) || OnMap(MAP_SS_TIDAL_ROOMS))
++        pools[count++] = POOL(sMsgBoat);
++    if (mapType == MAP_TYPE_UNDERGROUND)
++        pools[count++] = POOL(sMsgCave);
++    if (gMapHeader.mapLayoutId == LAYOUT_MART)
++        pools[count++] = POOL(sMsgMart);
++    else if (gMapHeader.mapLayoutId == LAYOUT_POKEMON_CENTER_1F)
++        pools[count++] = POOL(sMsgPokemonCenter);
++    else if (mapType == MAP_TYPE_INDOOR)
++        pools[count++] = POOL(sMsgIndoors);
++    if (outdoors)
++    {
++        if (hour >= 5 && hour < 9)
++            pools[count++] = POOL(sMsgMorning);
++        else if (hour >= 17 && hour < 20)
++            pools[count++] = POOL(sMsgEvening);
++        else if (hour >= 20 || hour < 5)
++            pools[count++] = POOL(sMsgNight);
++    }
++    if (count > 0 && Random() % 5 < 2)
++        return Pick(pools[Random() % count]);
++
++    /* What it is. */
++    if (Random() % 4 == 0)
++    {
++        count = 0;
++        if (HasType(species, TYPE_FIRE))
++            pools[count++] = POOL(sMsgFire);
++        if (HasType(species, TYPE_ELECTRIC))
++            pools[count++] = POOL(sMsgElectric);
++        if (HasType(species, TYPE_GRASS))
++            pools[count++] = POOL(sMsgGrassType);
++        if (HasType(species, TYPE_WATER))
++            pools[count++] = POOL(sMsgWater);
++        if (HasType(species, TYPE_GROUND))
++            pools[count++] = POOL(sMsgGround);
++        if (HasType(species, TYPE_ROCK))
++            pools[count++] = POOL(sMsgRock);
++        if (HasType(species, TYPE_DRAGON))
++            pools[count++] = POOL(sMsgDragon);
++        if (HasType(species, TYPE_PSYCHIC))
++            pools[count++] = POOL(sMsgPsychic);
++        if (HasType(species, TYPE_FIGHTING))
++            pools[count++] = POOL(sMsgFighting);
++        if (HasType(species, TYPE_FLYING) && outdoors)
++            pools[count++] = POOL(sMsgFlying);
++        if (HasType(species, TYPE_GHOST))
++            pools[count++] = POOL(sMsgGhost);
++        if (count > 0)
++            return Pick(pools[Random() % count]);
++    }
++
++    /* How it feels about the player. */
++    if (friendship < 70)
++        return Pick(POOL(sMsgSad));
++    if (friendship >= 150 || Random() % 2 == 0)
++        return Pick(POOL(sMsgHappy));
++    return Pick(POOL(sMsgNeutral));
++}
++
++/* Never the same line twice in a row, when another one comes up. */
++static u16 ChooseMessage(struct ObjectEvent *follower)
++{
++    static u16 sLast = 0xFFFF;
++    u16 id = ChooseOnce(follower);
++    u32 tries;
++
++    for (tries = 0; id == sLast && tries < 4; tries++)
++        id = ChooseOnce(follower);
++    sLast = id;
++    return id;
++}
++
++/*
++ * Items it may find walking, by how far the player has come: one step in 64
++ * after a while without one.
++ */
++static const u16 sFoundEarly[] = {ITEM_POTION, ITEM_POKE_BALL, ITEM_ANTIDOTE, ITEM_PARALYZE_HEAL, ITEM_ORAN_BERRY,
++                                  ITEM_PECHA_BERRY, ITEM_CHERI_BERRY, ITEM_RAWST_BERRY, ITEM_ESCAPE_ROPE};
++static const u16 sFoundMiddle[] = {ITEM_SUPER_POTION, ITEM_GREAT_BALL, ITEM_REVIVE, ITEM_FULL_HEAL, ITEM_ETHER,
++                                   ITEM_SITRUS_BERRY, ITEM_LUM_BERRY, ITEM_REPEL, ITEM_SUPER_REPEL};
++static const u16 sFoundLate[] = {ITEM_HYPER_POTION, ITEM_ULTRA_BALL, ITEM_MAX_REPEL, ITEM_MAX_ETHER, ITEM_FULL_RESTORE,
++                                 ITEM_NUGGET, ITEM_PP_UP, ITEM_RARE_CANDY, ITEM_MAX_REVIVE};
++#define FOUND_STEPS_MIN 300
++
++static u16 sStepsSinceFind;
++static u16 sFoundItem;
++
++static u32 Badges(void)
++{
++    u32 i, n = 0;
++
++    for (i = FLAG_BADGE01_GET; i <= FLAG_BADGE08_GET; i++)
++        n += FlagGet(i) != 0;
++    return n;
++}
++
++static void FollowerStepped(void)
++{
++    if (sFoundItem != ITEM_NONE || ++sStepsSinceFind < FOUND_STEPS_MIN || Random() % 64 != 0)
++        return;
++    if (Badges() >= 6)
++        sFoundItem = sFoundLate[Random() % ARRAY_COUNT(sFoundLate)];
++    else if (Badges() >= 3)
++        sFoundItem = sFoundMiddle[Random() % ARRAY_COUNT(sFoundMiddle)];
++    else
++        sFoundItem = sFoundEarly[Random() % ARRAY_COUNT(sFoundEarly)];
++    sStepsSinceFind = 0;
++}
++
++/* The script, built for each talk: what it says is known only then. */
++#define SCR_END                  0x02
++#define SCR_GOTO                 0x05
++#define SCR_GOTO_IF              0x06
++#define SCR_CALLSTD              0x09
++#define SCR_SETORCOPYVAR         0x1a
++#define SCR_COMPARE_VAR_TO_VALUE 0x21
++#define SCR_APPLYMOVEMENT        0x4f
++#define SCR_WAITMOVEMENT         0x51
++#define SCR_FACEPLAYER           0x5a
++#define SCR_WAITMESSAGE          0x66
++#define SCR_MESSAGE              0x67
++#define SCR_LOCK                 0x6a
++#define SCR_RELEASE              0x6c
++#define SCR_WAITBUTTONPRESS      0x6d
++#define SCR_YESNOBOX             0x6e
++#define SCR_PLAYMONCRY           0xa1
++#define STD_OBTAIN_ITEM          0
++
++static u8 *Put8(u8 *p, u32 v)
++{
++    *p++ = v;
++    return p;
++}
++
++static u8 *Put16(u8 *p, u32 v)
++{
++    *p++ = v;
++    *p++ = v >> 8;
++    return p;
++}
++
++static u8 *Put32(u8 *p, const void *v)
++{
++    u32 a = (u32)v;
++
++    p = Put16(p, a);
++    return Put16(p, a >> 16);
++}
++
++static u8 *PutMessage(u8 *p, const u8 *text)
++{
++    p = Put8(p, SCR_MESSAGE);
++    p = Put32(p, text);
++    p = Put8(p, SCR_WAITMESSAGE);
++    return Put8(p, SCR_WAITBUTTONPRESS);
++}
++
++static u8 *PutEnd(u8 *p)
++{
++    p = Put8(p, SCR_RELEASE);
++    return Put8(p, SCR_END);
++}
++
++const u8 *FollowerMon_TalkScript(void)
++{
++    struct ObjectEvent *follower = FindFollower();
++    u16 item = GetMonData(&gPlayerParty[0], MON_DATA_HELD_ITEM);
++    u8 *p = sScript;
++
++    if (follower == NULL)
++        return NULL;
++    /* While it talks, the script moves it, not the following. */
++    sFollower.talking = TRUE;
++    GetMonData(&gPlayerParty[0], MON_DATA_NICKNAME, gStringVar1);
++    StringGet_Nickname(gStringVar1);
++    p = Put8(p, SCR_LOCK);
++    p = Put8(p, SCR_FACEPLAYER);
++    p = Put8(p, SCR_PLAYMONCRY);
++    p = Put16(p, sFollower.species);
++    p = Put16(p, CRY_MODE_NORMAL);
++    sHop[0] = GetJumpInPlaceMovementAction(GetOppositeDirection(GetPlayerFacingDirection()));
++    sHop[1] = MOVEMENT_ACTION_STEP_END;
++    p = Put8(p, SCR_APPLYMOVEMENT);
++    p = Put16(p, LOCALID_FOLLOWER);
++    p = Put32(p, sHop);
++    p = Put8(p, SCR_WAITMOVEMENT);
++    p = Put16(p, LOCALID_FOLLOWER);
++    if (!LoadTexts())
++    {
++        PutEnd(p);
++        return sScript;
++    }
++
++    if (sFoundItem != ITEM_NONE)
++    {
++        u8 *patch;
++
++        CopyItemName(sFoundItem, gStringVar2);
++        BuildMessage(sText, MSG_FOUND_ASK);
++        BuildMessage(sTextNo, MSG_FOUND_NO);
++        BuildMessage(sTextYes, MSG_FOUND_YES);
++        p = Put8(p, SCR_MESSAGE);
++        p = Put32(p, sText);
++        p = Put8(p, SCR_WAITMESSAGE);
++        p = Put8(p, SCR_YESNOBOX);
++        p = Put8(p, 20);
++        p = Put8(p, 8);
++        p = Put8(p, SCR_COMPARE_VAR_TO_VALUE);
++        p = Put16(p, VAR_RESULT);
++        p = Put16(p, 1);           /* YES */
++        p = Put8(p, SCR_GOTO_IF);
++        p = Put8(p, 1);            /* equal */
++        patch = p;
++        p += 4;
++        p = PutMessage(p, sTextNo);
++        p = PutEnd(p);
++        Put32(patch, p);
++        p = PutMessage(p, sTextYes);
++        p = Put8(p, SCR_SETORCOPYVAR);
++        p = Put16(p, VAR_0x8000);
++        p = Put16(p, sFoundItem);
++        p = Put8(p, SCR_SETORCOPYVAR);
++        p = Put16(p, VAR_0x8001);
++        p = Put16(p, 1);
++        p = Put8(p, SCR_CALLSTD);
++        p = Put8(p, STD_OBTAIN_ITEM);
++        PutEnd(p);
++        sFoundItem = ITEM_NONE;
++        return sScript;
++    }
++    if (item != ITEM_NONE)
++        CopyItemName(item, gStringVar2);
++    {
++        u16 id = ChooseMessage(follower);
++
++        CtrLog_Write(CTR_LOG_GAME, "follower: says %u", id);
++        BuildMessage(sText, id);
++    }
++    p = PutMessage(p, sText);
++    PutEnd(p);
++    return sScript;
++}
++#endif
+diff --git a/src/load_save.c b/src/load_save.c
+--- a/src/load_save.c
++++ b/src/load_save.c
+@@ -8,6 +8,9 @@
+ #include "pokemon.h"
+ #include "pokemon_storage_system.h"
+ #include "random.h"
++#ifdef PLATFORM_3DS
++#include "follower_mon.h"
++#endif
+ #include "save_location.h"
+ #include "trainer_hill.h"
+ #include "gba/flash_internal.h"
+@@ -208,6 +211,12 @@ void SaveObjectEvents(void)
+ 
+     for (i = 0; i < OBJECT_EVENTS_COUNT; i++)
+         gSaveBlock1Ptr->objectEvents[i] = gObjectEvents[i];
++#ifdef PLATFORM_3DS
++    // The follower is the port's alone: the field brings it back (follower_mon.c).
++    for (i = 0; i < OBJECT_EVENTS_COUNT; i++)
++        if (FollowerMon_IsFollower(&gSaveBlock1Ptr->objectEvents[i]))
++            memset(&gSaveBlock1Ptr->objectEvents[i], 0, sizeof(gSaveBlock1Ptr->objectEvents[i]));
++#endif
+ }
+ 
+ void LoadObjectEvents(void)
+diff --git a/src/overworld.c b/src/overworld.c
+--- a/src/overworld.c
++++ b/src/overworld.c
+@@ -1589,6 +1589,7 @@ static void DoCB1_Overworld(u16 newKeys, u16 heldKeys)
+ 
+ #ifdef PLATFORM_3DS
+ void VisibleWild_Update(void); // wild_encounter.c
++void FollowerMon_Update(void); // follower_mon.c
+ #endif
+ 
+ void CB1_Overworld(void)
+@@ -1597,6 +1598,7 @@ void CB1_Overworld(void)
+         DoCB1_Overworld(gMain.newKeys, gMain.heldKeys);
+ #ifdef PLATFORM_3DS
+     VisibleWild_Update();
++    FollowerMon_Update();
+ #endif
+ }
+ 
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -584,21 +584,35 @@ static bool8 AreLegendariesInSootopolisPreventingEncounters(void)
+ 
+ #ifdef PLATFORM_3DS
+ /*
+- * Visible wild Pokemon (OPTIONS, ENHANCEMENTS): instead of random encounters in
+- * grass, caves and water, the map's wild Pokemon wander its encounter tiles
++ * Visible wild Pokemon (OPTIONS, ENHANCEMENTS): the map's wild Pokemon wander
++ * its encounter tiles on HeartGold/SoulSilver's overworld sprites where the
++ * data pack has them (follower_mon.c, in its normal or shiny colours), else
+  * as their party icons, and touching one starts a battle with exactly that
+  * Pokemon. Species and level come from the map's own table; the personality
+- * (so a shiny) is rolled when it appears, and a shiny one sparkles. Roamers
+- * still meet the player at random.
++ * (so a shiny) is rolled when it appears, and a shiny one sparkles. FEW and
++ * SOME come on top of the random encounters in grass, caves and water; MANY
++ * replaces them. Roamers still meet the player at random.
++ *
++ * Each one is a record (where it is, what it is) apart from its sprite, so
++ * it outlives the sprite: a battle, a menu or anything else that resets the
++ * field takes the sprites, and once back on the same map each one gets its
++ * own again where it stood. Walking into the next map keeps them too, their
++ * tiles shifted with the camera (VisibleWild_CameraShift); a warp ends them.
++ * They appear growing from a dot over a rustle of the grass (a splash on
++ * water, dust elsewhere) and vanish shrinking, on an OAM matrix the 2D
++ * compositor draws and the voxel view reads as the card's scale.
+  *
+  * They are map-anchored sprites (coordOffsetEnabled), placed each frame from
+  * their tile as object events are, so the voxel view draws them as cards.
+- * Called every overworld frame (overworld.c, CB1_Overworld).
++ * Called every overworld frame (overworld.c, CB1_Overworld); what they do
++ * goes to port.log (CTR_LOG_GAME, "visible wild: ...").
+  */
++#include "3ds_log.h"
+ #include "event_object_movement.h"
+ #include "field_effect.h"
+ #include "field_player_avatar.h"
+ #include "fieldmap.h"
++#include "follower_mon.h"
+ #include "pokemon_icon.h"
+ #include "port_platform.h"
+ #include "script.h"
+@@ -607,10 +621,19 @@ static bool8 AreLegendariesInSootopolisPreventingEncounters(void)
+ #include "constants/pokemon_icon.h"
+ #include "constants/songs.h"
+ 
+-/* The setting: off, or how many may be about at once. */
++/* The setting: off, or how many may be about at once (FEW, SOME, MANY). */
+ static const u8 sVisibleMost[] = {0, 2, 4, 6};
+-#define VISIBLE_MOST() ((u32)CtrExtras_Get("visible_wild") < ARRAY_COUNT(sVisibleMost) \
+-                        ? sVisibleMost[CtrExtras_Get("visible_wild")] : 0)
++
++static u32 VisibleSetting(void)
++{
++    u32 setting = CtrExtras_Get("visible_wild");
++
++    return setting < ARRAY_COUNT(sVisibleMost) ? setting : 0;
++}
++
++#define VISIBLE_MOST() sVisibleMost[VisibleSetting()]
++/* MANY: they are the only wild Pokemon met by walking or surfing. */
++#define VISIBLE_REPLACES_RANDOM() (VisibleSetting() == ARRAY_COUNT(sVisibleMost) - 1)
+ 
+ #define VW_MAX 6
+ #define VW_MAGIC 0x5657          /* in data[7]: the sprite is one of these */
+@@ -618,12 +641,23 @@ static const u8 sVisibleMost[] = {0, 2, 4, 6};
+ #define VW_RANGE_Y 6
+ #define VW_NEAREST 3             /* never closer than this when they appear */
+ #define VW_FORGET 15             /* gone beyond this */
++#define VW_TRIES 24              /* tiles tried for one to appear on */
++#define VW_GROW 12               /* frames it takes to appear */
++#define VW_GROW_BACK 8           /* to be back after a battle or a menu */
++#define VW_VANISH 12             /* to vanish */
++#define VW_NONE MAX_SPRITES
+ 
+ struct VisibleWild
+ {
+     bool8 active, water, shiny;
+-    u8 spriteId, level, progress;
++    bool8 hgss;                  /* on HGSS's overworld sprite (follower_mon.c), else its icon */
++    bool8 vanishing;             /* shrinking away, gone at the end */
++    u8 spriteId;                 /* VW_NONE: none now (a field reset took it), made again on its tile */
++    u8 matrix;                   /* its OAM matrix while it grows or shrinks, else 0xFF */
++    u8 scaleTime, scaleFrames;   /* how far into growing or shrinking */
++    u8 level, progress;
+     s8 dx, dy;
++    s8 faceX, faceY;             /* the way it last walked */
+     u16 species, idle, sparkle;
+     s16 x, y;                    /* map coordinates (MAP_OFFSET included) */
+     u32 personality;
+@@ -631,10 +665,24 @@ struct VisibleWild
+ 
+ static struct VisibleWild sVisible[VW_MAX];
+ static u8 sVisibleMapGroup = 0xFF, sVisibleMapNum = 0xFF;
+-static u16 sVisibleSpawnTimer;
++static bool8 sVisibleShifted;    /* the camera crossed into the next map (VisibleWild_CameraShift) */
++static u16 sVisibleSpawnTimer, sVisibleRetry;
++static u32 sVisibleFrames, sVisibleLastFail, sVisibleLastOut;
++static const char *sVisibleFailReason;
+ 
+ #define VW_ABS(n) ((n) < 0 ? -(n) : (n))
+ 
++/* Why none appeared, once a reason is new or every ten seconds: a run on the
++ * console tells from port.log what held them back. */
++static void VisibleLogFail(const char *reason, u16 species)
++{
++    if (reason == sVisibleFailReason && sVisibleFrames - sVisibleLastFail < 600)
++        return;
++    sVisibleFailReason = reason;
++    sVisibleLastFail = sVisibleFrames;
++    CtrLog_Write(CTR_LOG_GAME, "visible wild: %s (species %u)", reason, species);
++}
++
+ static u32 VisibleOtId(void)
+ {
+     return gSaveBlock2Ptr->playerTrainerId[0]
+@@ -668,21 +716,59 @@ static bool8 VisibleLoadPalette(u16 species)
+     return IndexOfSpritePaletteTag(VisiblePaletteTag(species)) != 0xFF;
+ }
+ 
+-static void VisibleRemove(struct VisibleWild *v)
++/* Its sprite destroyed now (the record stays). */
++static void VisibleDropSprite(struct VisibleWild *v)
+ {
+-    if (v->active && VisibleSpriteValid(v))
++    if (VisibleSpriteValid(v))
+     {
+-        u32 i;
+-        bool8 shared = FALSE;
++        struct Sprite *sprite = &gSprites[v->spriteId];
+ 
+-        FreeAndDestroyMonIconSprite(&gSprites[v->spriteId]);
+-        for (i = 0; i < VW_MAX; i++)
+-            if (&sVisible[i] != v && sVisible[i].active
+-             && gMonIconPaletteIndices[sVisible[i].species] == gMonIconPaletteIndices[v->species])
+-                shared = TRUE;
+-        if (!shared)
+-            FreeMonIconPalette(v->species);
++        if (v->matrix != 0xFF)
++        {
++            sprite->oam.affineMode = ST_OAM_AFFINE_OFF;
++            sprite->oam.matrixNum = 0;
++            FreeOamMatrix(v->matrix);
++        }
++        if (v->hgss)
++        {
++            FollowerMon_WildFree(v - sVisible, sprite);
++        }
++        else
++        {
++            u32 i;
++            bool8 shared = FALSE;
++
++            FreeAndDestroyMonIconSprite(sprite);
++            for (i = 0; i < VW_MAX; i++)
++                if (&sVisible[i] != v && sVisible[i].active && !sVisible[i].hgss && VisibleSpriteValid(&sVisible[i])
++                 && gMonIconPaletteIndices[sVisible[i].species] == gMonIconPaletteIndices[v->species])
++                    shared = TRUE;
++            if (!shared)
++                FreeMonIconPalette(v->species);
++        }
++    }
++    else if (v->hgss)
++    {
++        FollowerMon_WildFree(v - sVisible, NULL);
+     }
++    v->spriteId = VW_NONE;
++    v->matrix = 0xFF;
++}
++
++/* Its sprite went with the field (a battle, a menu, a warp): only what it
++ * held is let go; the matrices went with the sprites. */
++static void VisibleForgetSprite(struct VisibleWild *v)
++{
++    if (v->hgss)
++        FollowerMon_WildFree(v - sVisible, NULL);
++    v->spriteId = VW_NONE;
++    v->matrix = 0xFF;
++}
++
++static void VisibleRemove(struct VisibleWild *v)
++{
++    if (v->active)
++        VisibleDropSprite(v);
+     v->active = FALSE;
+ }
+ 
+@@ -694,6 +780,15 @@ static void VisibleRemoveAll(void)
+         VisibleRemove(&sVisible[i]);
+ }
+ 
++static u32 VisibleCount(void)
++{
++    u32 i, count = 0;
++
++    for (i = 0; i < VW_MAX; i++)
++        count += sVisible[i].active && !sVisible[i].vanishing;
++    return count;
++}
++
+ static struct VisibleWild *VisibleAt(s16 x, s16 y, const struct VisibleWild *except)
+ {
+     u32 i;
+@@ -710,18 +805,21 @@ static struct VisibleWild *VisibleAt(s16 x, s16 y, const struct VisibleWild *exc
+     return NULL;
+ }
+ 
+-/* A tile one can stand on: of the right kind (grass or cave floor, or
+- * water), free, and no one on it. */
+-static bool8 VisibleTileFits(s16 x, s16 y, bool8 water)
++/* A tile of the right kind (grass or cave floor, or water) one can stand on. */
++static bool8 VisibleTileKind(s16 x, s16 y, bool8 water)
+ {
+     u32 behavior = MapGridGetMetatileBehaviorAt(x, y);
+ 
+     if (water ? !MetatileBehavior_IsWaterWildEncounter(behavior)
+               : !MetatileBehavior_IsLandWildEncounter(behavior))
+         return FALSE;
+-    if (MapGridGetCollisionAt(x, y) != 0)
+-        return FALSE;
+-    return GetObjectEventIdByXY(x, y) == OBJECT_EVENTS_COUNT;
++    return MapGridGetCollisionAt(x, y) == 0;
++}
++
++/* ...and no one on it. */
++static bool8 VisibleTileFits(s16 x, s16 y, bool8 water)
++{
++    return VisibleTileKind(x, y, water) && GetObjectEventIdByXY(x, y) == OBJECT_EVENTS_COUNT;
+ }
+ 
+ u32 ShinyOdds_WildPersonality(void); // pokemon.c
+@@ -768,6 +866,106 @@ static void VisibleSparkle(const struct VisibleWild *v)
+     FieldEffectStart(FLDEFF_SPARKLE);
+ }
+ 
++/* Where it appears: the grass rustles (a splash on water, dust on a cave's
++ * floor or sand), the effects a landing jump leaves on the same tiles. */
++static void VisibleRustle(const struct VisibleWild *v)
++{
++    u32 behavior = MapGridGetMetatileBehaviorAt(v->x, v->y);
++    u8 effect;
++
++    if (v->water)
++        effect = FLDEFF_JUMP_SMALL_SPLASH;
++    else if (MetatileBehavior_IsTallGrass(behavior))
++        effect = FLDEFF_JUMP_TALL_GRASS;
++    else if (MetatileBehavior_IsLongGrass(behavior))
++        effect = FLDEFF_JUMP_LONG_GRASS;
++    else
++        effect = FLDEFF_DUST;
++    gFieldEffectArguments[0] = v->x;
++    gFieldEffectArguments[1] = v->y;
++    gFieldEffectArguments[2] = gObjectEvents[gPlayerAvatar.objectEventId].previousElevation;
++    gFieldEffectArguments[3] = 2;
++    FieldEffectStart(effect);
++}
++
++/* Growing (or shrinking): its size this frame, on its OAM matrix. Done, the
++ * sprite is an ordinary one again. Eased: fast at first, settling at the end. */
++static void VisibleScaleStep(struct VisibleWild *v)
++{
++    struct Sprite *sprite = &gSprites[v->spriteId];
++    u32 t, inv, scale;
++
++    if (v->scaleFrames == 0)
++        return;
++    if (v->scaleTime < v->scaleFrames)
++        v->scaleTime++;
++    t = v->scaleTime * 256 / v->scaleFrames;
++    if (v->vanishing)
++        t = 256 - t;
++    inv = 256 - t;
++    scale = 256 - inv * inv / 256;           /* 1/256ths */
++    if (v->scaleTime >= v->scaleFrames && !v->vanishing)
++    {
++        /* Full size: an ordinary sprite again, facing as it was. */
++        sprite->oam.affineMode = ST_OAM_AFFINE_OFF;
++        sprite->oam.matrixNum = 0;
++        if (v->matrix != 0xFF)
++            FreeOamMatrix(v->matrix);
++        v->matrix = 0xFF;
++        v->scaleFrames = 0;
++        if (v->hgss)
++        {
++            FollowerMon_WildFace(sprite, v->faceX, v->faceY, FALSE);
++            StartSpriteAnim(sprite, sprite->animNum);   /* its picture's flips, drawn again */
++        }
++        return;
++    }
++    if (v->matrix == 0xFF)
++        return;
++    if (scale < 16)
++        scale = 16;
++    /* The matrix maps the screen onto the picture: one over the scale. */
++    SetOamMatrix(v->matrix, 0x10000 / scale, 0, 0, 0x10000 / scale);
++}
++
++static void VisibleStartScale(struct VisibleWild *v, u8 frames)
++{
++    struct Sprite *sprite = &gSprites[v->spriteId];
++
++    v->scaleTime = 0;
++    v->scaleFrames = frames;
++    if (v->matrix == 0xFF)
++        v->matrix = AllocOamMatrix();
++    if (v->matrix == 0xFF)
++    {
++        /* None free: it just appears (or goes) at once. */
++        v->scaleTime = frames;
++        return;
++    }
++    /* Facing south as it grows: the picture's flips are not drawn on a
++     * matrix, and the south pictures have none. */
++    if (v->hgss)
++        FollowerMon_WildFace(sprite, 0, 1, FALSE);
++    sprite->oam.affineMode = ST_OAM_AFFINE_NORMAL;
++    sprite->oam.matrixNum = v->matrix;
++    VisibleScaleStep(v);
++}
++
++static void VisibleVanish(struct VisibleWild *v)
++{
++    if (v->vanishing)
++        return;
++    if (!VisibleSpriteValid(v))
++    {
++        VisibleRemove(v);
++        return;
++    }
++    v->vanishing = TRUE;
++    v->dx = v->dy = 0;
++    v->progress = 0;
++    VisibleStartScale(v, VW_VANISH);
++}
++
+ static void VisiblePlace(struct VisibleWild *v)
+ {
+     struct Sprite *sprite = &gSprites[v->spriteId];
+@@ -776,10 +974,57 @@ static void VisiblePlace(struct VisibleWild *v)
+     SetSpritePosToMapCoords(v->x, v->y, &x, &y);
+     sprite->x = x + 8 + v->dx * step;
+     sprite->y = y + v->dy * step;
++    if (v->hgss)
++    {
++        /* Feet on the tile, as an object event of its size stands. */
++        sprite->y += 16 + sprite->centerToCornerVecY;
++        if (v->scaleFrames == 0)
++            FollowerMon_WildFace(sprite, v->faceX, v->faceY, v->progress != 0);
++    }
+     /* Further down the screen, drawn over: as the map's objects are. */
+     sprite->subpriority = 200 - ((sprite->y + 64) >> 1 & 0x7F);
+ }
+ 
++/* Its sprite, on HGSS's picture if the pack has one, else its icon; it grows
++ * in over `grow` frames. */
++static bool8 VisibleMakeSprite(struct VisibleWild *v, u8 grow)
++{
++    struct Sprite *sprite;
++
++    v->matrix = 0xFF;
++    v->spriteId = FollowerMon_WildSprite(v - sVisible, v->species, v->personality, v->shiny);
++    v->hgss = v->spriteId < MAX_SPRITES;
++    if (!v->hgss)
++    {
++        if (!VisibleLoadPalette(v->species))
++        {
++            v->spriteId = VW_NONE;
++            VisibleLogFail("no HGSS sprite and no icon palette slot free", v->species);
++            return FALSE;
++        }
++        v->spriteId = CreateMonIcon(v->species, SpriteCB_VisibleIcon, 0, 0, 1, v->personality, TRUE);
++        if (v->spriteId >= MAX_SPRITES)
++        {
++            v->spriteId = VW_NONE;
++            VisibleLogFail("no sprite free for an icon", v->species);
++            return FALSE;
++        }
++        /* Its size is ours (VisibleScaleStep), not the icon's own anims'. */
++        gSprites[v->spriteId].affineAnims = gDummySpriteAffineAnimTable;
++    }
++    sprite = &gSprites[v->spriteId];
++    sprite->coordOffsetEnabled = TRUE;
++    sprite->oam.priority = 2;
++    sprite->data[7] = VW_MAGIC;
++    sprite->data[5] = 0;
++    sprite->data[6] = 0;
++    v->scaleFrames = 0;
++    VisiblePlace(v);
++    VisibleStartScale(v, grow);
++    VisiblePlace(v);
++    return TRUE;
++}
++
+ static void VisibleTrySpawn(u16 headerId)
+ {
+     struct ObjectEvent *player = &gObjectEvents[gPlayerAvatar.objectEventId];
+@@ -795,7 +1040,7 @@ static void VisibleTrySpawn(u16 headerId)
+             v = &sVisible[i];
+     if (v == NULL)
+         return;
+-    for (tries = 0; tries < 12; tries++)
++    for (tries = 0; tries < VW_TRIES; tries++)
+     {
+         x = player->currentCoords.x + (s16)(Random() % (2 * VW_RANGE_X + 1)) - VW_RANGE_X;
+         y = player->currentCoords.y + (s16)(Random() % (2 * VW_RANGE_Y + 1)) - VW_RANGE_Y;
+@@ -812,36 +1057,40 @@ static void VisibleTrySpawn(u16 headerId)
+         wild = &info->wildPokemon[water ? ChooseWildMonIndex_WaterRock() : ChooseWildMonIndex_Land()];
+         v->level = ChooseWildMonLevel(wild);
+         if (!IsWildLevelAllowedByRepel(v->level))
++        {
++            VisibleLogFail("kept away by a repel", wild->species);
+             return;
++        }
+         v->species = wild->species;
+         v->personality = VisibleRollPersonality();
+         v->shiny = GET_SHINY_VALUE(VisibleOtId(), v->personality) < SHINY_ODDS;
+-        if (!VisibleLoadPalette(v->species))
+-            return;
+-        v->spriteId = CreateMonIcon(v->species, SpriteCB_VisibleIcon, 0, 0, 1, v->personality, TRUE);
+-        if (v->spriteId >= MAX_SPRITES)
+-            return;
+-        gSprites[v->spriteId].coordOffsetEnabled = TRUE;
+-        gSprites[v->spriteId].oam.priority = 2;
+-        gSprites[v->spriteId].data[7] = VW_MAGIC;
+-        gSprites[v->spriteId].data[5] = 0;
+-        gSprites[v->spriteId].data[6] = 0;
++        v->faceX = 0;
++        v->faceY = 1;
+         v->water = water;
+         v->x = x;
+         v->y = y;
+         v->dx = v->dy = 0;
+         v->progress = 0;
+-        v->idle = 30 + Random() % 90;
++        v->vanishing = FALSE;
++        v->idle = VW_GROW + 30 + Random() % 90;
+         v->sparkle = 0;
++        if (!VisibleMakeSprite(v, VW_GROW))
++            return;
+         v->active = TRUE;
+-        VisiblePlace(v);
++        VisibleRustle(v);
+         if (v->shiny)
+         {
+             VisibleSparkle(v);
+             PlaySE(SE_SHINY);
+         }
++        CtrLog_Write(CTR_LOG_GAME, "visible wild: species %u lv %u%s at %d,%d on %s %u (pal %u, tile %u)",
++                     v->species, v->level, v->shiny ? " (shiny)" : "", x - MAP_OFFSET, y - MAP_OFFSET,
++                     v->hgss ? "HGSS sprite" : "icon", v->spriteId,
++                     v->hgss ? GetSpriteExtPalette(&gSprites[v->spriteId]) : gSprites[v->spriteId].oam.paletteNum,
++                     gSprites[v->spriteId].oam.tileNum);
+         return;
+     }
++    VisibleLogFail("no free encounter tile near the player", 0);
+ }
+ 
+ /* Touched: the battle with this Pokemon, as a random encounter starts one. */
+@@ -849,6 +1098,7 @@ static void VisibleStartBattle(struct VisibleWild *v)
+ {
+     ZeroEnemyPartyMons();
+     CreateMon(&gEnemyParty[0], v->species, v->level, USE_RANDOM_IVS, TRUE, v->personality, OT_ID_PLAYER_ID, 0);
++    CtrLog_Write(CTR_LOG_GAME, "visible wild: battle with species %u lv %u", v->species, v->level);
+     VisibleRemove(v);
+     BattleSetup_StartWildBattle();
+ }
+@@ -891,41 +1141,198 @@ static void VisibleMove(struct VisibleWild *v, s16 px, s16 py, bool8 surfing)
+         v->idle = 30;
+         return;
+     }
+-    v->dx = sSteps[dir][0];
+-    v->dy = sSteps[dir][1];
++    v->dx = v->faceX = sSteps[dir][0];
++    v->dy = v->faceY = sSteps[dir][1];
+     v->progress = 1;
+ }
+ 
++/*
++ * Into the next map (event_object_movement.c, as the objects' coordinates
++ * shift with the camera): they keep walking where they were, in the new
++ * map's coordinates. Those left off the loaded map vanish next frame.
++ */
++void VisibleWild_CameraShift(s16 dx, s16 dy)
++{
++    u32 i;
++
++    for (i = 0; i < VW_MAX; i++)
++    {
++        sVisible[i].x -= dx;
++        sVisible[i].y -= dy;
++    }
++    sVisibleShifted = TRUE;
++}
++
++/*
++ * The player's step ended on one (field_control_avatar.c, every step, before
++ * the steps a random encounter waits after the last battle): its battle.
++ * VisibleWild_Update only meets one while the player stands still, so
++ * walking or running over it started nothing. On the tile it is on or, half
++ * way through a step, the one it is walking onto; never one not on show.
++ */
++bool8 VisibleWild_StepOnto(void)
++{
++    struct ObjectEvent *player = &gObjectEvents[gPlayerAvatar.objectEventId];
++    bool8 surfing = TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_SURFING) != 0;
++    s16 px = player->currentCoords.x, py = player->currentCoords.y;
++    u32 i;
++
++    if (sWildEncountersDisabled == TRUE)
++        return FALSE;
++    for (i = 0; i < VW_MAX; i++)
++    {
++        struct VisibleWild *v = &sVisible[i];
++
++        if (!v->active || v->vanishing || v->spriteId == VW_NONE || v->water != surfing)
++            continue;
++        if ((v->x == px && v->y == py) || (v->progress && v->x + v->dx == px && v->y + v->dy == py))
++        {
++            VisibleStartBattle(v);
++            return TRUE;
++        }
++    }
++    return FALSE;
++}
++
++/*
++ * The sprite is one of these (the voxel world, 3ds_port/src/voxel/
++ * voxel_entities.c): one a tile south of the player has its middle inside the
++ * player's picture, and taken for an effect drawn over the player it was put
++ * at the player's feet, a tile underground, and vanished.
++ */
++bool8 VisibleWild_IsSprite(u8 spriteId)
++{
++    u32 i;
++
++    for (i = 0; i < VW_MAX; i++)
++        if (sVisible[i].active && sVisible[i].spriteId == spriteId && VisibleSpriteValid(&sVisible[i]))
++            return TRUE;
++    return FALSE;
++}
++
++/*
++ * On each new map, whatever decides if wild Pokemon are met there at all,
++ * random or visible: a console's port.log then tells a map without them
++ * from a setting, a repel or a lock that keeps them away.
++ */
++static void WildLogMap(void)
++{
++    static u8 sGroup = 0xFF, sNum = 0xFF;
++    u16 headerId;
++
++    if (gSaveBlock1Ptr->location.mapGroup == sGroup && gSaveBlock1Ptr->location.mapNum == sNum)
++        return;
++    sGroup = gSaveBlock1Ptr->location.mapGroup;
++    sNum = gSaveBlock1Ptr->location.mapNum;
++    headerId = GetCurrentMapWildMonHeaderId();
++    CtrLog_Write(CTR_LOG_GAME, "wild: map %d/%d header %d (land %d water %d) rate %lu%% disabled %d "
++                 "repel %u lead lv %d visible %lu (replaces random %d)",
++                 sGroup, sNum, headerId == HEADER_NONE ? -1 : headerId,
++                 headerId != HEADER_NONE && GetLandMonsInfo(headerId) != NULL,
++                 headerId != HEADER_NONE && gWildMonHeaders[headerId].waterMonsInfo != NULL,
++                 (unsigned long)EncounterRatePercent(), sWildEncountersDisabled, VarGet(VAR_REPEL_STEP_COUNT),
++                 (int)GetMonData(&gPlayerParty[0], MON_DATA_LEVEL), (unsigned long)VISIBLE_MOST(),
++                 VISIBLE_REPLACES_RANDOM());
++}
++
+ void VisibleWild_Update(void)
+ {
+     struct ObjectEvent *player;
+     u16 headerId;
+-    u32 i, percent;
+-    bool8 surfing, idle;
++    u32 i, percent, most;
++    bool8 surfing, idle, settled;
+ 
+-    if (!VISIBLE_MOST() || gMain.callback2 != CB2_Overworld)
++    if (gMain.callback2 == CB2_Overworld)
++        WildLogMap();
++    most = VISIBLE_MOST();
++    if (most == 0)
+     {
+-        if (!VISIBLE_MOST())
+-            VisibleRemoveAll();
++        for (i = 0; i < VW_MAX; i++)
++        {
++            if (!sVisible[i].active)
++                continue;
++            if (gMain.callback2 == CB2_Overworld)
++                VisibleRemove(&sVisible[i]);
++            else
++                VisibleForgetSprite(&sVisible[i]);
++            sVisible[i].active = FALSE;
++        }
++        sVisibleShifted = FALSE;
+         return;
+     }
+-    /* A warp, a battle, a menu: the sprites went with the screen. */
+-    for (i = 0; i < VW_MAX; i++)
+-        if (sVisible[i].active && !VisibleSpriteValid(&sVisible[i]))
+-            sVisible[i].active = FALSE;
++    if (gMain.callback2 != CB2_Overworld)
++        return;
++    sVisibleFrames++;
++
++    /* A battle, a menu, a warp: the sprites went with the field. The
++     * records stay; on the same map each gets its sprite back. */
++    {
++        u32 lost = 0;
++
++        for (i = 0; i < VW_MAX; i++)
++        {
++            struct VisibleWild *v = &sVisible[i];
++
++            if (v->active && v->spriteId != VW_NONE && !VisibleSpriteValid(v))
++            {
++                VisibleForgetSprite(v);
++                if (v->vanishing)
++                    v->active = FALSE;
++                else
++                    lost++;
++            }
++        }
++        if (lost)
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: %lu lost their sprites with the field", (unsigned long)lost);
++    }
+     if (gSaveBlock1Ptr->location.mapGroup != sVisibleMapGroup || gSaveBlock1Ptr->location.mapNum != sVisibleMapNum)
+     {
+-        VisibleRemoveAll();
++        if (sVisibleShifted)
++        {
++            /* Walked into the next map: those still on loaded ground stay. */
++            u32 kept = 0, gone = 0;
++
++            for (i = 0; i < VW_MAX; i++)
++            {
++                if (!sVisible[i].active)
++                    continue;
++                if (VisibleTileKind(sVisible[i].x, sVisible[i].y, sVisible[i].water))
++                {
++                    kept++;
++                    continue;
++                }
++                VisibleVanish(&sVisible[i]);
++                gone++;
++            }
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: into map %d/%d, %lu kept, %lu off the loaded ground",
++                         gSaveBlock1Ptr->location.mapGroup, gSaveBlock1Ptr->location.mapNum,
++                         (unsigned long)kept, (unsigned long)gone);
++        }
++        else
++        {
++            /* A warp: another place. */
++            VisibleRemoveAll();
++            sVisibleSpawnTimer = 30;
++        }
+         sVisibleMapGroup = gSaveBlock1Ptr->location.mapGroup;
+         sVisibleMapNum = gSaveBlock1Ptr->location.mapNum;
+-        sVisibleSpawnTimer = 30;
+     }
++    sVisibleShifted = FALSE;
++
+     headerId = GetCurrentMapWildMonHeaderId();
+     player = &gObjectEvents[gPlayerAvatar.objectEventId];
+     surfing = TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_SURFING) != 0;
+     idle = !ArePlayerFieldControlsLocked() && !ScriptContext_IsEnabled()
+         && gPlayerAvatar.tileTransitionState == T_NOT_MOVING;
++    settled = FollowerMon_PalettesSettled();
+ 
++    /* Fewer wanted now (the setting lowered): the extra ones vanish. */
++    for (i = VW_MAX; i-- > 0 && VisibleCount() > most;)
++        if (sVisible[i].active && !sVisible[i].vanishing)
++            VisibleVanish(&sVisible[i]);
++
++    if (sVisibleRetry)
++        sVisibleRetry--;
+     for (i = 0; i < VW_MAX; i++)
+     {
+         struct VisibleWild *v = &sVisible[i];
+@@ -937,7 +1344,31 @@ void VisibleWild_Update(void)
+             VisibleRemove(v);
+             continue;
+         }
+-        if (idle)
++        if (v->spriteId == VW_NONE)
++        {
++            /* Back from a battle or a menu: its sprite again, once the
++             * screen's fade is over. A failure waits a moment (each try
++             * reads the sprite's file). */
++            if (!settled || sVisibleRetry || v->vanishing)
++                continue;
++            if (!VisibleMakeSprite(v, VW_GROW_BACK))
++            {
++                sVisibleRetry = 30;
++                continue;
++            }
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: species %u back at %d,%d", v->species,
++                         v->x - MAP_OFFSET, v->y - MAP_OFFSET);
++        }
++        if (v->scaleFrames)
++        {
++            VisibleScaleStep(v);
++            if (v->vanishing && v->scaleTime >= v->scaleFrames)
++            {
++                VisibleRemove(v);
++                continue;
++            }
++        }
++        else if (idle)
+         {
+             bool8 touched = v->idle == 0xFFFF
+                 || (v->x == player->currentCoords.x && v->y == player->currentCoords.y && !v->progress);
+@@ -962,7 +1393,23 @@ void VisibleWild_Update(void)
+     }
+ 
+     percent = EncounterRatePercent();
+-    if (!idle || headerId == HEADER_NONE || percent == 0 || sWildEncountersDisabled)
++    /* None about for a while where some could be: what holds them back. */
++    if (headerId != HEADER_NONE && VisibleCount() == 0)
++    {
++        if (sVisibleFrames - sVisibleLastOut >= 1200)
++        {
++            sVisibleLastOut = sVisibleFrames;
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: none out (idle %d: locked %d script %d step %d; settled %d "
++                         "rate %u%% disabled %d timer %u)", idle, ArePlayerFieldControlsLocked(),
++                         ScriptContext_IsEnabled(), gPlayerAvatar.tileTransitionState, settled, (unsigned)percent,
++                         sWildEncountersDisabled, sVisibleSpawnTimer);
++        }
++    }
++    else
++    {
++        sVisibleLastOut = sVisibleFrames;
++    }
++    if (!idle || !settled || headerId == HEADER_NONE || percent == 0 || sWildEncountersDisabled)
+         return;
+     if (sVisibleSpawnTimer)
+     {
+@@ -972,14 +1419,8 @@ void VisibleWild_Update(void)
+     /* One more every two seconds at the NORMAL encounter rate (1/2: every
+      * four, 2X: every second), up to the setting's number. */
+     sVisibleSpawnTimer = 120 * 100 / percent;
+-    {
+-        u32 count = 0, most = VISIBLE_MOST();
+-
+-        for (i = 0; i < VW_MAX; i++)
+-            count += sVisible[i].active;
+-        if (count < most)
+-            VisibleTrySpawn(headerId);
+-    }
++    if (VisibleCount() < most)
++        VisibleTrySpawn(headerId);
+ }
+ #endif
+ 
+@@ -1048,7 +1489,7 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+             else
+             {
+ #ifdef PLATFORM_3DS
+-                if (VISIBLE_MOST())
++                if (VISIBLE_REPLACES_RANDOM())
+                     return FALSE;
+ #endif
+                 if (DoMassOutbreakEncounterTest() == TRUE && SetUpMassOutbreakEncounter(WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
+@@ -1091,7 +1532,7 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+             else // try a regular surfing encounter
+             {
+ #ifdef PLATFORM_3DS
+-                if (VISIBLE_MOST())
++                if (VISIBLE_REPLACES_RANDOM())
+                     return FALSE;
+ #endif
+                 if (TryGenerateWildMon(gWildMonHeaders[headerId].waterMonsInfo, WILD_AREA_WATER, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)

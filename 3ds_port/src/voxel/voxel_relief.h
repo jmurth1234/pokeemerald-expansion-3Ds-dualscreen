@@ -42,13 +42,24 @@ const int16_t *VoxelRelief_Cell(const VoxelMapInstance *inst, int x, int y);
  * of rock is a relief cell, and no structure stands on one. */
 bool VoxelRelief_IsDrawn(const VoxelMapInstance *inst);
 
+/*
+ * The courses the border round a map stands, laid as its drawing lays it
+ * (each block of it at (u, h, v + h), h the belt's height): a cave carved
+ * out of the rock, whose edges stand at that height all round, goes on into
+ * the rock past them without a seam. 0 for the border as every other map has
+ * it (VoxelMesh_EmitBorder).
+ */
+unsigned VoxelRelief_Belt(const VoxelMapInstance *inst);
+
 /* True when the cell's lattice is not level: rock or stairs, drawn by the
  * relief itself and not by any structure. */
 bool VoxelRelief_IsSlope(const int16_t *grid);
 
 /* The 25 depths (pixels) the cell's points are moved south by: its heights
  * again, (u, h, v + h), the drawing seen at 45 degrees. NULL when the cell
- * is not lifted. */
+ * is not lifted; all zero on a level map (bit 15 of its width in the file),
+ * whose heights lift it straight up as a base does - Route 108's sea, leaning
+ * a level from Route 107's to Slateport's with no row moved south. */
 const int16_t *VoxelRelief_Depth(const VoxelMapInstance *inst, int x, int y);
 
 /* Height in tiles over the base at the centre of a cell (0 when not lifted). */
@@ -86,9 +97,13 @@ float VoxelRelief_DrawnTop(const VoxelMapInstance *inst);
  *
  * VOXEL_RELIEF_NO_VARIANT is no cut: a cell under which the ground behind a
  * terrace's rim (`ground`) runs on, flat at `foot`, where the step down to
- * it leaves the view open from above.
+ * it leaves the view open from above. With VOXEL_RELIEF_GOES_ON in `sides`,
+ * the rock of the cell north of it - a flank ending against this top's back
+ * - goes on under it instead, one row on: what the camera finds past the
+ * back when it looks down more steeply than the drawing.
  */
 #define VOXEL_RELIEF_NO_VARIANT 0xFFFF
+#define VOXEL_RELIEF_GOES_ON (2u << 8)
 /*
  * `wall` (-1: none) says the cell has cliffs: wherever its west, east or
  * south edge stands over its neighbour's - a tile of rock reaching its own
@@ -96,12 +111,54 @@ float VoxelRelief_DrawnTop(const VoxelMapInstance *inst);
  * wall closes the step. West and east it is the rock's own edge column
  * drawn down; south, the mountain's face, this metatile
  * (VOXEL_RELIEF_NO_FACE: the map has none, no south cliff).
+ *
+ * With VOXEL_RELIEF_BLOCK_WALLS in `sides` (a hand-built block, see
+ * relief_fixes.json) the west and east walls are the mountain's face too,
+ * the same tile and the same way as the south one, whatever the cell's own
+ * edge column holds: a block's four sides then read as one rock.
  */
 #define VOXEL_RELIEF_NO_FACE 0xFFFE
+#define VOXEL_RELIEF_BLOCK_WALLS (4u << 8)
+/*
+ * With VOXEL_RELIEF_THIN_DECK in `sides` (a bridge's deck over the water)
+ * its walls go down only VOXEL_RELIEF_DECK_EDGE below the deck - the edge of
+ * the planks - and the water runs on under it (`ground` at `foot`), seen
+ * through the gap: walled down to the water it stood as a dam.
+ */
+#define VOXEL_RELIEF_THIN_DECK (8u << 8)
+#define VOXEL_RELIEF_DECK_EDGE (4.0f / 16.0f)
 int VoxelRelief_Cut(const VoxelMapInstance *inst, int x, int y, float *foot, int *ground,
-                    int *wall);
+                    int *wall, unsigned *sides);
 unsigned VoxelRelief_CutCount(void);
 bool VoxelRelief_CutVariant(unsigned i, unsigned *layout, unsigned *metatile,
                             const uint8_t **rows);
+/*
+ * A cut tile whose rock is a polygon of straight sides (the generator
+ * straightens them: voxel_terraces.py straight_mask) is cut along its
+ * 45-degree sides rather than by its texels, which leave a staircase where
+ * the drawing has a straight diagonal. `count` sides a*X + b*Y <= c over the
+ * tile's pixels (X, Y from 0 to 16), through the outer corners of the rock's
+ * pixels beside them; none when the rock is no polygon (two pieces, a notch)
+ * or its polygon has no 45-degree side. VoxelRelief_CutClear gives the
+ * texels the tile's texture leaves clear: its background, less the halves of
+ * background pixels those sides take in (drawn, or the cut would show them
+ * as notches in the straight line).
+ */
+typedef struct
+{
+    int count;
+    int8_t a[4], b[4];
+    int16_t c[4];
+} VoxelCutDiagonals;
+void VoxelRelief_CutDiagonals(const uint8_t *rows, VoxelCutDiagonals *out);
+void VoxelRelief_CutClear(const uint8_t *rows, uint16_t clear[16]);
+/*
+ * A background pixel VoxelRelief_CutClear keeps drawn shows only the part of
+ * it inside the rock's polygon: it takes the colour of a rock pixel beside
+ * it (west, east, north, south, then the corners), not the ground's (a fleck
+ * of grass on the rock's edge). The index (y * 16 + x) of that pixel, or -1
+ * when (x, y) is no such pixel or has no rock beside it.
+ */
+int VoxelRelief_CutFringe(const uint8_t *rows, const uint16_t clear[16], int x, int y);
 
 #endif

@@ -1,14 +1,14 @@
 # Notices
 
-Pokémon Emerald 3Ds Dual Screen combines original port code with the pret decompilation and a few
+Emerald 3DS combines original port code with the pret decompilation and a few
 third-party components. Each keeps its own terms; `LICENSE-PORT.md` covers
-only the original Pokémon Emerald 3Ds Dual Screen work.
+only the original Emerald 3DS work.
 
 ## Upstream decompilation
 
 - **pret/pokeemerald** — https://github.com/pret/pokeemerald, pinned in
   `upstream.lock`. Fetched by `tools/bootstrap.py`, never vendored here. The
-  repository does not state a licence; Pokémon Emerald 3Ds Dual Screen does not relicense it. The
+  repository does not state a licence; Emerald 3DS does not relicense it. The
   files in `patches/pokeemerald/` carry the port's changes and, as patch
   context, lines of the upstream files they modify.
 
@@ -40,3 +40,16 @@ Pokémon Emerald's code, data, graphics, audio and text are © Nintendo, Game
 Freak and Creatures. None of it is included in this repository or in the
 releases; the builder produces the data pack on the player's computer from
 their own ROM.
+
+**HeartGold and SoulSilver's follower sprites and messages**, fetched by the
+builder on the player's computer, never included in this repository or the
+releases: the overworld sprites from pret/pokeheartgold
+(https://github.com/pret/pokeheartgold, commit
+`3291d88a7e3e264b503024ead80f4d8b55b835cd`), the messages in the ROM's
+language from Poké Corpus by abcboy101 (https://github.com/abcboy101/poke-corpus,
+commit `5d1da078d70dea5c9feaaba7575626eab4f10a08`). The builder downloads both
+from forks that keep those commits (https://github.com/ZallaxDev/pokeheartgold,
+https://github.com/ZallaxDev/poke-corpus), each file checked against
+the SHA-256 listed in `builder/emerald3ds_builder/followers_sources.py` and
+converted for the console. They are Nintendo, Game Freak and Creatures' work;
+not relicensed.

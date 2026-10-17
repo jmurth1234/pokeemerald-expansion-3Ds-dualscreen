@@ -93,12 +93,12 @@ def snapshot(groups=None):
                 cuts[(ox + x, oy + y)] = (mask, foot + b, ground)
             rim, fills, wall = g.cell_shapes(lid, roles_layout, h, cut)
             for (x, y), m in wall.items():
-                walls[(ox + x, oy + y)] = m
+                walls[(ox + x, oy + y)] = m[0]
             for (qx, qy), lv in getattr(g, "TOPS", {}).get(lid, {}).items():
                 tops[(ox * 16 + qx, oy * 16 + qy)] = lv + b
             for (x, y), grid in rim.items():
                 grids[(ox + x, oy + y)] = [[v + b for v in row] for row in grid]
-            for (x, y, foot, ground) in fills:
+            for (x, y, foot, ground, *_) in fills:
                 cuts[(ox + x, oy + y)] = (None, foot + b, ground)
             # as exported: the lattice levelled under the cut tiles
             for j in range(roles_layout.h * P + 1):
@@ -502,7 +502,6 @@ def _distort(cam, path, under, tris, tags, tex, scale, pitch, Hh):
         proj.append(vs)
         ras.draw(vs, tex, shade, owner=k)
     seen = collections.Counter(o for o in ras.owner if o is not None and o >= 0)
-    legit = {}
     faults = collections.defaultdict(lambda: [0, 0.0])
     bad = set()
     for k, n in seen.items():
@@ -600,7 +599,6 @@ def _distort(cam, path, under, tris, tags, tex, scale, pitch, Hh):
     # and a hole: the plane under it all, seen through the terrain (the
     # middle of the view only - past its edges no relief is drawn)
     img = ras.image() if not path else img
-    hp = img.load() if not path else None
     holes = 0
     for yy in range(Hgt // 4, Hgt - Hgt // 4):
         for xx in range(W // 4, W - W // 4):

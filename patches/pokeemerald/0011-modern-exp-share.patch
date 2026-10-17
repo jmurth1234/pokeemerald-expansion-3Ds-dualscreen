@@ -1,0 +1,144 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: modern Exp Share
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/include/constants/battle_string_ids.h b/include/constants/battle_string_ids.h
+--- a/include/constants/battle_string_ids.h
++++ b/include/constants/battle_string_ids.h
+@@ -378,8 +378,9 @@
+ #define STRINGID_PKMNBOXLANETTESPCFULL      378
+ #define STRINGID_TRAINER1WINTEXT            379
+ #define STRINGID_TRAINER2WINTEXT            380
++#define STRINGID_PKMNTEAMGAINEDEXP          381 // modern Exp Share (3DS port)
+ 
+-#define BATTLESTRINGS_COUNT                 381
++#define BATTLESTRINGS_COUNT                 382
+ 
+ // This is the string id that gBattleStringsTable starts with.
+ // String ids before this (e.g. STRINGID_INTROMSG) are not in the table,
+diff --git a/src/battle_message.c b/src/battle_message.c
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -54,6 +54,7 @@
+ 
+ static const u8 sText_Trainer1LoseText[] = _("{B_TRAINER1_LOSE_TEXT}");
+ static const u8 sText_PkmnGainedEXP[] = _("{B_BUFF1} gained{B_BUFF2}\n{B_BUFF3} EXP. Points!\p");
++static const u8 sText_PkmnTeamGainedEXP[] = _("The rest of your team gained\nEXP. Points!\p");
+ static const u8 sText_EmptyString4[] = _("");
+ static const u8 sText_ABoosted[] = _(" a boosted");
+ static const u8 sText_PkmnGrewToLv[] = _("{B_BUFF1} grew to\nLV. {B_BUFF2}!{WAIT_SE}\p");
+@@ -885,6 +886,7 @@
+     [STRINGID_PKMNBOXLANETTESPCFULL - BATTLESTRINGS_TABLE_START] = gText_PkmnTransferredLanettesPCBoxFull,
+     [STRINGID_TRAINER1WINTEXT - BATTLESTRINGS_TABLE_START] = sText_Trainer1WinText,
+     [STRINGID_TRAINER2WINTEXT - BATTLESTRINGS_TABLE_START] = sText_Trainer2WinText,
++    [STRINGID_PKMNTEAMGAINEDEXP - BATTLESTRINGS_TABLE_START] = sText_PkmnTeamGainedEXP,
+ };
+ 
+ const u16 gMissStringIds[] =
+diff --git a/src/battle_script_commands.c b/src/battle_script_commands.c
+--- a/src/battle_script_commands.c
++++ b/src/battle_script_commands.c
+@@ -3255,6 +3255,14 @@
+         gBattlescriptCurrInstr += 7;
+ }
+ 
++#ifdef PLATFORM_3DS
++// Modern Exp Share (OPTIONS, ENHANCEMENTS): as in the later games, the whole
++// party shares - full EXP for who fought, half for the rest - and the rest
++// gain under one line. The held Exp. Share then adds nothing.
++static bool8 sTeamExpShown;
++#define PARTY_EXP_SHARE() (CtrExtras_Get("exp_share") != 0)
++#endif
++
+ static void Cmd_getexp(void)
+ {
+     u16 item;
+@@ -3312,6 +3320,18 @@
+ 
+             calculatedExp = gSpeciesInfo[gBattleMons[gBattlerFainted].species].expYield * gBattleMons[gBattlerFainted].level / 7;
+ 
++#ifdef PLATFORM_3DS
++            if (PARTY_EXP_SHARE())
++            {
++                *exp = calculatedExp;
++                if (*exp == 0)
++                    *exp = 1;
++                gExpShareExp = calculatedExp / 2;
++                if (gExpShareExp == 0)
++                    gExpShareExp = 1;
++            }
++            else
++#endif
+             if (viaExpShare) // at least one mon is getting exp via exp share
+             {
+                 *exp = SAFE_DIV(calculatedExp / 2, viaSentIn);
+@@ -3333,6 +3353,9 @@
+             gBattleScripting.getexpState++;
+             gBattleStruct->expGetterMonId = 0;
+             gBattleStruct->sentInPokes = sentIn;
++#ifdef PLATFORM_3DS
++            sTeamExpShown = FALSE;
++#endif
+         }
+         // fall through
+     case 2: // set exp value to the poke in expgetter_id and print message
+@@ -3345,7 +3368,16 @@
+             else
+                 holdEffect = GetItemHoldEffect(item);
+ 
++#ifdef PLATFORM_3DS
++            // Modern Exp Share: everyone but eggs and the fainted.
++            if (PARTY_EXP_SHARE()
++             ? (GetMonData(&gPlayerParty[gBattleStruct->expGetterMonId], MON_DATA_IS_EGG)
++                || GetMonData(&gPlayerParty[gBattleStruct->expGetterMonId], MON_DATA_HP) == 0
++                || GetMonData(&gPlayerParty[gBattleStruct->expGetterMonId], MON_DATA_SPECIES) == SPECIES_NONE)
++             : (holdEffect != HOLD_EFFECT_EXP_SHARE && !(gBattleStruct->sentInPokes & 1)))
++#else
+             if (holdEffect != HOLD_EFFECT_EXP_SHARE && !(gBattleStruct->sentInPokes & 1))
++#endif
+             {
+                 *(&gBattleStruct->sentInPokes) >>= 1;
+                 gBattleScripting.getexpState = 5;
+@@ -3374,6 +3406,15 @@
+                     else
+                         gBattleMoveDamage = 0;
+ 
++#ifdef PLATFORM_3DS
++                    if (PARTY_EXP_SHARE())
++                    {
++                        // The held Exp. Share adds nothing: all share.
++                        if (!(gBattleStruct->sentInPokes & 1))
++                            gBattleMoveDamage = gExpShareExp;
++                    }
++                    else
++#endif
+                     if (holdEffect == HOLD_EFFECT_EXP_SHARE)
+                         gBattleMoveDamage += gExpShareExp;
+                     if (holdEffect == HOLD_EFFECT_LUCKY_EGG)
+@@ -3414,12 +3455,27 @@
+                         gBattleStruct->expGetterBattlerId = 0;
+                     }
+ 
++#ifdef PLATFORM_3DS
++                    if (PARTY_EXP_SHARE() && !(gBattleStruct->sentInPokes & 1))
++                    {
++                        // Not in the fight: one line for all of them, and the
++                        // rest gain silently.
++                        if (!sTeamExpShown)
++                        {
++                            sTeamExpShown = TRUE;
++                            PrepareStringBattle(STRINGID_PKMNTEAMGAINEDEXP, gBattleStruct->expGetterBattlerId);
++                        }
++                    }
++                    else
++#endif
++                    {
+                     PREPARE_MON_NICK_WITH_PREFIX_BUFFER(gBattleTextBuff1, gBattleStruct->expGetterBattlerId, gBattleStruct->expGetterMonId);
+                     // buffer 'gained' or 'gained a boosted'
+                     PREPARE_STRING_BUFFER(gBattleTextBuff2, i);
+                     PREPARE_WORD_NUMBER_BUFFER(gBattleTextBuff3, 5, gBattleMoveDamage);
+ 
+                     PrepareStringBattle(STRINGID_PKMNGAINEDEXP, gBattleStruct->expGetterBattlerId);
++                    }
+                     MonGainEVs(&gPlayerParty[gBattleStruct->expGetterMonId], gBattleMons[gBattlerFainted].species);
+                 }
+                 gBattleStruct->sentInPokes >>= 1;

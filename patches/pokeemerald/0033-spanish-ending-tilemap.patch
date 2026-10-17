@@ -1,0 +1,35 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Spanish ending tilemap
+Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/credits.c b/src/credits.c
+--- a/src/credits.c
++++ b/src/credits.c
+@@ -118,6 +118,10 @@
+ static u8 CreateCreditsMonSprite(u16, s16, s16, u16);
+ static void DeterminePokemonToShow(void);
+ 
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++static const u32 sSpanishTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/spanish_the_end.bin.lz");
++#endif
++
+ static const u8 sTheEnd_LetterMap_T[] =
+ {
+     0,    1, 0,
+@@ -1328,6 +1332,9 @@
+ 
+ static void DrawTheEnd(u16 offset, u16 palette)
+ {
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++    LZ77UnCompVram(sSpanishTheEnd_Tilemap, (void *)(VRAM + offset));
++#else
+     u16 pos;
+     u16 baseTile = (palette / 16) << 12;
+ 
+@@ -1340,6 +1347,7 @@
+     DrawLetterMapTiles(sTheEnd_LetterMap_E, 16, 7, offset, palette);
+     DrawLetterMapTiles(sTheEnd_LetterMap_N, 20, 7, offset, palette);
+     DrawLetterMapTiles(sTheEnd_LetterMap_D, 24, 7, offset, palette);
++#endif
+ }
+ 
+ #define sState data[0]

@@ -1,0 +1,25 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: wild encounter rate
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -526,6 +526,18 @@
+         else if (ability == ABILITY_SAND_VEIL && gSaveBlock1Ptr->weather == WEATHER_SANDSTORM)
+             encounterRate /= 2;
+     }
++#ifdef PLATFORM_3DS
++    // Wild encounter rate (OPTIONS, CHEATS): walking and surfing only; Rock
++    // Smash (ignoreAbility), fishing and set encounters keep the game's.
++    if (!ignoreAbility)
++    {
++        static const u8 percent[] = {100, 0, 25, 50, 200}; // NORMAL, OFF, 1/4, 1/2, 2X
++        u32 setting = CtrExtras_Get("encounter_rate");
++
++        if (setting < ARRAY_COUNT(percent))
++            encounterRate = encounterRate * percent[setting] / 100;
++    }
++#endif
+     if (encounterRate > MAX_ENCOUNTER_RATE)
+         encounterRate = MAX_ENCOUNTER_RATE;
+     return EncounterOddsCheck(encounterRate);

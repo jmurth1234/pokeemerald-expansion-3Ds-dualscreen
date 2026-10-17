@@ -26,6 +26,7 @@
 #include "voxel_tree.h"
 #include "voxel_atlas.h"
 #ifdef PLATFORM_3DS
+#include "voxel_building.h"
 #include "field_weather.h"
 #include "palette.h"
 #include "constants/field_weather.h"
@@ -46,7 +47,9 @@ static unsigned sInstanceCount;
  * handful of distinct tilesets and layouts on screen, so a scan beats anything
  * cleverer, and every entry is dropped at VoxelWorld_BeginBatch.
  */
-#define VOXEL_MEMO_SLOTS 8
+/* At least one per instance: past a full memo every lookup on the remaining
+ * instances falls back to the asset binary search, per tile. */
+#define VOXEL_MEMO_SLOTS (MAX_VOXEL_MAP_INSTANCES + 4)
 
 struct VoxelMemo
 {
@@ -154,56 +157,6 @@ unsigned Voxel_MetatileCount(const void *tilesetPtr, unsigned limit)
     return bytes < limit ? (unsigned)bytes : limit;
 }
 
-bool Voxel_LoadTiles(const void *tilesetPtr, uint8_t *dest, uint32_t destSize)
-{
-    const struct Tileset *tileset = tilesetPtr;
-    const void *tiles;
-    u32 available;
-
-    if (tileset == NULL || tileset->tiles == NULL || dest == NULL)
-        return false;
-
-    if (tileset->isCompressed)
-    {
-        /*
-         * A decompressor cannot be told how large the destination is, so the
-         * header is read first and a payload that does not fit is refused
-         * rather than allowed to run off the end of the scratch buffer.
-         *
-         * The expansion tilesets are not vanilla LZ77: they carry a smol
-         * header (mode 1/6 and up), whose first bytes are not a size. Ask the
-         * engine for the real size and let it dispatch on the mode.
-         */
-        const u8 *packed = Port_ResolveAssetPointer(tileset->tiles);
-        u32 size;
-
-        if (packed == NULL)
-            return false;
-#ifdef PORT_EXPANSION
-        size = GetDecompressedDataSize((const u32 *)packed);
-#else
-        size = (u32)packed[1] | ((u32)packed[2] << 8) | ((u32)packed[3] << 16);
-#endif
-        if (size == 0 || size > destSize)
-            return false;
-#ifdef PORT_EXPANSION
-        DecompressDataWithHeaderWram((const u32 *)packed, dest);
-#else
-        LZDecompressWram((const u32 *)packed, dest);
-#endif
-        return true;
-    }
-
-    tiles = Port_ResolveAssetPointer(tileset->tiles);
-    if (tiles == NULL)
-        return false;
-    available = Port_GetAssetSizeExact(tileset->tiles);
-    if (available == 0 || available > destSize)
-        available = destSize;
-    memcpy(dest, tiles, available);
-    return true;
-}
-
 /* ── Availability ───────────────────────────────────────────────────────── */
 
 /* Return completion separately from success, allowing bounded decoding. */
@@ -226,8 +179,6 @@ bool Voxel_LoadTilesStep(const void *tilesetPtr, uint8_t *dest, uint32_t destSiz
 #ifdef PORT_EXPANSION
             if (load->packedSize >= 4 && src[0] != 0x10)
             {
-                /* Expansion smol payload, not vanilla LZ77: it has no
-                 * streaming form, so take it whole (see Voxel_LoadTiles). */
                 load->size = GetDecompressedDataSize((const u32 *)src);
                 if (!load->size || load->size > destSize) goto failed;
                 DecompressDataWithHeaderWram((const u32 *)src, dest);
@@ -406,6 +357,22 @@ static void AddConnections(const VoxelMapInstance *from, bool far)
     }
 }
 
+#ifdef PLATFORM_3DS
+/* Ground variant (layout, metatile) is drawn from `inst`'s own tileset of
+ * that metatile, the one the atlas composes it from (voxel_atlas.c
+ * AtlasSourceOf). */
+static bool VariantFits(const VoxelMapInstance *inst, unsigned layoutId, unsigned metatile)
+{
+    const struct MapLayout *layout = Port_GetMapLayoutById((u16)layoutId);
+
+    if (layout == NULL)
+        return false;
+    return metatile < NUM_METATILES_IN_PRIMARY
+         ? layout->primaryTileset == inst->primaryTileset
+         : layout->secondaryTileset == inst->secondaryTileset;
+}
+#endif
+
 /*
  * The current map, its connections, and theirs. The game loads only the first
  * two, which is all its 15 x 10 tiles of screen can reach; the 3D view sees
@@ -421,6 +388,9 @@ void VoxelWorld_BuildInstances(void)
 {
     unsigned near;
 
+#ifdef PLATFORM_3DS
+    VoxelBuildings_SetVariantFits(VariantFits);
+#endif
     sInstanceCount = 0;
     if (gMapHeader.mapLayout == NULL)
         return;
@@ -552,6 +522,12 @@ bool VoxelWorld_IsVisibleReflectiveSurface(int worldX, int worldY)
     behavior = UNPACK_BEHAVIOR(GetMetatileAttribute(inst, metatileId));
     if (!MetatileBehavior_IsReflective(behavior) && !MetatileBehavior_IsIce(behavior))
         return false;
+    /* A bridge's deck over a pond (Route 104's pier, the only one there is):
+     * the GBA shows a walker's reflection under the bridge, in the water the
+     * planks hide; here the deck is no water surface, and a reflection laid
+     * on it was drawn over the planks. The water beside it still reflects. */
+    if (behavior == MB_REFLECTION_UNDER_BRIDGE)
+        return false;
 
     /* Fortree's 0x288-0x29A puddle family contains grass artwork despite its
      * MB_PUDDLE behavior. The original 2D ground effect treats it as nearby
@@ -610,17 +586,18 @@ static VoxelVisualShape BehaviorShape(u8 behavior)
 
 VoxelVisualShape VoxelWorld_ClassifyTile(int worldX, int worldY)
 {
-    const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(worldX, worldY);
+    const VoxelMapInstance *inst = NULL;
+    u16 block = GetRawBlock(worldX, worldY, &inst);   /* one instance search for all three reads */
     int metatileId;
     VoxelVisualShape announced;
 
     if (inst == NULL)
         return VOXEL_SHAPE_VOID;
 
-    metatileId = VoxelWorld_GetMetatileId(worldX, worldY);
+    metatileId = block & MAPGRID_METATILE_ID_MASK;
     if (VoxelWorld_UsesTreeSprites(inst)
-     && (VoxelTree_Part(metatileId) >= 0
-         || VoxelTree_GroundMetatile(metatileId) != metatileId))
+     && (VoxelTree_Part(inst->secondaryTileset, metatileId) >= 0
+         || VoxelTree_GroundMetatile(inst->secondaryTileset, metatileId) != metatileId))
         return VOXEL_SHAPE_FLAT;
     if (VoxelRegions_RoleAt((unsigned)inst->layoutId,
                             worldX - inst->originX, worldY - inst->originY)
@@ -628,7 +605,7 @@ VoxelVisualShape VoxelWorld_ClassifyTile(int worldX, int worldY)
         return VOXEL_SHAPE_SIGN;
 
     /* The cells whose behaviour says what they are: water and furniture. */
-    announced = BehaviorShape(VoxelWorld_GetMetatileBehavior(worldX, worldY));
+    announced = BehaviorShape(UNPACK_BEHAVIOR(GetMetatileAttribute(inst, metatileId)));
     if (announced != VOXEL_SHAPE_COUNT)
         return announced;
 
@@ -641,25 +618,13 @@ VoxelVisualShape VoxelWorld_ClassifyTile(int worldX, int worldY)
 
         /*
          * Beds, tables and rugs announce nothing at all: Emerald gives them no
-         * behaviour of their own. These are ids from the general indoor
-         * tileset, and only for it: in the Pokemon Center's the same ids are
-         * its floor emblem, and read as tables, a bed and a cupboard they
-         * stood up out of its floor.
+         * behaviour of their own, and they are not guessed from their ids.
+         * The reference's list for the general indoor tileset names other
+         * things in it: a rug's border stood up as a row of black television
+         * sets and a bed (House1), the back wall's top row as mats, and a
+         * table as two of its four cells. A room's furniture stands up when
+         * the room is modelled from its drawing (voxel_building.h).
          */
-        if (inst->secondaryTileset != &gTileset_GenericBuilding)
-            return VOXEL_SHAPE_FLAT;
-        if (metatileId == 576 || metatileId == 577 || metatileId == 584
-         || metatileId == 585 || metatileId == 586)
-            return VOXEL_SHAPE_TABLE;
-        if (metatileId == 565 || metatileId == 558 || metatileId == 566
-         || metatileId == 570)
-            return VOXEL_SHAPE_FURNITURE;
-        if (metatileId == 578)
-            return VOXEL_SHAPE_SIGN;
-        if (metatileId >= 514 && metatileId <= 517)
-            return VOXEL_SHAPE_DECAL;
-        if (metatileId == 567 || metatileId == 568 || metatileId == 575)
-            return VOXEL_SHAPE_BED;
     }
 
     return VOXEL_SHAPE_FLAT;
@@ -764,6 +729,34 @@ VoxelWeatherClass VoxelWorld_Weather(void)
     }
 #endif
     return VOXEL_WEATHER_CLEAR;
+}
+
+/*
+ * The fog's own blend: the sprites come in at EVA 12 (4 under water) over a
+ * few frames and leave the same way, so the world's fog follows them.
+ */
+float VoxelWorld_FogDensity(void)
+{
+#ifdef PLATFORM_3DS
+    float density;
+
+    if (!gWeatherPtr->fogHSpritesCreated && !gWeatherPtr->fogDSpritesCreated)
+        return 0.0f;
+    density = (float)gWeatherPtr->currBlendEVA / 12.0f;
+    return density > 1.0f ? 1.0f : density;
+#else
+    return 0.0f;
+#endif
+}
+
+bool VoxelWorld_Underground(void)
+{
+    return gMapHeader.mapType == MAP_TYPE_UNDERGROUND;
+}
+
+bool VoxelWorld_MapIsConnected(void)
+{
+    return gMapHeader.connections != NULL && gMapHeader.connections->count > 0;
 }
 
 /*
@@ -882,7 +875,6 @@ void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *second
     {
         const VoxelMapInstance *inst = &sInstances[i];
         const struct MapLayout *layout = inst->layout;
-        const uint16_t *border;
 
         if (inst->primaryTileset != primaryTileset
          || inst->secondaryTileset != secondaryTileset)
@@ -916,18 +908,38 @@ void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *second
                       && y + inst->originY >= sMaterialView[1] && y + inst->originY < sMaterialView[3]) ? 2u : 1u;
                     if (used[m] < priority) used[m] = priority;
                 }
+    }
+    /* The belt is drawn with the current map's atlas, and from a neighbour's
+     * border as well as its own (VoxelWorld_BorderMetatile): any border whose
+     * metatiles these tilesets hold. */
+    for (unsigned i = 0; i < sInstanceCount; ++i)
+    {
+        const VoxelMapInstance *inst = &sInstances[i];
+        const struct MapLayout *layout = inst->layout;
+        const uint16_t *border;
+        bool secondary = false;
 
-        border = layout->border != NULL ? Port_ResolveAssetPointer(layout->border) : NULL;
-        if (border != NULL)
-            for (unsigned t = 0; t < 4; ++t)
-                used[border[t] & MAPGRID_METATILE_ID_MASK] = 2;
+        if (inst->primaryTileset != primaryTileset || layout == NULL || layout->border == NULL)
+            continue;
+        border = Port_ResolveAssetPointer(layout->border);
+        if (border == NULL)
+            continue;
+        for (unsigned t = 0; t < 4; ++t)
+            secondary |= (border[t] & MAPGRID_METATILE_ID_MASK) >= NUM_METATILES_IN_PRIMARY;
+        if (secondary && inst->secondaryTileset != secondaryTileset)
+            continue;
+        for (unsigned t = 0; t < 4; ++t)
+            used[border[t] & MAPGRID_METATILE_ID_MASK] = 2;
     }
     /* The replacement removes canopy fringes even on maps that never used
      * their bare ground tile. Keep that material available in the atlas. */
     if (primaryTileset == &gTileset_General)
         for (int m = 0; m < NUM_METATILES_TOTAL; ++m)
-            if (used[m] > used[VoxelTree_GroundMetatile(m)])
-                used[VoxelTree_GroundMetatile(m)] = used[m];
+        {
+            int ground = VoxelTree_GroundMetatile(secondaryTileset, m);
+            if (used[m] > used[ground])
+                used[ground] = used[m];
+        }
 }
 
 /*
@@ -1027,71 +1039,40 @@ uint32_t VoxelWorld_BlockHash(int x0, int y0, int x1, int y1)
  * tiles the layout's 2x2 border block outwards for ever, which is why a town
  * looks like it sits in a wood rather than on a plate over a black sky.
  *
- * The indexing is GetBorderBlockAt's, over backup-layout coordinates, so the
- * phase of the 2x2 matches what the 2D renderer draws on the same tile.
+ * Whose border, and in which phase, is fieldmap.c's to say: the nearest map's
+ * whose border the current tilesets draw, the same answer the 2D camera
+ * gives, and the same from either side of a crossing.
  */
 int VoxelWorld_BorderMetatile(int worldX, int worldY)
 {
-    const struct MapLayout *layout;
     const uint16_t *border;
-    const void *resolved;
-    int bx, by, index;
+    const void *source, *resolved;
+    u8 index;
 
-    if (sInstanceCount == 0)
+    if (sInstanceCount == 0 || sInstances[0].layout == NULL)
         return -1;
-    layout = sInstances[0].layout;
-    if (layout == NULL || layout->border == NULL)
+    source = MapGridGetCameraBorderAt(worldX - sInstances[0].originX,
+                                      worldY - sInstances[0].originY, &index);
+    if (source == NULL)
         return -1;
-    if (!MemoGet(&sBorderMemo, layout->border, &resolved))
+    if (!MemoGet(&sBorderMemo, source, &resolved))
     {
-        resolved = Port_ResolveAssetPointer(layout->border);
-        MemoPut(&sBorderMemo, layout->border, resolved);
+        resolved = Port_ResolveAssetPointer(source);
+        MemoPut(&sBorderMemo, source, resolved);
     }
     border = resolved;
     if (border == NULL)
         return -1;
-    bx = worldX - sInstances[0].originX + MAP_OFFSET;
-    by = worldY - sInstances[0].originY + MAP_OFFSET;
-    index = ((bx + 1) & 1) + (((by + 1) & 1) * 2);
     return (int)(border[index] & MAPGRID_METATILE_ID_MASK);
 }
 
-/*
- * Layouts of the maps just past those placed: the connections of each
- * connection. They are placed the moment the player crosses, and whatever is
- * read for them then is read in the middle of a frame.
- */
-unsigned VoxelWorld_NextLayouts(unsigned *layouts, unsigned max)
+bool VoxelWorld_BorderIsWater(int worldX, int worldY)
 {
-    unsigned count = 0;
+    int metatileId = VoxelWorld_BorderMetatile(worldX, worldY);
 
-    for (unsigned i = 1; i < sInstanceCount; ++i)
-    {
-        const struct MapHeader *header = sInstances[i].header;
-        const struct MapConnection *conn;
-
-        if (header == NULL || header->connections == NULL)
-            continue;
-        conn = header->connections->connections;
-        for (s32 c = 0; c < header->connections->count && count < max; ++c, ++conn)
-        {
-            const struct MapHeader *next;
-            bool known = false;
-
-            if (conn->direction == CONNECTION_DIVE || conn->direction == CONNECTION_EMERGE)
-                continue;
-            next = GetMapHeaderFromConnection(conn);
-            if (next == NULL || next->mapLayout == NULL)
-                continue;
-            for (unsigned k = 0; k < count && !known; ++k)
-                known = layouts[k] == next->mapLayoutId;
-            for (unsigned k = 0; k < sInstanceCount && !known; ++k)
-                known = (unsigned)sInstances[k].layoutId == next->mapLayoutId;
-            if (!known)
-                layouts[count++] = next->mapLayoutId;
-        }
-    }
-    return count;
+    return metatileId >= 0 && !sInstances[0].indoor
+        && BehaviorShape(UNPACK_BEHAVIOR(GetMetatileAttribute(&sInstances[0], metatileId)))
+           == VOXEL_SHAPE_WATER;
 }
 
 static unsigned AddPayload(const void **payloads, unsigned count, unsigned max, const void *ptr)

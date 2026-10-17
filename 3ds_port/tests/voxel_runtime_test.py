@@ -55,24 +55,28 @@ static bool C3D_TexInitVRAM(C3D_Tex *tex, unsigned w, unsigned h, int fmt) {
 static void C3D_TexDelete(C3D_Tex *tex) { assert(tex->data && allocated); --allocated; tex->data = NULL; }
 static void C3D_TexSetFilter(C3D_Tex *t, int a, int b) { (void)t; (void)a; (void)b; }
 static void C3D_TexSetWrap(C3D_Tex *t, int a, int b) { (void)t; (void)a; (void)b; }
+/* No building pages' arena here: nothing is borrowed, every page is VRAM. */
+static void AtlasPageRelease(C3D_Tex *tex) { if (tex->data) C3D_TexDelete(tex); }
+static bool AtlasPageBorrow(C3D_Tex *tex) { (void)tex; return false; }
 typedef struct { bool draft; } VoxelChunk;
 typedef struct { ChunkSite site; VoxelAtlasSlot *atlas; VoxelChunk *chunk; uint32_t hash;
     bool hashKnown, done; unsigned key, need, waitIndex; } BuildRequest;
-static struct { int group, map, cx, cy; bool border, used; uint32_t seen, progress; } sRequestWait[VOXEL_REQUESTS_MAX];
+static struct { int group, map, cx, cy; bool border, used; uint32_t seen, progress, noRoomUntil; } sRequestWait[VOXEL_REQUESTS_MAX];
 static BuildRequest sRequests[VOXEL_REQUESTS_MAX];
 static uint8_t sWaitHead[128], sWaitNext[VOXEL_REQUESTS_MAX];
 #define VOXEL_DRAFT_STARVE_FRAMES 90u
 static unsigned sRequestCount, sFrame, starts;
-enum { JOB_GROUND, JOB_TREES, JOB_MODELS, JOB_BORDER, JOB_BORDER_TREES, JOB_SORT, JOB_PACK, JOB_DONE };
+enum { JOB_GROUND, JOB_TREES, JOB_MODELS, JOB_BORDER, JOB_BORDER_TREES, JOB_SORT, JOB_PACK, JOB_STATICS, JOB_DONE };
 #define VOXEL_GROUND_SLICE_CELLS 1
 #define VOXEL_MODEL_SLICE_TRIANGLES 64
+#define VOXEL_STATIC_SLICE_TRIANGLES 64
 #define VOXEL_SLICE_CAP_MS 5.0f
 static float sPhaseMs[JOB_DONE + 1];
 static uint32_t sPhaseFrame[JOB_DONE + 1];
 static bool sHolesOnly = true, validJob = true;
 static struct { bool active, forView, hole, overdue; unsigned waitIndex; ChunkSite site;
     int phase, row, col, models; unsigned buildingFirst;
-    unsigned sortPage, sortScan, sortWrite, terrainCount, terrainFirst[5]; } sJob;
+    unsigned sortPage, sortScan, sortWrite, terrainCount, terrainFirst[5], staticIndex; } sJob;
 typedef struct { float u, marker; } VoxelVertex;
 static VoxelVertex sScratch[6000];
 static bool JobValid(void) { return validJob; }
@@ -86,14 +90,28 @@ static void JobStart(const ChunkSite *s, VoxelAtlasSlot *a, uint32_t h, void *c,
 typedef struct { unsigned maxEntries, numEntries; } gxCmdQueue_s;
 static gxCmdQueue_s *sFrameQueue;
 static unsigned sUploadCommands, sRenderReserve;
+static bool sPrefetchBlocked;
 '''
-    for signature in ['static unsigned WaitBucket(', 'static unsigned RequestWait(', 'static bool RequestOverdue(', 'static int CompareRequests(', 'static bool StartNextJob(', 'static bool JobSort(', 'static float PhaseCost(', 'static void NotePhaseCost(']:
+    for signature in ['static unsigned WaitBucket(', 'static unsigned RequestWait(', 'static bool RequestOverdue(', 'static int CompareRequests(', 'static bool StartNextJob(', 'static bool JobSort(', 'static float PhaseCost(', 'static float PhaseCostInFrame(', 'static void NotePhaseCost(']:
         source += function(voxel, signature)
     for signature in ['static C3D_Tex *AtlasTex(', 'static void FreeAtlasTextures(', 'static unsigned CountAllocatedAtlases(', 'static bool AtlasInView(const VoxelAtlasSlot *slot)\n{', 'static bool AllocateAtlasPage(']:
         source += function(voxel, signature)
     source += r'''
-static struct { unsigned count; } sBuilder;
+static struct { unsigned count, staticCount; } sBuilder;
 static bool sHaveBuildings;
+/* Static models: each mesh cached once its slices of conversion are done. */
+typedef struct { unsigned pageModel; bool lit; } VoxelStaticDraw;
+static VoxelStaticDraw sJobStatics[4];
+static struct StaticMesh { unsigned slicesLeft; } meshes[4];
+static unsigned prepares;
+static const struct StaticMesh *StaticMeshFind(unsigned pageModel, bool lit) {
+    (void)lit; return meshes[pageModel].slicesLeft ? NULL : &meshes[pageModel];
+}
+static bool StaticMeshPrepare(unsigned pageModel, bool lit, unsigned triangles) {
+    (void)lit; assert(triangles == VOXEL_STATIC_SLICE_TRIANGLES); ++prepares;
+    if (meshes[pageModel].slicesLeft) --meshes[pageModel].slicesLeft;
+    return meshes[pageModel].slicesLeft == 0;
+}
 static unsigned cells[2][64];
 static void EmitCells(bool trees, int x0, int y0, int x1, int y1) {
     for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
@@ -114,9 +132,13 @@ typedef struct { float gameMs, vblankMs; } CtrTiming;
 static CtrTiming timing;
 static struct { float afterMs, afterBudgetMs; } sStats;
 static bool sReady, sViewReady, sCrossingSoon;
+static uint64_t sAfterEndTick;
+static float sTailMs;
 static unsigned sAheadBackoff, postStarts;
 static float sLastBuildMs, sInFrameBuildMs;
-typedef struct { float cpuMs, gpuMs; } CtrVideoStats;
+typedef struct { float cpuMs, gpuMs, gpuStartMs; bool voxelFrame; } CtrVideoStats;
+static uint32_t sAfterStarvedFrames;
+#define VOXEL_AFTER_STARVED_MS 1.0f
 static CtrVideoStats videoTiming;
 static const CtrVideoStats *CtrVideo_GetStats(void) { return &videoTiming; }
 #define VOXEL_INFRAME_TARGET_MS 14.0f
@@ -144,6 +166,7 @@ static unsigned RunJobs(uint64_t a, float holes, float ahead, bool inFrame, bool
 }
 '''
     source += function(voxel, 'static float InFrameBudget(')
+    source += function(voxel, 'void CtrVoxel_NoteFrameWait(')
     source += function(voxel, 'void CtrVoxel_AfterSubmit(')
     source += function(voxel, 'static void JobStep(')
     source += function(video, 'bool CtrVideo_TryVoxelUpload(')
@@ -159,12 +182,19 @@ static unsigned RunJobs(uint64_t a, float holes, float ahead, bool inFrame, bool
 int main(void) {
     /* The last present spent 5 ms fixed + 2 ms meshing and 6 ms on GPU:
      * meshing has 3 ms. A 2 ms scene visit is already in the fixed cost. */
-    videoTiming = (CtrVideoStats){7, 6}; sInFrameBuildMs = 2; testTick = 102;
+    videoTiming = (CtrVideoStats){7, 6, 7, true}; sInFrameBuildMs = 2; testTick = 102;
     BudgetVisit(false, true, false);
     assert(inFrameRemaining == 3.0f);
     /* Warm-up intentionally includes the scene visit in its 4 ms cap. */
     BudgetVisit(true, true, false); assert(inFrameRemaining == 2.0f);
-    videoTiming = (CtrVideoStats){10, 6}; sInFrameBuildMs = 0;
+    /* The GPU started early, at 6 ms of a 9 ms present: only what came before
+     * it is charged (charged whole, the 9 ms left 14 - 7 - 7 = 0). */
+    videoTiming = (CtrVideoStats){9, 7, 6, true}; sInFrameBuildMs = 2;
+    BudgetVisit(false, true, false); assert(inFrameRemaining == 3.0f);
+    /* The first frame back from a 2D screen has no figures of its own. */
+    videoTiming = (CtrVideoStats){7, 6, 7, false};
+    BudgetVisit(false, true, false); assert(inFrameRemaining == 0.0f);
+    videoTiming = (CtrVideoStats){10, 6, 10, true}; sInFrameBuildMs = 0;
     BudgetVisit(false, true, false); assert(inFrameRemaining == 0.0f);
     BudgetVisit(false, true, true); assert(inFrameRemaining == VOXEL_STARVE_MS);
     testTick = 1; sHolesOnly = true;
@@ -172,9 +202,26 @@ int main(void) {
     VoxelMapInstance inst = {0}; VoxelAtlasSlot atlas = {.valid = true};
     sRequestCount = 1;
     sRequests[0] = (BuildRequest){.site = {.inst = &inst}, .atlas = &atlas, .need = NEED_STALE, .key = 100000};
-    sRequests[0].waitIndex = RequestWait(&sRequests[0].site);
-    for (sFrame = 0; sFrame < 4; ++sFrame) assert(!StartNextJob(0, 2, 0));
+    sRequests[0].waitIndex = RequestWait(&sRequests[0].site, -1);
+    for (sFrame = 0; sFrame < 4; ++sFrame) { RequestWait(&sRequests[0].site, -1); assert(!StartNextJob(0, 2, 0)); }
+    RequestWait(&sRequests[0].site, -1);
+    /* Waiting for room (NoRoomForView): neither overdue nor started. */
+    sRequestWait[sRequests[0].waitIndex].noRoomUntil = sFrame + 1;
+    assert(!RequestOverdue(&sRequests[0]) && !StartNextJob(0, 2, 0) && starts == 0);
+    sRequestWait[sRequests[0].waitIndex].noRoomUntil = sFrame;
     assert(StartNextJob(0, 2, 0) && starts == 1 && sJob.overdue && !sJob.hole);
+    /* A square back in view after a gap waits from then, not from its old
+     * record: it was overdue at once and forced a slice into the frame. */
+    {
+        uint32_t frame = sFrame;
+        unsigned w;
+
+        sFrame += 50; w = RequestWait(&sRequests[0].site, -1);
+        assert(sRequestWait[w].progress == sFrame && !RequestOverdue(&sRequests[0]));
+        ++sFrame; RequestWait(&sRequests[0].site, -1);
+        assert(sRequestWait[w].progress == sFrame - 1);
+        sFrame = frame; sRequestWait[w].progress = 0; sRequestWait[w].seen = sFrame;
+    }
     sRequestWait[sJob.waitIndex].progress = sFrame;
     sRequests[0].done = false; Refresh(true);
     assert(sJob.active && sJob.overdue && sRequests[0].done);
@@ -214,11 +261,21 @@ int main(void) {
     CtrVoxel_AfterSubmit(0); assert(postStarts == 2 && !sRequests[0].done);
     sViewReady = true; testTick = 1;
     CtrVoxel_AfterSubmit(1); assert(postStarts == 3);
+    /* The frame's real tail (end of AfterSubmit to the next FrameBegin) is
+     * left free when it is longer than the game and the audio counted:
+     * 16.7 - 0 elapsed - 12 tail (the cap) - 1 margin. Read once only. */
+    assert(sAfterEndTick == testTick);
+    CtrVoxel_NoteFrameWait(sAfterEndTick + 20); assert(sTailMs == 20.0f && sAfterEndTick == 0);
+    sViewReady = true; sJob.active = true;
+    CtrVoxel_AfterSubmit(1); assert(sStats.afterBudgetMs > 3.6f && sStats.afterBudgetMs < 3.8f);
+    CtrVoxel_NoteFrameWait(testTick + 5); assert(sTailMs == 5.0f);
+    CtrVoxel_NoteFrameWait(testTick + 5); assert(sTailMs == 0.0f);
+    sJob.active = false;
     sHolesOnly = true;
     sRequestCount = 3;
     for (unsigned i = 0; i < 3; ++i) {
         sRequests[i] = sRequests[0]; sRequests[i].site.cx = (int)i;
-        sRequests[i].waitIndex = RequestWait(&sRequests[i].site);
+        sRequests[i].waitIndex = RequestWait(&sRequests[i].site, -1);
         sRequests[i].need = i == 0 ? NEED_STALE : i == 1 ? NEED_HOLE : NEED_AHEAD;
         sRequests[i].key = sRequests[i].need * 100000u;
         sRequestWait[sRequests[i].waitIndex].progress = i == 0 ? 0 : sFrame;
@@ -257,12 +314,12 @@ int main(void) {
     sAtlases[0].primaryTileset = &pairA; sAtlases[1].primaryTileset = &pairB;
     sAtlases[2].primaryTileset = &pairOld; sAtlases[2].valid = true;
     for (unsigned a = 0; a < 3; ++a)
-        for (unsigned p = 0; p < 2; ++p) assert(AllocateAtlasPage(&sAtlases[a], p));
+        for (unsigned p = 0; p < 2; ++p) assert(AllocateAtlasPage(&sAtlases[a], p, true));
     assert(allocated == 6 && CountAllocatedAtlases() == 6);
-    assert(AllocateAtlasPage(&sAtlases[0], 2));
+    assert(AllocateAtlasPage(&sAtlases[0], 2, true));
     assert(!sAtlases[2].valid && sAtlases[2].generation == 1 && allocated == 5);
-    assert(AllocateAtlasPage(&sAtlases[0], 3));
-    assert(!AllocateAtlasPage(&sAtlases[1], 2) && allocated == 6);
+    assert(AllocateAtlasPage(&sAtlases[0], 3, true));
+    assert(!AllocateAtlasPage(&sAtlases[1], 2, true) && allocated == 6);
     assert(sAtlases[0].generation == 0 && sAtlases[1].generation == 0);
     /* Production phase transitions must cover each cell once and capture
      * terrainCount once, before the first cell of the tree pass. */
@@ -277,16 +334,29 @@ int main(void) {
         assert(sJob.col == 0 && sJob.row == 0);
         for (unsigned c = 0; c < 64; ++c) assert(cells[0][c] == 1 && cells[1][c] == 1);
     }
+    /* A chunk with no static models is done once packed; one with models is
+     * done once each is converted (or found cached), a slice a step. */
+    memset(&sJob, 0, sizeof(sJob)); sBuilder.staticCount = 0;
+    sJob.phase = JOB_PACK; JobStep(); assert(sJob.phase == JOB_DONE);
+    for (unsigned i = 0; i < 3; ++i) sJobStatics[i].pageModel = i;
+    meshes[1].slicesLeft = 2; meshes[2].slicesLeft = 1; sBuilder.staticCount = 3;
+    sJob.phase = JOB_PACK; JobStep(); assert(sJob.phase == JOB_STATICS);
+    unsigned staticSteps = 0;
+    while (sJob.phase == JOB_STATICS) { JobStep(); assert(++staticSteps <= 8); }
+    assert(staticSteps == 4 && prepares == 4 && sJob.staticIndex == 3);
+    for (unsigned i = 0; i < 3; ++i) assert(StaticMeshFind(i, false));
     /* Prefetch has only 1 ms per frame. A historical 5 ms sample must
      * become runnable without promoting the chunk to visible first. */
     sFrame = 100; NotePhaseCost(1, 10.0f);
     assert(PhaseCost(1) == 5.0f);
     unsigned waiting = 0;
     while (PhaseCost(1) > 1.0f) { ++sFrame; assert(++waiting <= 20); }
+    /* Inside the frame it keeps half of what it last cost. */
+    assert(PhaseCostInFrame(1) == 2.5f);
     NotePhaseCost(1, 0.2f);
     assert(PhaseCost(1) <= 1.0f); /* do not resurrect the stale outlier */
     ++sFrame; NotePhaseCost(1, 2.0f); assert(PhaseCost(1) == 2.0f);
-    puts("PASS runtime: in-frame visit charged once, warm-up cap, post-submit prefetch admission, zero budget/backoff, stale deadline, preemption, promotion, cancellation ordering, page triangle ranges, queue admission");
+    puts("PASS runtime: in-frame visit charged once, warm-up cap, post-submit prefetch admission, zero budget/backoff, stale deadline, preemption, promotion, cancellation ordering, page triangle ranges, queue admission, static model slices");
     return 0;
 }
 '''

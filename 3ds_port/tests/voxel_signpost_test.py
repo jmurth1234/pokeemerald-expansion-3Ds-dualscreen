@@ -1,6 +1,7 @@
 """Signposts: the sign event rule, eventless posts (street lamps) and the sign
 silhouette, on synthetic cells and on real maps."""
 
+import json
 import pathlib
 import sys
 import types
@@ -8,6 +9,7 @@ import types
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import voxel_cells  # noqa: E402
+from gen_voxel_sign_masks import sign_record  # noqa: E402
 from voxel_sign_mask import cutout_mask, ground_colours, metatile_mask  # noqa: E402
 
 
@@ -15,10 +17,13 @@ class FakeLayout:
     is_signpost = voxel_cells.Layout.is_signpost
     open_post = voxel_cells.Layout.open_post
     free_post = voxel_cells.Layout.free_post
+    drawn_as_post = voxel_cells.Layout.drawn_as_post
     primary, secondary = "primary", "secondary"
 
-    def __init__(self, blocked, signs, outdoor=True, drawn=None, covering=(), posts=()):
+    def __init__(self, blocked, signs, outdoor=True, drawn=None, covering=(), posts=(),
+                 copies=()):
         self.events = types.SimpleNamespace(posts={("primary", m) for m in posts})
+        self._copies = set(copies)
         self.w = len(blocked[0])
         self.h = len(blocked)
         self.outdoor = outdoor
@@ -32,6 +37,9 @@ class FakeLayout:
 
     def covers(self, metatile):
         return metatile in self._covering
+
+    def draws_post_sign(self, metatile):
+        return metatile in self._copies
 
     def foliage(self, metatile):
         return 0.0
@@ -74,12 +82,15 @@ def run():
     # a house's sign against its wall
     drawn = [[0, 2, 0], [0, 3, 0], [0, 0, 0]]
     assert FakeLayout(blocked, {(1, 1)}, drawn=drawn, posts={3}).is_signpost(1, 1)
+    # ...or as its sign is, in another tileset's metatile
+    assert FakeLayout(blocked, {(1, 1)}, drawn=drawn, copies={3}).is_signpost(1, 1)
     blocked[2][1] = True
     assert not FakeLayout(blocked, {(1, 1)}, drawn=drawn, posts={3}).is_signpost(1, 1)
+    assert not FakeLayout(blocked, {(1, 1)}, drawn=drawn, copies={3}).is_signpost(1, 1)
 
     entry = next(e for e in voxel_cells.load_layouts() if e.get("id") == "LAYOUT_LITTLEROOT_TOWN")
     layout = voxel_cells.Layout(entry, voxel_cells.MapEvents())
-    pair = voxel_cells.pair_for(layout.primary, layout.secondary)
+    pair = voxel_cells.pair_for(layout.primary, layout.secondary, layout.num_primary)
     signs = [(x, y) for y in range(layout.h) for x in range(layout.w)
              if layout.role_at(x, y) == "signpost"]
     assert signs, "Littleroot Town has signs"
@@ -101,8 +112,33 @@ def run():
     assert len(lamps) >= 12, lamps
     # and so are the two against the Center's and the Mart's walls
     assert {(19, 38), (19, 45)} <= set(lamps), lamps
+    # Every gym's sign stands whole: its round top, drawn in the cell north
+    # of it, stands on it - against the gym's wall or a tree too (Dewford,
+    # Fortree, Lavaridge: their tilesets' copies of the General tileset's).
+    events = voxel_cells.MapEvents()
+    layouts = {e.get("id"): e for e in voxel_cells.load_layouts()}
+    gyms = 0
+    for path in sorted((ROOT.parent / "data" / "maps").glob("*/map.json")):
+        with open(path, encoding="utf-8") as f:
+            m = json.load(f)
+        # This proof is for Hoenn's eight round gym signs. Expansion also
+        # includes Kanto maps, whose signs use different artwork.
+        if layouts[m["layout"]].get("layout_version") == "frlg":
+            continue
+        for b in m.get("bg_events") or []:
+            if not b.get("script", "").endswith("_EventScript_GymSign"):
+                continue
+            layout = voxel_cells.Layout(layouts[m["layout"]], events)
+            pair = voxel_cells.pair_for(layout.primary, layout.secondary, layout.num_primary)
+            x, y = b["x"], b["y"]
+            assert layout.role_at(x, y) == "signpost", (path.parent.name, layout.role_at(x, y))
+            rows, head, _, _ = sign_record(layout, pair, x, y)
+            assert rows[15] and not all(r == 0xFFFF for r in rows), path.parent.name
+            assert any(head), path.parent.name
+            gyms += 1
+    assert gyms == 8, gyms
     print("PASS voxel signpost: sign events, lamps, open sides, silhouettes "
-          "(%d real signs, %d Rustboro lamps)" % (len(signs), len(lamps)))
+          "(%d real signs, %d Rustboro lamps, %d gym signs)" % (len(signs), len(lamps), gyms))
 
 
 if __name__ == "__main__":

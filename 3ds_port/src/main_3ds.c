@@ -1,4 +1,6 @@
 #include <3ds.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "3ds_platform.h"
 #include "3ds_video.h"
@@ -51,13 +53,42 @@ void __system_allocateHeaps(void)
     fake_heap_end = fake_heap_start + __ctru_heap_size;
 }
 
+/*
+ * Started by the HOME Menu forwarder (3ds_port/forwarder): it made its own
+ * title Luma3DS's 3DSX title to load this file, and passes the previous one.
+ * Put it back, so the forwarder runs its own code next time; Luma's PM applies
+ * the "selected" title when this process exits. A 3DSX loaded by hb:ldr may
+ * write the shared page.
+ */
+#define FORWARDER_RESTORE_ARG "emerald3ds-forwarder:hbldr-tid="
+
+extern int __system_argc;
+extern char **__system_argv;
+
+static void RestoreLumaHbldrTitle(void)
+{
+    const size_t prefixLen = sizeof(FORWARDER_RESTORE_ARG) - 1;
+    for (int i = 1; i < __system_argc; i++)
+    {
+        const char *arg = __system_argv[i];
+        if (arg == NULL || strncmp(arg, FORWARDER_RESTORE_ARG, prefixLen) != 0)
+            continue;
+        char *end;
+        u64 tid = strtoull(arg + prefixLen, &end, 16);
+        s64 luma;
+        if (*end == 0 && tid != 0 && R_SUCCEEDED(svcGetSystemInfo(&luma, 0x10000, 0)))
+            *(volatile u64 *)(OS_SHAREDCFG_VADDR + 0x808) = tid;
+    }
+}
+
 int main(void)
 {
+    RestoreLumaHbldrTitle();
     if (!CtrPlatform_Init())
         CtrPlatform_Fatal("platform initialization failed");
     CtrPlatformHooks hooks = {0};
     hooks.vblank = CtrGame_VBlank;
-    hooks.reset = CtrGame_Init;
+    hooks.reset = CtrGame_SoftReset;
     hooks.videoPresent = CtrVideo_Present;
     CtrPlatform_SetHooks(&hooks);
     /* The game owns the loop: CtrGame_Init enters AgbMain and

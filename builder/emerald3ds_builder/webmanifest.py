@@ -6,11 +6,18 @@ release's capabilities without downloading the payload. Layout of the ZIP:
 
     web-manifest.json
     payload/Emerald3DS.3dsx, payload/Emerald3DS.smdh, payload/emerald3ds.recipe
+    payload/<lang>/...            other languages: their own executable and recipe
     payload/voxelgen/...          the generator scripts (as in the Windows ZIP)
     python/emerald3ds_builder/... this package, without the desktop window
     licenses/...
 
 It never holds a ROM, a data pack or anything extracted from the game.
+
+The top-level `supportedRoms`, `dataAbi` and `assets` describe the default
+variant (the English game). The optional `variants` list adds one entry per
+other language: {"rom": {...}, "dataAbi", "recipeRelease", "assets": {threeDsx,
+smdh, recipe}}. A website that predates `variants` ignores it and keeps
+building the default variant only.
 
 `schemaVersion` changes only when an existing field changes meaning or goes
 away; new optional fields keep the version. The website refuses a schema it
@@ -60,6 +67,23 @@ def _file_ref(value, where: str, need_release_asset: bool = False) -> None:
         raise ManifestError("%s.releaseAsset must be a file name or null" % where)
 
 
+def _rom(rom, where: str) -> None:
+    if not isinstance(rom, dict) or not _HEX["sha1"].match(str(rom.get("sha1", ""))):
+        raise ManifestError("%s.sha1 must be 40 lowercase hex digits" % where)
+    if not isinstance(rom.get("name"), str):
+        raise ManifestError("%s.name must be a string" % where)
+
+
+def rom_variants(manifest: dict) -> list[dict]:
+    """Every ROM the release builds from, default variant first:
+    [{"rom": {...}, "dataAbi": "...", "assets": {...}}]."""
+    out = [{"rom": rom, "dataAbi": manifest["dataAbi"], "assets": manifest["assets"]}
+           for rom in manifest["supportedRoms"]]
+    for variant in manifest.get("variants") or []:
+        out.append({"rom": variant["rom"], "dataAbi": variant["dataAbi"], "assets": variant["assets"]})
+    return out
+
+
 def validate(manifest: dict) -> dict:
     """Raise ManifestError unless `manifest` is a valid schema-1 manifest."""
     if not isinstance(manifest, dict):
@@ -79,10 +103,25 @@ def validate(manifest: dict) -> dict:
     if not isinstance(roms, list) or not roms:
         raise ManifestError("supportedRoms must list at least one ROM")
     for i, rom in enumerate(roms):
-        if not isinstance(rom, dict) or not _HEX["sha1"].match(str(rom.get("sha1", ""))):
-            raise ManifestError("supportedRoms[%d].sha1 must be 40 lowercase hex digits" % i)
-        if not isinstance(rom.get("name"), str):
-            raise ManifestError("supportedRoms[%d].name must be a string" % i)
+        _rom(rom, "supportedRoms[%d]" % i)
+    variants = manifest.get("variants")
+    if variants is not None:
+        if not isinstance(variants, list):
+            raise ManifestError("variants must be a list")
+        for i, variant in enumerate(variants):
+            where = "variants[%d]" % i
+            if not isinstance(variant, dict):
+                raise ManifestError("%s must be an object" % where)
+            _rom(variant.get("rom"), where + ".rom")
+            if not isinstance(variant.get("dataAbi"), str) or not _HEX["abi"].match(variant["dataAbi"]):
+                raise ManifestError("%s.dataAbi must be 8 lowercase hex digits" % where)
+            if not isinstance(variant.get("assets"), dict):
+                raise ManifestError("%s.assets must be an object" % where)
+            for key in ("threeDsx", "smdh", "recipe"):
+                _file_ref(variant["assets"].get(key), "%s.assets.%s" % (where, key), need_release_asset=True)
+        shas = [v["rom"]["sha1"] for v in rom_variants(manifest)]
+        if len(set(shas)) != len(shas):
+            raise ManifestError("a ROM is listed by more than one variant")
     entry = manifest.get("entrypoint")
     if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in ("pythonPath", "module", "function")):
         raise ManifestError("entrypoint must name pythonPath, module and function")
@@ -108,7 +147,8 @@ def validate(manifest: dict) -> dict:
         if item["path"].lower().endswith(FORBIDDEN_SUFFIXES):
             raise ManifestError("files may not contain %s" % item["path"])
         seen.add(item["path"])
-    for key in ("threeDsx", "smdh", "recipe"):
-        if assets[key]["path"] not in seen:
-            raise ManifestError("assets.%s is not in files" % key)
+    for i, variant in enumerate(rom_variants(manifest)):
+        for key in ("threeDsx", "smdh", "recipe"):
+            if variant["assets"][key]["path"] not in seen:
+                raise ManifestError("the %s of ROM %s is not in files" % (key, variant["rom"]["sha1"]))
     return manifest

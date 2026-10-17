@@ -14,9 +14,9 @@ from .build import Payload, build_pack, default_payload
 from .errors import BuilderError
 from .install import APP_DIR, find_sd_cards, install
 from .recipe import Recipe, RecipeError
-from .rom import SUPPORTED_SHA1, load_rom
+from .rom import ROM_PROFILES, load_rom
 
-TITLE = "Pokémon Emerald 3Ds Dual Screen Builder"
+TITLE = "Emerald 3DS Builder"
 
 
 class App:
@@ -87,9 +87,10 @@ class App:
             self.rom_status.config(text="", foreground="")
             return
         try:
-            expected = Recipe.load(self.payload.recipe).rom_sha1
-        except (OSError, RecipeError):
-            expected = SUPPORTED_SHA1
+            hashes = (Recipe.load(variant.recipe).rom_sha1 for variant in self.payload.variants())
+            expected = tuple(dict.fromkeys((*ROM_PROFILES.values(), *hashes)))
+        except (OSError, ValueError, KeyError, RecipeError):
+            expected = None
         try:
             rom = load_rom(Path(path), expected)
         except BuilderError as exc:
@@ -118,7 +119,7 @@ class App:
             messagebox.showwarning(TITLE, "Choose the ROM and the destination first.")
             return
         dest = Path(sd) / APP_DIR
-        if not messagebox.askokcancel(TITLE, "Pokémon Emerald 3Ds Dual Screen will be installed to:\n\n%s\n\nContinue?" % dest):
+        if not messagebox.askokcancel(TITLE, "Emerald 3DS will be installed to:\n\n%s\n\nContinue?" % dest):
             return
         self.busy = True
         self.button.state(["disabled"])
@@ -131,8 +132,8 @@ class App:
             self.payload.check()
             with tempfile.TemporaryDirectory(prefix="emerald3ds-") as tmp:
                 pak_path = Path(tmp) / "emerald3ds.pak"
-                build_pack(rom, self.payload, pak_path, lambda f, m: progress(f * 0.9, m))
-                files = {exe.name: exe for exe in self.payload.executables()}
+                info = build_pack(rom, self.payload, pak_path, lambda f, m: progress(f * 0.9, m))
+                files = {exe.name: exe for exe in info["payload"].executables()}
                 files["emerald3ds.pak"] = pak_path
                 dest = install(sd, files, lambda f: progress(0.9 + 0.1 * f, "Copying to the SD card"))
             self.events.put(("done", str(dest)))
@@ -150,7 +151,7 @@ class App:
                     self.step.config(text=event[2])
                 elif event[0] == "done":
                     self.finish()
-                    messagebox.showinfo(TITLE, "Done. Pokémon Emerald 3Ds Dual Screen is installed in\n%s\n\n"
+                    messagebox.showinfo(TITLE, "Done. Emerald 3DS is installed in\n%s\n\n"
                                                "Start it from the Homebrew Launcher." % event[1])
                 elif event[0] == "error":
                     self.finish()

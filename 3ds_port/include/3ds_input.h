@@ -32,7 +32,6 @@ typedef struct {
     uint16_t touchX, touchY; /* bottom pixels: 0..319, 0..239 */
     float touchNormX, touchNormY; /* 0..1, zero when not touching */
     int16_t circleX, circleY;
-    bool resetDown;
 } CtrInput;
 
 /* Pure conversion shared by HID and host regression tests. */

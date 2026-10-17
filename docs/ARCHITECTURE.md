@@ -1,6 +1,6 @@
 # Architecture
 
-Pokémon Emerald 3Ds Dual Screen runs the pokeemerald game code natively on the 3DS's ARM11. The
+Emerald 3DS runs the pokeemerald game code natively on the 3DS's ARM11. The
 game keeps its own main loop (`AgbMain`), its GBA register model and its data;
 the port supplies what the GBA hardware did, through a small bridge.
 
@@ -41,7 +41,13 @@ function pointers (callbacks, native script commands) are guarded for
 `AgbMain` runs forever. Every iteration ends in `WaitForVBlank` →
 `VBlankIntrWait`, where the backend:
 
-1. runs the VBlank handler (m4a mixes one frame; the frame goes to NDSP);
+1. runs the VBlank handler (m4a mixes one frame; the frame goes to NDSP;
+   with OPTIONS' REAL-TIME PACING the worker mixes on the DSP's clock
+   instead, whenever NDSP has fewer than three frames queued, and
+   `FrameShown` in `3ds_platform.c` runs a hidden frame when the game has
+   fallen a frame behind the display - in the field only: a battle keeps
+   the GBA's timing, and without a DSP the clock mode mixes once per frame
+   as before);
 2. latches the GBA registers, OAM and palettes and presents: the compositor
    decodes changed tiles into an RGBA5551 atlas and draws BG/OBJ layers with
    the PICA200 at native 400x240 on the top screen; the voxel overworld, when
@@ -113,9 +119,21 @@ scene (`VOXEL_LIGHTING`). Buildings, trees, signposts and drawn terrain relief
 are modelled on the host from each map's own art (`3ds_port/scripts/gen_voxel_*.py`)
 and read at runtime from `voxel/*.bin`.
 
+With the 3D slider up the world is drawn once per eye, each from a camera
+moved half an interocular distance sideways with the asymmetric frustum of a
+stereo pair (`Mtx_PerspStereo`); the chunk cache, atlases and billboards are
+shared, so the second eye costs its draw calls and fill. The plane of zero
+parallax stands just in front of the player; the game's text and weather are
+composed on it, the same in both eyes. A New 3DS has the frame for the second
+pass; on an Old 3DS the world stays flat unless OPTIONS' 3D WORLD says ON
+(`sVoxelStereo` in `3ds_video.c`), and 3D DEPTH scales the slider. Both are
+extras on the SETTINGS tab's second screen (`3ds_extras.c`).
+
 ## Saves and logs
 
 The 128 KiB flash image is mirrored in RAM and written range by range to
-`sdmc:/3ds/emerald3ds/emerald3ds.sav`. The log goes to
-`sdmc:/3ds/emerald3ds/port.log` from a background thread, because SD writes on
-the render thread cost 50–500 ms on hardware.
+`sdmc:/3ds/emerald3ds/emerald3ds.sav`. The log is off by default; if
+`sdmc:/3ds/emerald3ds/debug.txt` exists, it goes to
+`sdmc:/3ds/emerald3ds/port.log` (the previous session is kept as
+`port-prev.log`) from a background thread, because SD writes on the render
+thread cost 50–500 ms on hardware.

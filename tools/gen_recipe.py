@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the recipe that lets the Pokémon Emerald 3Ds Dual Screen Builder rebuild the game data.
+"""Write the recipe that lets the Emerald 3DS Builder rebuild the game data.
 
 Run on the maintainer's machine after a build, with the supported ROM:
 
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import hashlib
 import struct
 import sys
 import time
@@ -32,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "builder"))
 sys.path.insert(0, str(ROOT / "tools" / "port_common"))
 from emerald3ds_builder import pak, recipe as rcp  # noqa: E402
+from emerald3ds_builder.rom import load_rom  # noqa: E402
 import staging  # noqa: E402
 import vtree_manifest  # noqa: E402
 
@@ -579,10 +579,11 @@ def main() -> None:
                     help="fail above this many literal bytes of the original game's own objects")
     args = ap.parse_args()
 
-    rom = args.rom.read_bytes()
-    sha1 = hashlib.sha1(rom).hexdigest()
-    if bytes.fromhex(sha1) != staging.SUPPORTED_ROM_SHA1:
-        raise SystemExit("gen_recipe: unsupported ROM (SHA-1 %s)" % sha1)
+    source_rom = load_rom(args.rom)
+    rom, sha1 = source_rom.data, source_rom.sha1
+    if source_rom.code in ("BPES", "BPEF", "BPEI") and not (args.gba_elf and args.elf and args.image_elf):
+        raise SystemExit("gen_recipe: %s requires the game's own GBA ELF and matching 3DS/image ELFs; "
+                         "English offsets and game data cannot be used." % source_rom.code)
     abi, items = staging.compute_abi(args.romfs)
     cover = Cover(rom)
     hints = {}
@@ -606,7 +607,7 @@ def main() -> None:
             continue
         mask = pointer_mask(args.romfs, rel, len(data)) if rel in BUNDLES else None
         is_gd = rel == "gamedata/gamedata.bin"
-        breaks = layout_breaks(ROOT) if rel == "maps/layouts.bin" else None
+        breaks = layout_breaks(args.decomp) if rel == "maps/layouts.bin" else None
         ops, patches, stats = cover.run(data, mask, hints if is_gd else None, remaps if is_gd else None,
                                         breaks)
         entry = {"path": rel, "size": len(data), "crc": crc, "ops": ops}

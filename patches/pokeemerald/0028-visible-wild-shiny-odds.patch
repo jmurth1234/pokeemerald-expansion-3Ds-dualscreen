@@ -1,0 +1,41 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: shiny odds for visible wild Pokemon
+Applies after 0014-visible-wild.patch and 0022-shiny-odds.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/pokemon.c b/src/pokemon.c
+--- a/src/pokemon.c
++++ b/src/pokemon.c
+@@ -2241,6 +2241,18 @@
+         return TRUE;
+     return --*rolls > 0;
+ }
++
++// Visible wild Pokemon (wild_encounter.c) roll their personality when they
++// appear and keep it for the battle, so they get the rolls here.
++u32 ShinyOdds_WildPersonality(void)
++{
++    u32 personality = Random32();
++    u32 rolls = ShinyRolls();
++
++    while (ShinyRollAgain(&rolls, personality))
++        personality = Random32();
++    return personality;
++}
+ #endif
+ 
+ void CreateBoxMon(struct BoxPokemon *boxMon, u16 species, u8 level, u8 fixedIV, u8 hasFixedPersonality, u32 fixedPersonality, u8 otIdType, u32 fixedOtId)
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -706,9 +706,11 @@
+     return GetObjectEventIdByXY(x, y) == OBJECT_EVENTS_COUNT;
+ }
+ 
++u32 ShinyOdds_WildPersonality(void); // pokemon.c
++
+ static u32 VisibleRollPersonality(void)
+ {
+-    return Random32();
++    return ShinyOdds_WildPersonality();
+ }
+ 
+ /*

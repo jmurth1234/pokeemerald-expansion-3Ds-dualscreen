@@ -1,0 +1,70 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: encounter rate for visible wild Pokemon
+Applies after 0014-visible-wild.patch and 0021-encounter-rate.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -501,6 +501,18 @@
+         return FALSE;
+ }
+ 
++#ifdef PLATFORM_3DS
++// Wild encounter rate (OPTIONS, CHEATS) in percent: random encounters while
++// walking and surfing, and how often visible wild Pokemon appear.
++static u32 EncounterRatePercent(void)
++{
++    static const u8 percent[] = {100, 0, 25, 50, 200}; // NORMAL, OFF, 1/4, 1/2, 2X
++    u32 setting = CtrExtras_Get("encounter_rate");
++
++    return setting < ARRAY_COUNT(percent) ? percent[setting] : 100;
++}
++#endif
++
+ // Returns true if it will try to create a wild encounter.
+ static bool8 WildEncounterCheck(u32 encounterRate, bool8 ignoreAbility)
+ {
+@@ -530,13 +542,7 @@
+     // Wild encounter rate (OPTIONS, CHEATS): walking and surfing only; Rock
+     // Smash (ignoreAbility), fishing and set encounters keep the game's.
+     if (!ignoreAbility)
+-    {
+-        static const u8 percent[] = {100, 0, 25, 50, 200}; // NORMAL, OFF, 1/4, 1/2, 2X
+-        u32 setting = CtrExtras_Get("encounter_rate");
+-
+-        if (setting < ARRAY_COUNT(percent))
+-            encounterRate = encounterRate * percent[setting] / 100;
+-    }
++        encounterRate = encounterRate * EncounterRatePercent() / 100;
+ #endif
+     if (encounterRate > MAX_ENCOUNTER_RATE)
+         encounterRate = MAX_ENCOUNTER_RATE;
+@@ -882,7 +888,7 @@
+ {
+     struct ObjectEvent *player;
+     u16 headerId;
+-    u32 i;
++    u32 i, percent;
+     bool8 surfing, idle;
+ 
+     if (!VISIBLE_MOST() || gMain.callback2 != CB2_Overworld)
+@@ -941,15 +947,17 @@
+         VisiblePlace(v);
+     }
+ 
+-    if (!idle || headerId == HEADER_NONE || sWildEncountersDisabled)
++    percent = EncounterRatePercent();
++    if (!idle || headerId == HEADER_NONE || percent == 0 || sWildEncountersDisabled)
+         return;
+     if (sVisibleSpawnTimer)
+     {
+         sVisibleSpawnTimer--;
+         return;
+     }
+-    /* One more every two seconds, up to the setting's number. */
+-    sVisibleSpawnTimer = 120;
++    /* One more every two seconds at the NORMAL encounter rate (1/2: every
++     * four, 2X: every second), up to the setting's number. */
++    sVisibleSpawnTimer = 120 * 100 / percent;
+     {
+         u32 count = 0, most = VISIBLE_MOST();
+ 

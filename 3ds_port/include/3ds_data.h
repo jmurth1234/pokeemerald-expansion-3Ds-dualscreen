@@ -13,7 +13,7 @@
  *   loose  sdmc:/3ds/emerald3ds/devdata/<path>, for iterating on one
  *          generated file without rebuilding anything else;
  *   pak    sdmc:/3ds/emerald3ds/emerald3ds.pak, the single data pack the
- *          Pokemon Emerald 3Ds Dual Screen Builder generates from the player's own ROM.
+ *          Emerald 3DS Builder generates from the player's own ROM.
  *
  * Files that only describe the executable (asset index, relocation tables,
  * shaders, the engine ABI) are not game data and are always read from the
@@ -64,5 +64,9 @@ bool CtrData_Size(const char *path, uint32_t *outSize);
 /* The whole file in a malloc'd buffer (one extra zero byte past the end), or
  * NULL. The caller frees it. */
 void *CtrData_Load(const char *path, uint32_t *outSize);
+/* Where a file lies in the data pack, so that neighbouring files can be read
+ * in one go with CtrData_ReadRange. False under any other backend. */
+bool CtrData_Locate(const char *path, uint64_t *outOffset, uint32_t *outSize);
+bool CtrData_ReadRange(uint64_t offset, void *dest, uint32_t size);
 
 #endif

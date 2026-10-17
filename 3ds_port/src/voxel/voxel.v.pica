@@ -32,6 +32,7 @@
 .out outpos position
 .out outtc0 texcoord0
 .out outtc1 texcoord1
+.out outtc2 texcoord2
 .out outclr color
 
 .alias inpos v0 ; x, y, z, shade
@@ -54,6 +55,7 @@
 	dp4 outpos.w, projection[3], r1
 
 	mov outtc0, intex
+	mov outtc2, intex
 
 	; r6 = the dapple pattern's coordinates
 	mov r6, zeros

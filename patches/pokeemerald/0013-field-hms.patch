@@ -1,0 +1,84 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: field HMs without the move
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/field_player_avatar.c b/src/field_player_avatar.c
+--- a/src/field_player_avatar.c
++++ b/src/field_player_avatar.c
+@@ -1316,6 +1316,12 @@
+                 break;
+             if (MonKnowsMove(&gPlayerParty[i], MOVE_SURF))
+                 return TRUE;
++#ifdef PLATFORM_3DS
++            // Field HMs without the move: any Pokemon but an egg (the badge
++            // is checked by the caller).
++            if (CtrExtras_Get("field_hms") && !GetMonData(&gPlayerParty[i], MON_DATA_IS_EGG))
++                return TRUE;
++#endif
+         }
+     }
+     return FALSE;
+diff --git a/src/scrcmd.c b/src/scrcmd.c
+--- a/src/scrcmd.c
++++ b/src/scrcmd.c
+@@ -1806,6 +1806,42 @@
+     return FALSE;
+ }
+ 
++#ifdef PLATFORM_3DS
++#include "constants/items.h"
++#include "constants/moves.h"
++// Field HMs without the move (OPTIONS, ENHANCEMENTS): Cut, Rock Smash,
++// Strength, Surf, Waterfall and Dive work with the badge alone (the scripts
++// still check it). The Pokemon shown using one is the first that could learn
++// it, or else the first in the party.
++static bool8 IsFieldHm(u16 move)
++{
++    return move == MOVE_CUT || move == MOVE_ROCK_SMASH || move == MOVE_STRENGTH
++        || move == MOVE_SURF || move == MOVE_WATERFALL || move == MOVE_DIVE;
++}
++
++static u8 FieldHmUser(u16 move)
++{
++    u8 i, first = PARTY_SIZE, tm = 0xFF;
++    u16 item;
++
++    for (item = ITEM_HM01; item <= ITEM_HM08; item++)
++        if (ItemIdToBattleMoveId(item) == move)
++            tm = item - ITEM_TM01;
++    for (i = 0; i < PARTY_SIZE; i++)
++    {
++        if (!GetMonData(&gPlayerParty[i], MON_DATA_SPECIES, NULL))
++            break;
++        if (GetMonData(&gPlayerParty[i], MON_DATA_IS_EGG))
++            continue;
++        if (first == PARTY_SIZE)
++            first = i;
++        if (tm != 0xFF && CanMonLearnTMHM(&gPlayerParty[i], tm))
++            return i;
++    }
++    return first;
++}
++#endif
++
+ bool8 ScrCmd_checkpartymove(struct ScriptContext *ctx)
+ {
+     u8 i;
+@@ -1824,6 +1860,18 @@
+             break;
+         }
+     }
++#ifdef PLATFORM_3DS
++    if (gSpecialVar_Result == PARTY_SIZE && CtrExtras_Get("field_hms") && IsFieldHm(move))
++    {
++        u8 user = FieldHmUser(move);
++
++        if (user != PARTY_SIZE)
++        {
++            gSpecialVar_Result = user;
++            gSpecialVar_0x8004 = GetMonData(&gPlayerParty[user], MON_DATA_SPECIES, NULL);
++        }
++    }
++#endif
+     return FALSE;
+ }
+ 

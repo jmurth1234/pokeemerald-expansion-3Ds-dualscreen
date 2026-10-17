@@ -36,7 +36,6 @@ void CtrInput_Update(CtrInput *state, const CtrInputSample *sample)
     if (!(buttons & CTR_KEY_DPAD)) state->held |= state->circleDirection;
     state->down = state->held & ~previous;
     state->up = previous & ~state->held;
-    state->resetDown = (state->physicalDown & CTR_KEY_X) != 0;
     state->touchDown = sample->touchActive && !state->touchActive;
     state->touchUp = state->touchActive && !sample->touchActive;
     state->touchActive = sample->touchActive;

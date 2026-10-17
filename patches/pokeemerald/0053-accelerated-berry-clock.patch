@@ -1,0 +1,155 @@
+Clock-driven berry growth and save-bound clock state for the 3DS port.
+Applies after 0052-timed-wild-encounters.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/clock.c b/src/clock.c
+--- a/src/clock.c
++++ b/src/clock.c
+@@ -11,6 +11,9 @@
+ #include "main.h"
+ #include "overworld.h"
+ #include "wallclock.h"
++#ifdef PLATFORM_3DS
++#include "3ds_daynight.h"
++#endif
+ 
+ static void UpdatePerDay(struct Time *localTime);
+ static void UpdatePerMinute(struct Time *localTime);
+@@ -18,6 +21,9 @@
+ static void InitTimeBasedEvents(void)
+ {
+     FlagSet(FLAG_SYS_CLOCK_SET);
++#ifdef PLATFORM_3DS
++    CtrDayNight_Reset();
++#endif
+     RtcCalcLocalTime();
+     gSaveBlock2Ptr->lastBerryTreeUpdate = gLocalTime;
+     VarSet(VAR_DAYS, gLocalTime.days);
+@@ -62,6 +68,15 @@
+ 
+     CalcTimeDifference(&difference, &gSaveBlock2Ptr->lastBerryTreeUpdate, localTime);
+     minutes = 24 * 60 * difference.days + 60 * difference.hours + difference.minutes;
++#ifdef PLATFORM_3DS
++    if (minutes >= 0)
++    {
++        unsigned bonus = CtrDayNight_TakeBerryMinutes();
++
++        if (bonus != 0)
++            BerryTreeTimeUpdate(bonus);
++    }
++#endif
+     if (minutes != 0)
+     {
+         if (minutes >= 0)
+diff --git a/src/overworld.c b/src/overworld.c
+--- a/src/overworld.c
++++ b/src/overworld.c
+@@ -1,6 +1,7 @@
+ #include "global.h"
+ #ifdef PLATFORM_3DS
+ #include "3ds_extras.h" // optional settings (OPTIONS pages)
++#include "3ds_daynight.h"
+ #endif
+ #include "overworld.h"
+ #include "battle_pyramid.h"
+@@ -1621,6 +1622,10 @@
+ void CB2_Overworld(void)
+ {
+     bool32 fading = (gPaletteFade.active != 0);
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_BerryDue())
++        DoTimeBasedEvents();
++#endif
+     if (fading)
+         SetVBlankCallback(NULL);
+     OverworldBasic();
+diff --git a/src/save.c b/src/save.c
+--- a/src/save.c
++++ b/src/save.c
+@@ -13,6 +13,11 @@
+ #include "trainer_hill.h"
+ #include "link.h"
+ #include "constants/game_stat.h"
++#ifdef PLATFORM_3DS
++#include "clock.h"
++#include "3ds_clock_store.h"
++#include "3ds_daynight.h"
++#endif
+ 
+ static u16 CalculateChecksum(void *, u16);
+ static bool8 ReadFlashSector(u8, struct SaveSector *);
+@@ -728,6 +733,10 @@
+     u32 *backupVar = gTrainerHillVBlankCounter;
+     u8 *tempAddr;
+ 
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_Active())
++        DoTimeBasedEvents();
++#endif
+     gTrainerHillVBlankCounter = NULL;
+     UpdateSaveAddresses();
+     switch (saveType)
+@@ -778,6 +787,10 @@
+     }
+ 
+     gTrainerHillVBlankCounter = backupVar;
++#ifdef PLATFORM_3DS
++    if (!gDamagedSaveSectors)
++        CtrClockStore_Save(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
+     return 0;
+ }
+ 
+@@ -807,6 +820,10 @@
+ {
+     if (gFlashMemoryPresent != TRUE)
+         return TRUE;
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_Active())
++        DoTimeBasedEvents();
++#endif
+     UpdateSaveAddresses();
+     CopyPartyAndObjectsToSave();
+     RestoreSaveBackupVarsAndIncrement(gRamSaveSectorLocations);
+@@ -841,6 +858,10 @@
+     CopySectorSignatureByte(NUM_SECTORS_PER_SLOT, gRamSaveSectorLocations);
+     if (gDamagedSaveSectors)
+         DoSaveFailedScreen(SAVE_NORMAL);
++#ifdef PLATFORM_3DS
++    if (!gDamagedSaveSectors)
++        CtrClockStore_Save(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
+     return FALSE;
+ }
+ 
+@@ -849,6 +870,10 @@
+     if (gFlashMemoryPresent != TRUE)
+         return TRUE;
+ 
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_Active())
++        DoTimeBasedEvents();
++#endif
+     UpdateSaveAddresses();
+     CopyPartyAndObjectsToSave();
+     RestoreSaveBackupVars(gRamSaveSectorLocations);
+@@ -884,6 +909,10 @@
+     if (gDamagedSaveSectors)
+         DoSaveFailedScreen(SAVE_LINK);
+ 
++#ifdef PLATFORM_3DS
++    if (finished && !gDamagedSaveSectors)
++        CtrClockStore_Save(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
+     return finished;
+ }
+ 
+@@ -905,6 +934,9 @@
+         status = TryLoadSaveSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
+         CopyPartyAndObjectsFromSave();
+         gSaveFileStatus = status;
++#ifdef PLATFORM_3DS
++        CtrClockStore_Load(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
+         gGameContinueCallback = 0;
+         break;
+     case SAVE_HALL_OF_FAME:

@@ -112,6 +112,7 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
         re.S,
     )
     path_pattern = re.compile(r'"([^"]+)"')
+    incbin_pattern = re.compile(r"INCBIN_[A-Z0-9]+\s*\([^)]*\)")
 
     result: list[tuple[Path, str, list[str], bool]] = []
     src_root = ROOT / "src"
@@ -157,6 +158,11 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
             else:
                 continue
             if not paths:
+                continue
+            # Text outside the INCBINs: a struct with members of its own
+            # (trainer_hill.h's sFloors_*, whose __("...") nicknames are no
+            # files), not one blob of assets.
+            if path_pattern.search(incbin_pattern.sub("", init)):
                 continue
 
             is_static = "static" in decl.split("=")[0]
@@ -252,7 +258,8 @@ def copy_or_concat_asset(obj_rel: str, symbol: str, rel_paths: list[str]) -> tup
         dst = FS_DIR / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-        return (f"{URI_PREFIX}{rel.replace('\\', '/')}", src.stat().st_size, [0])
+        path = URI_PREFIX + rel.replace("\\", "/")
+        return (path, src.stat().st_size, [0])
 
     obj_tag = obj_rel.replace("/", "_").replace(".o", "")
     out_rel = Path("generated") / "assets" / f"{obj_tag}__{symbol}.bin"
@@ -265,13 +272,18 @@ def copy_or_concat_asset(obj_rel: str, symbol: str, rel_paths: list[str]) -> tup
         for rel in rel_paths:
             src = ensure_asset(rel)
             if src is None:
-                return None
+                break
             data = src.read_bytes()
             offsets.append(total_size)
             fout.write(data)
             total_size += len(data)
+    # A member is missing: no truncated file left in the data directory.
+    if len(offsets) != len(rel_paths):
+        out_abs.unlink()
+        return None
 
-    return (f"{URI_PREFIX}{str(out_rel).replace('\\', '/')}", total_size, offsets)
+    path = URI_PREFIX + str(out_rel).replace("\\", "/")
+    return (path, total_size, offsets)
 
 
 def configure(argv: list[str] | None = None) -> None:

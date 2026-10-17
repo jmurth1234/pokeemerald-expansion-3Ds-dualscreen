@@ -86,6 +86,49 @@ void VoxelArena_Free(VoxelArena *arena, void *block)
     --arena->count;
 }
 
+int VoxelArena_PieceOf(const VoxelArena *arena, const void *block)
+{
+    uint32_t offset;
+    unsigned lo = 0, hi;
+
+    if (block == NULL || arena->base == NULL)
+        return -1;
+    offset = (uint32_t)((const uint8_t *)block - arena->base);
+    hi = arena->count;
+    while (lo < hi)
+    {
+        unsigned mid = (lo + hi) / 2;
+
+        if (arena->pieces[mid].offset < offset)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < arena->count && arena->pieces[lo].offset == offset ? (int)lo : -1;
+}
+
+uint32_t VoxelArena_LargestGapFreeing(const VoxelArena *arena, const bool *freed)
+{
+    uint32_t largest = 0, start = 0;
+
+    if (arena->base == NULL)
+        return 0;
+    /* A run ends at the next piece that stays; the last at the arena's end. */
+    for (unsigned i = 0; i <= arena->count; ++i)
+    {
+        uint32_t end;
+
+        if (i < arena->count && freed[i])
+            continue;
+        end = i == arena->count ? arena->size : arena->pieces[i].offset;
+        if (end - start > largest)
+            largest = end - start;
+        if (i < arena->count)
+            start = arena->pieces[i].offset + arena->pieces[i].size;
+    }
+    return largest;
+}
+
 uint32_t VoxelArena_LargestGap(const VoxelArena *arena)
 {
     uint32_t largest = 0;

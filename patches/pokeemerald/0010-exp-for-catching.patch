@@ -1,0 +1,41 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: EXP for catching
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/data/battle_scripts_2.s b/data/battle_scripts_2.s
+--- a/data/battle_scripts_2.s
++++ b/data/battle_scripts_2.s
+@@ -66,6 +66,8 @@
+ 	incrementgamestat GAME_STAT_POKEMON_CAPTURES
+ BattleScript_PrintCaughtMonInfo::
+ 	printstring STRINGID_GOTCHAPKMNCAUGHTPLAYER
++	setbyte sGIVEEXP_STATE, 0
++	getexp BS_TARGET
+ 	trysetcaughtmondexflags BattleScript_TryNicknameCaughtMon
+ 	printstring STRINGID_PKMNDATAADDEDTODEX
+ 	waitstate
+diff --git a/src/battle_script_commands.c b/src/battle_script_commands.c
+--- a/src/battle_script_commands.c
++++ b/src/battle_script_commands.c
+@@ -3281,8 +3281,22 @@
+         {
+             gBattleScripting.getexpState = 6; // goto last case
+         }
++#ifdef PLATFORM_3DS
++        // EXP for catching (OPTIONS, ENHANCEMENTS): BattleScript_PrintCaughtMonInfo
++        // runs getexp too; the target still has its HP when it was caught.
++        else if (gBattleMons[gBattlerFainted].hp != 0
++              && (!CtrExtras_Get("exp_catch") || (gBattleTypeFlags & BATTLE_TYPE_WALLY_TUTORIAL)))
++        {
++            gBattleScripting.getexpState = 6; // caught, and no EXP for it
++        }
++#endif
+         else
+         {
++#ifdef PLATFORM_3DS
++            // Caught: the catch fanfare plays, not the victory music.
++            if (gBattleMons[gBattlerFainted].hp != 0)
++                gBattleStruct->wildVictorySong = 1;
++#endif
+             gBattleScripting.getexpState++;
+             gBattleStruct->givenExpMons |= gBitTable[gBattlerPartyIndexes[gBattlerFainted]];
+         }

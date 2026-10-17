@@ -1,0 +1,91 @@
+Optional timed land encounters.
+Applies after 0051-native-name-prefix-order.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -1,6 +1,7 @@
+ #include "global.h"
+ #ifdef PLATFORM_3DS
+ #include "3ds_extras.h" // optional settings (OPTIONS pages)
++#include "3ds_encounters.h"
+ #endif
+ #include "wild_encounter.h"
+ #include "pokemon.h"
+@@ -50,6 +51,17 @@
+
+ #define HEADER_NONE 0xFFFF
+
++static const struct WildPokemonInfo *GetLandMonsInfo(u16 headerId)
++{
++    const struct WildPokemonHeader *header = &gWildMonHeaders[headerId];
++
++#ifdef PLATFORM_3DS
++    return CtrEncounters_Land(header->landMonsInfo, header->mapGroup, header->mapNum);
++#else
++    return header->landMonsInfo;
++#endif
++}
++
+ static u16 FeebasRandom(void);
+ static void FeebasSeedRng(u16 seed);
+ static bool8 IsWildLevelAllowedByRepel(u8 level);
+@@ -792,7 +804,7 @@
+         if (VisibleAt(x, y, NULL) != NULL)
+             continue;
+         water = MetatileBehavior_IsWaterWildEncounter(MapGridGetMetatileBehaviorAt(x, y));
+-        info = water ? gWildMonHeaders[headerId].waterMonsInfo : gWildMonHeaders[headerId].landMonsInfo;
++        info = water ? gWildMonHeaders[headerId].waterMonsInfo : GetLandMonsInfo(headerId);
+         if (info == NULL || !VisibleTileFits(x, y, water))
+             continue;
+         if (water && AreLegendariesInSootopolisPreventingEncounters())
+@@ -1017,11 +1029,11 @@
+     {
+         if (MetatileBehavior_IsLandWildEncounter(curMetatileBehavior) == TRUE)
+         {
+-            if (gWildMonHeaders[headerId].landMonsInfo == NULL)
++            if (GetLandMonsInfo(headerId) == NULL)
+                 return FALSE;
+             else if (prevMetatileBehavior != curMetatileBehavior && !AllowWildCheckOnNewMetatile())
+                 return FALSE;
+-            else if (WildEncounterCheck(gWildMonHeaders[headerId].landMonsInfo->encounterRate, FALSE) != TRUE)
++            else if (WildEncounterCheck(GetLandMonsInfo(headerId)->encounterRate, FALSE) != TRUE)
+                 return FALSE;
+
+             if (TryStartRoamerEncounter() == TRUE)
+@@ -1046,7 +1058,7 @@
+                 }
+
+                 // try a regular wild land encounter
+-                if (TryGenerateWildMon(gWildMonHeaders[headerId].landMonsInfo, WILD_AREA_LAND, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
++                if (TryGenerateWildMon(GetLandMonsInfo(headerId), WILD_AREA_LAND, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
+                 {
+                     BattleSetup_StartWildBattle();
+                     return TRUE;
+@@ -1159,7 +1171,7 @@
+     {
+         if (MetatileBehavior_IsLandWildEncounter(MapGridGetMetatileBehaviorAt(x, y)) == TRUE)
+         {
+-            if (gWildMonHeaders[headerId].landMonsInfo == NULL)
++            if (GetLandMonsInfo(headerId) == NULL)
+                 return FALSE;
+
+             if (TryStartRoamerEncounter() == TRUE)
+@@ -1171,7 +1183,7 @@
+             if (DoMassOutbreakEncounterTest() == TRUE)
+                 SetUpMassOutbreakEncounter(0);
+             else
+-                TryGenerateWildMon(gWildMonHeaders[headerId].landMonsInfo, WILD_AREA_LAND, 0);
++                TryGenerateWildMon(GetLandMonsInfo(headerId), WILD_AREA_LAND, 0);
+
+             BattleSetup_StartWildBattle();
+             return TRUE;
+@@ -1238,7 +1250,7 @@
+     headerId = GetCurrentMapWildMonHeaderId();
+     if (headerId == HEADER_NONE)
+         return SPECIES_NONE;
+-    landMonsInfo = gWildMonHeaders[headerId].landMonsInfo;
++    landMonsInfo = GetLandMonsInfo(headerId);
+     waterMonsInfo = gWildMonHeaders[headerId].waterMonsInfo;
+     // Neither
+     if (landMonsInfo == NULL && waterMonsInfo == NULL)

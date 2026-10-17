@@ -97,9 +97,22 @@ def relocations(obj: Path, section: str) -> list[tuple[int, str]]:
 
 
 def dump_section(obj: Path, section: str, tmp: Path) -> bytearray:
-    subprocess.check_call([tool("arm-none-eabi-objcopy"),
-                           "--dump-section", "%s=%s" % (section, tmp), str(obj)])
-    return bytearray(tmp.read_bytes())
+    import tempfile
+    with tempfile.NamedTemporaryFile(prefix="ctr_dump_", suffix=".bin", delete=False) as f:
+        tmp_path = Path(f.name)
+    # objcopy with no output file rewrites its input in place: every bundled
+    # object was rewritten while the same run went on to read its relocations,
+    # and on Windows a song now and then came out with none (0.4.0's release
+    # builds). The copy goes to a throwaway file; the object is only read.
+    copy_path = tmp_path.with_suffix(".o")
+    try:
+        subprocess.check_call([tool("arm-none-eabi-objcopy"),
+                               "--dump-section", "%s=%s" % (section, tmp_path), str(obj),
+                               str(copy_path)])
+        return bytearray(tmp_path.read_bytes())
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        copy_path.unlink(missing_ok=True)
 
 
 class Bundle:

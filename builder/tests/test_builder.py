@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 import zlib
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from emerald3ds_builder import pak, recipe as rcp, rom as romlib, vtree  # noqa: E402
+from emerald3ds_builder.build import Payload, build_pack
 from emerald3ds_builder.errors import BuilderError  # noqa: E402
 from emerald3ds_builder.install import install  # noqa: E402
 
@@ -122,7 +124,7 @@ class RomTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(BuilderError) as ctx:
                 romlib.load_rom(self._write(tmp, bytes(data)))
-            self.assertIn("not the one this release was built from", ctx.exception.message)
+            self.assertIn("not an unmodified one", ctx.exception.message)
 
     def test_recipe_rom_is_accepted(self):
         # A release's recipe names its own ROM (an expansion build, say); the
@@ -134,6 +136,51 @@ class RomTests(unittest.TestCase):
             rom = romlib.load_rom(self._write(tmp, bytes(data)), sha1)
             self.assertEqual(rom.sha1, sha1)
 
+    def test_trimmed_expansion_rom_matches_32_mib_recipe(self):
+        data = bytearray(b"\xff" * romlib.ROM_SIZES[-1])
+        data[0xA0:0xB0] = b"POKEMON EMERBPEE"
+        data[romlib.ROM_SIZE + 16] = 0
+        sha1 = hashlib.sha1(data).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write(tmp, bytes(data).rstrip(b"\xff"))
+            rom = romlib.load_rom(source, (sha1,))
+            self.assertEqual(len(rom.data), romlib.ROM_SIZES[-1])
+            self.assertEqual(rom.sha1, sha1)
+            with self.assertRaises(BuilderError):
+                romlib.load_rom(source)
+
+    def test_modified_spanish_emerald_is_rejected(self):
+        data = bytearray(b"\xff" * romlib.ROM_SIZE)
+        data[0xA0:0xB0] = b"POKEMON EMERBPES"
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(BuilderError) as ctx:
+                romlib.load_rom(self._write(tmp, bytes(data)))
+            self.assertIn(romlib.SPANISH_SHA1, str(ctx.exception))
+
+    def test_modified_french_emerald_is_rejected(self):
+        data = bytearray(b"\xff" * romlib.ROM_SIZE)
+        data[0xA0:0xB0] = b"POKEMON EMERBPEF"
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(BuilderError) as ctx:
+                romlib.load_rom(self._write(tmp, bytes(data)))
+            self.assertIn(romlib.FRENCH_SHA1, str(ctx.exception))
+
+    def test_each_region_requires_its_exact_hash_even_when_trimmed_or_zipped(self):
+        # Synthetic fixtures substitute the known clean hash, not the validation.
+        for code in ("BPEE", "BPES", "BPEF"):
+            data = bytearray(b"\xff" * romlib.ROM_SIZE)
+            data[0xA0:0xB0] = b"POKEMON EMER" + code.encode()
+            sha = hashlib.sha1(data).hexdigest()
+            with tempfile.TemporaryDirectory() as tmp, patch.dict(romlib.ROM_PROFILES, {code: sha}):
+                full = self._write(tmp, data)
+                trimmed = self._write(tmp, data[:0xC0], "trimmed.gba")
+                zipped = Path(tmp) / "game.zip"
+                with zipfile.ZipFile(zipped, "w") as zf:
+                    zf.writestr("game.gba", data[:0xC0])
+                for path in (full, trimmed, zipped):
+                    loaded = romlib.load_rom(path)
+                    self.assertEqual((loaded.code, loaded.sha1, loaded.data), (code, sha, data))
+
     def test_zip_must_hold_one_rom(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "r.zip"
@@ -142,6 +189,58 @@ class RomTests(unittest.TestCase):
                 zf.writestr("b.gba", b"2")
             with self.assertRaises(BuilderError):
                 romlib.load_rom(path)
+
+
+class RegionalBuildTests(unittest.TestCase):
+    def test_matching_spanish_recipe_builds_and_english_recipe_is_rejected(self):
+        data = bytearray(b"\xff" * romlib.ROM_SIZE)
+        data[0xA0:0xB0] = b"POKEMON EMERBPES"
+        data[0x200:0x204] = b"TEST"
+        sha = hashlib.sha1(data).hexdigest()
+        crc = zlib.crc32(b"TEST") & 0xFFFFFFFF
+        abi = pak.engine_abi([("game/test.bin", 4, crc)])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(romlib.ROM_PROFILES, {"BPES": sha}):
+            root = Path(tmp)
+            source = root / "spanish.gba"
+            source.write_bytes(data)
+            recipe = rcp.Recipe(engine_abi=abi, rom_sha1=romlib.SUPPORTED_SHA1, release="test",
+                                entries=[{"path": "game/test.bin", "size": 4, "crc": crc,
+                                          "ops": [["C", 0x200, 4]]}])
+            recipe.save(root / "emerald3ds.recipe")
+            output = root / "output.pak"
+            with self.assertRaises(BuilderError) as ctx:
+                build_pack(source, Payload(root), output)
+            self.assertIn("BPES", str(ctx.exception))
+            self.assertFalse(output.exists())
+            recipe.rom_sha1 = sha
+            recipe.save(root / "emerald3ds.recipe")
+            build_pack(source, Payload(root), output)
+            with pak.PakReader(output) as reader:
+                self.assertEqual(reader.read("game/test.bin"), b"TEST")
+                self.assertEqual(reader.rom_sha1, bytes.fromhex(sha))
+
+
+class VariantPayloadTests(unittest.TestCase):
+    def test_build_picks_the_variant_made_from_the_rom(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+        import build_web_payload
+        from contextlib import redirect_stdout
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            with redirect_stdout(io.StringIO()):
+                synthetic = build_web_payload.make_synthetic(Path(tmp) / "s")
+            payload = Payload(synthetic["payload"])
+            self.assertEqual([v.root.name for v in payload.variants()], ["payload", "es"])
+            for rom, name in ((synthetic["rom"], "payload"), (synthetic["rom_es"], "es")):
+                data = rom.read_bytes() + b"\xff" * (romlib.ROM_SIZE - rom.stat().st_size)
+                sha = hashlib.sha1(data).hexdigest()
+                checked = romlib.Rom(data=data, sha1=sha, title="SYNTHETIC", code="TEST", source=rom)
+                info = build_pack(rom, payload, Path(tmp) / ("%s.pak" % name), runner="inprocess",
+                                  rom=checked)
+                self.assertEqual(info["payload"].root.name, name)
+                self.assertEqual(info["payload"].voxelgen, synthetic["payload"] / "voxelgen")
+                with pak.PakReader(Path(tmp) / ("%s.pak" % name)) as reader:
+                    self.assertEqual(reader.rom_sha1.hex(), sha)
 
 
 class InstallTests(unittest.TestCase):
@@ -178,7 +277,7 @@ class VtreeTests(unittest.TestCase):
             "tilesets": {"gTileset_A": 0x100, "gTileset_B": 0x120},
             "layouts_table_label": "gMapLayouts",
             "layouts": [{"id": "LAYOUT_X", "name": "X_Layout", "blockdata_filepath": "data/layouts/X/map.bin",
-                         "border_filepath": "data/layouts/X/border.bin", "rom": 0x200}],
+                         "border_filepath": "data/layouts/X/border.bin", "rom": 0x200, "layout_version": "frlg"}],
             "maps": [{"folder": "Here", "id": "MAP_HERE", "name": "Here", "group": 0, "num": 0, "rom": 0x400},
                      {"folder": "There", "id": "MAP_THERE", "name": "There", "group": 0, "num": 1, "rom": 0x400}],
             "map_types": {"3": "MAP_TYPE_ROUTE"},
@@ -197,6 +296,7 @@ class VtreeTests(unittest.TestCase):
             vtree.build_tree(bytes(rom), r, root)
             layouts = json.loads((root / "data/layouts/layouts.json").read_text())["layouts"]
             self.assertEqual((layouts[0]["width"], layouts[0]["height"]), (20, 30))
+            self.assertEqual(layouts[0]["layout_version"], "frlg")
             self.assertEqual((layouts[0]["primary_tileset"], layouts[0]["secondary_tileset"]),
                              ("gTileset_A", "gTileset_B"))
             m = json.loads((root / "data/maps/Here/map.json").read_text())

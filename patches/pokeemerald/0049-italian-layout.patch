@@ -1,0 +1,83 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Italian layout, units, berry order and team EXP message
+Applies after 0048-french-native-pokedex-units.patch; apply with tools/bootstrap.py.
+
+The Italian variant behaves like the French one where the retail ROM does: metric
+Pokédex units with a decimal comma, the widened invalid-move type table, and the
+team EXP message (absent from the Italian ROM, so it is authored here, as the
+French one is). Italian berry names are one word (BACCARANCIA) where the Spanish
+and French ones are two, so the berry count string keeps them joined.
+
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -59,6 +59,10 @@
+ static const u8 sText_PkmnGainedEXP[] = _("{B_BUFF1} gained{B_BUFF2}\n{B_BUFF3} EXP. Points!\p");
+ #if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
+ static const u8 sText_PkmnTeamGainedEXP[] = _("Le reste de votre équipe\ngagne des Points EXP.!\p");
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_ITALIAN
++// Italian wording of the port's own message: the retail Italian ROM has no
++// equivalent line (the French one is authored the same way).
++static const u8 sText_PkmnTeamGainedEXP[] = _("Il resto della squadra\nriceve punti ESP.!\p");
+ #else
+ static const u8 sText_PkmnTeamGainedEXP[] = _("The rest of your team gained\nEXP. Points!\p");
+ #endif
+@@ -1334,7 +1338,7 @@
+ 
+ // For displaying names of invalid moves.
+ // This is large enough that the text for TYPE_ELECTRIC will exceed TEXT_BUFF_ARRAY_COUNT.
+-#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
+ static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][22] =
+ #else
+ static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][17] =
+--- a/src/pokedex.c
++++ b/src/pokedex.c
+@@ -276,7 +276,7 @@
+ static void Task_ExitCaughtMonPage(u8);
+ static void SpriteCB_SlideCaughtMonToCenter(struct Sprite *sprite);
+ static void PrintMonInfo(u32 num, u32, u32 owned, u32 newEntry);
+-#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
+ #define NATIVE_DEX_MEASUREMENT_X 0x90
+ #else
+ #define NATIVE_DEX_MEASUREMENT_X 0x81
+@@ -4282,11 +4282,11 @@
+ 
+ static void PrintMonHeight(u16 height, u8 left, u8 top)
+ {
+-#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
+     u8 buffer[16];
+     u8 *end = ConvertIntToDecimalStringN(buffer, height / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
+ 
+-#if GAME_LANGUAGE == LANGUAGE_FRENCH
++#if GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN
+     *end++ = CHAR_COMMA;
+ #else
+     *end++ = CHAR_PERIOD;
+@@ -4341,11 +4341,11 @@
+ 
+ static void PrintMonWeight(u16 weight, u8 left, u8 top)
+ {
+-#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
+     u8 buffer[16];
+     u8 *end = ConvertIntToDecimalStringN(buffer, weight / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
+ 
+-#if GAME_LANGUAGE == LANGUAGE_FRENCH
++#if GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN
+     *end++ = CHAR_COMMA;
+ #else
+     *end++ = CHAR_PERIOD;
+--- a/src/item.c
++++ b/src/item.c
+@@ -113,6 +113,10 @@
+     txtPtr = StringCopy(dst, berryString);
+     *txtPtr = CHAR_SPACE;
+     StringCopy(txtPtr + 1, berryName);
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_ITALIAN
++    // Italian berry names already start with BACCA: one word, no space.
++    txtPtr = StringCopy(dst, berryString);
++    StringCopy(txtPtr, berryName);
+ #else
+     txtPtr = StringCopy(dst, berryName);
+     *txtPtr = CHAR_SPACE;

@@ -1,0 +1,18 @@
+Emerald 3DS changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Spanish type move table width
+Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/battle_message.c b/src/battle_message.c
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -1325,7 +1325,11 @@
+ 
+ // For displaying names of invalid moves.
+ // This is large enough that the text for TYPE_ELECTRIC will exceed TEXT_BUFF_ARRAY_COUNT.
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][22] =
++#else
+ static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][17] =
++#endif
+ {
+     [TYPE_NORMAL]   = _("a NORMAL move"),
+     [TYPE_FIGHTING] = _("a FIGHTING move"),

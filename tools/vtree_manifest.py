@@ -21,6 +21,11 @@ from pathlib import Path
 
 CONNECTION_DIRECTIONS = {1: "down", 2: "up", 3: "left", 4: "right", 5: "dive", 6: "emerge"}
 
+# Tileset animation frames a model's texels follow (voxel_building_specs.py
+# FOUNTAIN_ANIM: the jet of Rustboro's fountain), raw 4bpp in the ROM.
+ANIM_FRAMES = ["data/tilesets/secondary/rustboro/anim/fountain/0.4bpp",
+               "data/tilesets/secondary/rustboro/anim/fountain/1.4bpp"]
+
 
 def gba_symbols(nm_tool: str, elf: Path) -> dict[str, int]:
     out = subprocess.check_output([nm_tool, "--defined-only", str(elf)], text=True, errors="ignore")
@@ -55,6 +60,7 @@ def binary_inputs(root: Path) -> list[str]:
             for i in range(16):
                 if (folder / "palettes" / ("%02d.gbapal" % i)).exists():
                     files.append(rel + "/palettes/%02d.gbapal" % i)
+    files += [f for f in ANIM_FRAMES if (root / f).exists()]
     # The intro's leaves scene, for scripts/gen_intro_margins.py.
     scene = root / "graphics/intro/scene_1"
     files += [p.relative_to(root).as_posix() for p in
@@ -82,6 +88,8 @@ def metadata(root: Path, syms: dict[str, int]) -> dict:
     meta["layouts"] = []
     for entry in layouts["layouts"]:
         item = {"id": entry["id"]}
+        if "layout_version" in entry:
+            item["layout_version"] = entry["layout_version"]
         if "name" in entry:
             item.update(name=entry["name"], blockdata_filepath=entry["blockdata_filepath"],
                         border_filepath=entry["border_filepath"], rom=syms.get(entry["name"]))
