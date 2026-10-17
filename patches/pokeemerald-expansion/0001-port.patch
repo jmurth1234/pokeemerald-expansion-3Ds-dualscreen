@@ -2230,6 +2230,21 @@ index 73f98f31..8072c692 100644
  	struct_field o_MusicPlayerTrack_unk_3C, 4
  	struct_field o_MusicPlayerTrack_cmdPtr, 4
  	struct_field o_MusicPlayerTrack_patternStack, 12
+diff --git c/data/battle_scripts_2.s w/data/battle_scripts_2.s
+index 9475895a..c7c899f3 100755
+--- c/data/battle_scripts_2.s
++++ w/data/battle_scripts_2.s
+@@ -342,3 +342,10 @@ BattleScript_ActionThrowBait::
+ 	waitmessage B_WAIT_TIME_LONG
+ 	playanimation BS_ATTACKER, B_ANIM_POKEBLOCK_THROW
+ 	end
++
++@ 3DS instant victory uses the native faint/EXP/replacement pipeline.
++BattleScript_CheatFaintTarget::
++	healthbarupdate BS_TARGET
++	datahpupdate BS_TARGET, ASSURANCE_IGNORE
++	tryfaintmon BS_TARGET
++	end
 diff --git c/data/contest_ai_scripts.s w/data/contest_ai_scripts.s
 index f04e022b..e896dcb7 100644
 --- c/data/contest_ai_scripts.s
@@ -3786,6 +3801,18 @@ index 4d8b8750..258ca56b 100644
 +void DisplayItemMessageInBattlePyramid(u8 taskId, const u8 *str, void (*callback)(u8 taskId));
  
  #endif // GUARD_BATTLE_PYRAMID_BAG_H
+diff --git c/include/battle_scripts.h w/include/battle_scripts.h
+index f52800db..0eca0215 100644
+--- c/include/battle_scripts.h
++++ w/include/battle_scripts.h
+@@ -231,6 +231,7 @@ extern const u8 BattleScript_BallThrow[];
+ extern const u8 BattleScript_BallThrowByWally[];
+ extern const u8 BattleScript_SafariBallThrow[];
+ extern const u8 BattleScript_SuccessBallThrow[];
++extern const u8 BattleScript_CheatFaintTarget[];
+ extern const u8 BattleScript_WallyBallThrow[];
+ extern const u8 BattleScript_ShakeBallThrow[];
+ extern const u8 BattleScript_TrainerBallBlock[];
 diff --git c/include/blit.h w/include/blit.h
 index 139916f6..7e75159f 100644
 --- c/include/blit.h
@@ -10486,10 +10513,18 @@ index f3a1186d..1d6f19ad 100644
  {
      DestroyTask(taskId);
 diff --git c/src/battle_main.c w/src/battle_main.c
-index 46af80f3..ff780dc9 100644
+index 46af80f3..ac0ed2da 100644
 --- c/src/battle_main.c
 +++ w/src/battle_main.c
-@@ -78,6 +78,9 @@
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "battle.h"
+ #include "battle_anim.h"
+ #include "battle_ai_main.h"
+@@ -78,6 +81,9 @@
  #include "constants/trainers.h"
  #include "constants/weather.h"
  #include "cable_club.h"
@@ -10499,7 +10534,7 @@ index 46af80f3..ff780dc9 100644
  
  extern const struct BgTemplate gBattleBgTemplates[];
  extern const struct WindowTemplate *const gBattleWindowTemplates[];
-@@ -239,7 +242,7 @@ EWRAM_DATA bool8 gLastUsedBallMenuPresent = FALSE;
+@@ -239,7 +245,7 @@ EWRAM_DATA bool8 gLastUsedBallMenuPresent = FALSE;
  EWRAM_DATA u8 gPartyCriticalHits[PARTY_SIZE] = {0};
  EWRAM_DATA u8 gCategoryIconSpriteId = 0;
  
@@ -10508,7 +10543,73 @@ index 46af80f3..ff780dc9 100644
  COMMON_DATA void (*gBattleMainFunc)(void) = NULL;
  COMMON_DATA struct BattleResults gBattleResults = {0};
  COMMON_DATA u8 gLeveledUpInBattle = 0;
-@@ -3908,6 +3911,15 @@ static void HandleTurnActionSelectionState(void)
+@@ -2748,7 +2754,11 @@ static void ClearSetBScriptingStruct(void)
+     #if TESTING
+     gBattleScripting.battleStyle = OPTIONS_BATTLE_STYLE_SET;
+     #endif
++    #ifdef PLATFORM_3DS
++    gBattleScripting.expOnCatch = CtrExtras_Get("exp_catch") != 0;
++#else
+     gBattleScripting.expOnCatch = (GetConfig(B_EXP_CATCH) >= GEN_6);
++#endif
+     gBattleScripting.specialTrainerBattleType = specialBattleType;
+ }
+ 
+@@ -3786,9 +3796,53 @@ enum
+     STATE_SELECTION_SCRIPT_MAY_RUN
+ };
+ 
++#ifdef PLATFORM_3DS
++static void CheatAfterFaint(void)
++{
++    if (HandleFaintedMonActions())
++        return;
++    gBattleStruct->eventState.faintedAction = 0;
++    for (u32 i = 0; i < 5; ++i)
++        gBattleCommunication[i] = 0;
++    if (gBattleOutcome != 0)
++    {
++        gCurrentActionFuncId = B_ACTION_FINISHED;
++        SetBattleCallback(RunTurnActionsFunctions);
++        return;
++    }
++    SetBattleCallback(HandleTurnActionSelectionState);
++}
++
++static bool8 TryCheatFaintOpponent(void)
++{
++    if (!CtrExtras_Get("instant_victory") || gBattleControllerExecFlags
++        || (gBattleTypeFlags & (BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED | BATTLE_TYPE_SAFARI | BATTLE_TYPE_CATCH_TUTORIAL)))
++        return FALSE;
++    for (enum BattlerId battler = 0; battler < gBattlersCount; ++battler)
++        if (gBattleCommunication[battler] != STATE_TURN_START_RECORD)
++            return FALSE;
++    for (enum BattlerId battler = 0; battler < gBattlersCount; ++battler)
++    {
++        if (IsOnPlayerSide(battler) || !gBattleMons[battler].hp || (gAbsentBattlerFlags & (1u << battler)))
++            continue;
++        gBattlerAttacker = GetBattlerAtPosition(B_POSITION_PLAYER_LEFT);
++        gBattlerTarget = battler;
++        gBattleStruct->passiveHpUpdate[battler] = gBattleMons[battler].hp;
++        SetBattleCallback(CheatAfterFaint);
++        BattleScriptExecute(BattleScript_CheatFaintTarget);
++        return TRUE;
++    }
++    return FALSE;
++}
++#endif
++
+ static void HandleTurnActionSelectionState(void)
+ {
+     s32 i;
++#ifdef PLATFORM_3DS
++    if (TryCheatFaintOpponent())
++        return;
++#endif
+ 
+     gBattleCommunication[ACTIONS_CONFIRMED_COUNT] = 0;
+     for (enum BattlerId battlerIndex = 0; battlerIndex < gBattlersCount; battlerIndex++)
+@@ -3908,6 +3962,15 @@ static void HandleTurnActionSelectionState(void)
                                                              i);
                          }
  
@@ -10524,7 +10625,7 @@ index 46af80f3..ff780dc9 100644
                          BtlController_EmitChooseMove(battler, B_COMM_TO_CONTROLLER, IsDoubleBattle() != 0, FALSE, &moveInfo);
                          MarkBattlerForControllerExec(battler);
                      }
-@@ -4144,6 +4156,14 @@ static void HandleTurnActionSelectionState(void)
+@@ -4144,6 +4207,14 @@ static void HandleTurnActionSelectionState(void)
                                      gimmick = gBattleStruct->gimmick.usableGimmick[battler];
                                  TestRunner_Battle_CheckChosenMove(battler, gChosenMoveByBattler[battler], gBattleStruct->moveTarget[battler], gimmick);
                              }
@@ -10539,7 +10640,7 @@ index 46af80f3..ff780dc9 100644
                          }
                          break;
                      }
-@@ -5317,6 +5337,15 @@ static void FreeResetData_ReturnToOvOrDoEvolutions(void)
+@@ -5317,6 +5388,15 @@ static void FreeResetData_ReturnToOvOrDoEvolutions(void)
  {
      if (!gPaletteFade.active)
      {
@@ -10555,7 +10656,7 @@ index 46af80f3..ff780dc9 100644
          memset(&gBattleMons, 0, sizeof(struct BattlePokemon) * MAX_BATTLERS_COUNT);
          gIsFishingEncounter = FALSE;
          gIsSurfingEncounter = FALSE;
-@@ -5351,6 +5380,7 @@ static void FreeResetData_ReturnToOvOrDoEvolutions(void)
+@@ -5351,6 +5431,7 @@ static void FreeResetData_ReturnToOvOrDoEvolutions(void)
          }
      }
  
@@ -10563,7 +10664,7 @@ index 46af80f3..ff780dc9 100644
      FreeAllWindowBuffers();
      if (!(gBattleTypeFlags & BATTLE_TYPE_LINK))
      {
-@@ -5365,6 +5395,7 @@ static void FreeResetData_ReturnToOvOrDoEvolutions(void)
+@@ -5365,6 +5446,7 @@ static void FreeResetData_ReturnToOvOrDoEvolutions(void)
          FreeBattleResources();
          FreeBattleSpritesData();
      }
@@ -10625,10 +10726,18 @@ index 64154442..aabc4426 100644
      FillWindowPixelBuffer(WIN_MSG, PIXEL_FILL(1));
      DisplayMessageAndContinueTask(taskId, WIN_MSG, 0xA, 0xD, FONT_NORMAL, GetPlayerTextSpeedDelay(), str, callback);
 diff --git c/src/battle_script_commands.c w/src/battle_script_commands.c
-index 2d8de986..cdfd8ec1 100644
+index 2d8de986..5ba13071 100644
 --- c/src/battle_script_commands.c
 +++ w/src/battle_script_commands.c
-@@ -3044,6 +3044,12 @@ static void Cmd_endselectionscript(void)
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "battle.h"
+ #include "battle_hold_effects.h"
+ #include "battle_message.h"
+@@ -3044,6 +3047,12 @@ static void Cmd_endselectionscript(void)
      gBattleStruct->battlerState[gBattlerAttacker].selectionScriptFinished = TRUE;
  }
  
@@ -10641,7 +10750,7 @@ index 2d8de986..cdfd8ec1 100644
  static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr, const u8 *nextInstr)
  {
      if (B_TERRAIN_BG_CHANGE == FALSE && animId == B_ANIM_RESTORE_BG)
-@@ -3066,7 +3072,7 @@ static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr,
+@@ -3066,7 +3075,7 @@ static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr,
       || animId == B_ANIM_TERA_ACTIVATE
       || animId == B_ANIM_FORM_CHANGE_INSTANT)
      {
@@ -10650,7 +10759,7 @@ index 2d8de986..cdfd8ec1 100644
          MarkBattlerForControllerExec(battler);
          gBattlescriptCurrInstr = nextInstr;
      }
-@@ -3082,7 +3088,7 @@ static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr,
+@@ -3082,7 +3091,7 @@ static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr,
            || animId == B_ANIM_SNOW_CONTINUES
            || animId == B_ANIM_FOG_CONTINUES)
      {
@@ -10659,7 +10768,7 @@ index 2d8de986..cdfd8ec1 100644
          MarkBattlerForControllerExec(battler);
          gBattlescriptCurrInstr = nextInstr;
      }
-@@ -3092,7 +3098,7 @@ static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr,
+@@ -3092,7 +3101,7 @@ static void PlayAnimation(enum BattlerId battler, u8 animId, const u16 *argPtr,
      }
      else
      {
@@ -10668,7 +10777,7 @@ index 2d8de986..cdfd8ec1 100644
          MarkBattlerForControllerExec(battler);
          gBattlescriptCurrInstr = nextInstr;
      }
-@@ -3112,8 +3118,16 @@ static void Cmd_playanimation_var(void)
+@@ -3112,8 +3121,16 @@ static void Cmd_playanimation_var(void)
      CMD_ARGS(u8 battler, const u8 *animIdPtr, const u16 *argPtr);
  
      enum BattlerId battler = GetBattlerForBattleScript(cmd->battler);
@@ -10685,7 +10794,7 @@ index 2d8de986..cdfd8ec1 100644
  
  static void Cmd_jumpfifsemiinvulnerable(void)
  {
-@@ -8156,8 +8170,10 @@ static bool32 CriticalCapture(u32 odds)
+@@ -8156,8 +8173,10 @@ static bool32 CriticalCapture(u32 odds)
  
  static u32 ComputeBallShakeOdds(u32 odds)
  {
@@ -10698,6 +10807,15 @@ index 2d8de986..cdfd8ec1 100644
      return odds;
  }
  
+@@ -8177,7 +8196,7 @@ static void SetBallThrowShakes(void)
+     gBattleSpritesDataPtr->animationData->criticalCaptureSuccess = FALSE;
+ 
+     // Master Ball check occurs before critical capture check
+-    if (odds == CAPTURE_GUARANTEED || IsVictoryCatchGuaranteed())
++    if (odds == CAPTURE_GUARANTEED || IsVictoryCatchGuaranteed() || CtrExtras_Get("always_catch"))
+     {
+         FinalizeCapture();
+         return;
 diff --git c/src/battle_setup.c w/src/battle_setup.c
 index 6024da3c..809fa16c 100644
 --- c/src/battle_setup.c
@@ -10860,6 +10978,29 @@ index abe49bd2..4a6a5c89 100644
      }
      if (++task->tTimer >= 40)
      {
+diff --git c/src/battle_util.c w/src/battle_util.c
+index 85523e06..34c3678a 100644
+--- c/src/battle_util.c
++++ w/src/battle_util.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "battle.h"
+ #include "battle_anim.h"
+ #include "battle_anim_scripts.h"
+@@ -9631,6 +9634,10 @@ bool32 MoveEffectIsGuaranteed(enum BattlerId battler, enum Ability battlerAbilit
+ 
+ bool32 IsGen6ExpShareEnabled(void)
+ {
++#ifdef PLATFORM_3DS
++    if (CtrExtras_Get("exp_share"))
++        return TRUE;
++#endif
+     if (I_EXP_SHARE_FLAG <= TEMP_FLAGS_END)
+         return FALSE;
+ 
 diff --git c/src/berry_blender.c w/src/berry_blender.c
 index f9be7d11..bef60006 100644
 --- c/src/berry_blender.c
@@ -11012,6 +11153,27 @@ index fdc777f8..2fdb3cbb 100644
 +#endif
 +    return sGpuBgConfigs2[bg].tilemap == NULL;
  }
+diff --git c/src/bike.c w/src/bike.c
+index 7ca329d0..cf1e69d1 100644
+--- c/src/bike.c
++++ w/src/bike.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "bike.h"
+ #include "event_object_movement.h"
+ #include "field_player_avatar.h"
+@@ -1361,7 +1364,7 @@ void Bike_HandleBumpySlopeJump(void)
+ 
+ bool32 IsRunningDisallowed(u8 metatile)
+ {
+-    if ((OW_RUNNING_INDOORS == GEN_3 && !gMapHeader.allowRunning) || IsRunningDisallowedByMetatile(metatile) == TRUE)
++    if ((!gMapHeader.allowRunning && !CtrExtras_Get("run_indoors")) || IsRunningDisallowedByMetatile(metatile) == TRUE)
+         return TRUE;
+ 
+     return FALSE;
 diff --git c/src/blit.c w/src/blit.c
 index f43932b4..585f83cb 100644
 --- c/src/blit.c
@@ -11110,6 +11272,43 @@ index bc407fa3..f7d68f7a 100644
      DestroyTask(taskId);
      SetMainCallback2(CB2_FadeAndDoReset);
  }
+diff --git c/src/clock.c w/src/clock.c
+index 00cffff0..28ec9e6b 100644
+--- c/src/clock.c
++++ w/src/clock.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_daynight.h"
++#endif
+ #include "berry.h"
+ #include "clock.h"
+ #include "dewford_trend.h"
+@@ -23,6 +26,9 @@ static void UpdatePerMinute(struct Time *localTime);
+ 
+ void InitTimeBasedEvents(void)
+ {
++#ifdef PLATFORM_3DS
++    CtrDayNight_Reset();
++#endif
+     FlagSet(FLAG_SYS_CLOCK_SET);
+     RtcCalcLocalTime();
+     gSaveBlock2Ptr->lastBerryTreeUpdate = gLocalTime;
+@@ -86,6 +92,14 @@ static void UpdatePerMinute(struct Time *localTime)
+ 
+     CalcTimeDifference(&difference, &gSaveBlock2Ptr->lastBerryTreeUpdate, localTime);
+     minutes = 24 * 60 * difference.days + 60 * difference.hours + difference.minutes;
++#ifdef PLATFORM_3DS
++    if (minutes >= 0)
++    {
++        unsigned bonus = CtrDayNight_TakeBerryMinutes();
++        if (bonus)
++            BerryTreeTimeUpdate(bonus);
++    }
++#endif
+     if (minutes != 0)
+     {
+         if (minutes >= 0)
 diff --git c/src/contest.c w/src/contest.c
 index 48ca171f..d2cef005 100644
 --- c/src/contest.c
@@ -11162,6 +11361,47 @@ index 32ce9172..95a4e94f 100644
      {MAPSEC_NONE, MAPSEC_ROUTE_114, MAPSEC_ROUTE_114, MAPSEC_FALLARBOR_TOWN, MAPSEC_ROUTE_113, MAPSEC_ROUTE_113, MAPSEC_ROUTE_113, MAPSEC_ROUTE_113, MAPSEC_ROUTE_111, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_ROUTE_119, MAPSEC_FORTREE_CITY, MAPSEC_ROUTE_120, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE},
      {MAPSEC_NONE, MAPSEC_ROUTE_114, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_MT_CHIMNEY, MAPSEC_MT_CHIMNEY, MAPSEC_ROUTE_111, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_ROUTE_119, MAPSEC_NONE, MAPSEC_ROUTE_120, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE},
      {MAPSEC_ROUTE_115, MAPSEC_ROUTE_114, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_MT_CHIMNEY, MAPSEC_MT_CHIMNEY, MAPSEC_ROUTE_111, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_ROUTE_119, MAPSEC_NONE, MAPSEC_ROUTE_120, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_SAFARI_ZONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE},
+diff --git c/src/daycare.c w/src/daycare.c
+index 264f0100..a0c77e2e 100644
+--- c/src/daycare.c
++++ w/src/daycare.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "pokemon.h"
+ #include "battle.h"
+ #include "daycare.h"
+@@ -1129,6 +1132,28 @@ static u32 GetEggCyclesToSubtract(void)
+ 
+ static bool32 TryToHatchEgg(struct DayCare *daycare)
+ {
++#ifdef PLATFORM_3DS
++    static u8 fastSteps;
++    if (CtrExtras_Get("fast_eggs"))
++    {
++        for (u32 i = 0; i < gPartiesCount[B_TRAINER_PLAYER]; ++i)
++        {
++            struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][i];
++            if (!GetMonData(mon, MON_DATA_IS_EGG) || GetMonData(mon, MON_DATA_SANITY_IS_BAD_EGG))
++                continue;
++            if (++fastSteps >= 5)
++            {
++                u32 zero = 0;
++                fastSteps = 0;
++                SetMonData(mon, MON_DATA_FRIENDSHIP, &zero);
++                gSpecialVar_0x8004 = i;
++                return TRUE;
++            }
++            return FALSE;
++        }
++    }
++    fastSteps = 0;
++#endif
+     daycare->stepCounter++;
+     if (daycare->stepCounter < GetEggCycleLength())
+         return FALSE;
 diff --git c/src/decompress.c w/src/decompress.c
 index 8030c726..137ccdbf 100644
 --- c/src/decompress.c
@@ -11488,10 +11728,18 @@ index 54a558fd..79a72c7a 100644
      {
          return FALSE;
 diff --git c/src/event_object_movement.c w/src/event_object_movement.c
-index 29286bdf..c63f12ce 100644
+index 29286bdf..c5053058 100644
 --- c/src/event_object_movement.c
 +++ w/src/event_object_movement.c
-@@ -42,6 +42,9 @@
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "malloc.h"
+ #include "battle_anim.h"
+ #include "battle_pyramid.h"
+@@ -42,6 +45,9 @@
  #include "util.h"
  #include "wild_encounter.h"
  #include "wild_encounter_ow.h"
@@ -11501,7 +11749,7 @@ index 29286bdf..c63f12ce 100644
  #include "constants/event_object_movement.h"
  #include "constants/abilities.h"
  #include "constants/battle.h"
-@@ -1693,7 +1696,7 @@ void RemoveObjectEventByLocalIdAndMap(u8 localId, u8 mapNum, u8 mapGroup)
+@@ -1693,7 +1699,7 @@ void RemoveObjectEventByLocalIdAndMap(u8 localId, u8 mapNum, u8 mapGroup)
  
  static void RemoveObjectEventInternal(struct ObjectEvent *objectEvent)
  {
@@ -11510,7 +11758,7 @@ index 29286bdf..c63f12ce 100644
      image.size = GetObjectEventGraphicsInfo(objectEvent->graphicsId)->size;
      gSprites[objectEvent->spriteId].images = &image;
      // It's possible that this function is called while the sprite pointed to `== sDummySprite`, i.e during map resume;
-@@ -1887,7 +1890,7 @@ u8 TrySpawnObjectEventTemplate(const struct ObjectEventTemplate *objectEventTemp
+@@ -1887,7 +1893,7 @@ u8 TrySpawnObjectEventTemplate(const struct ObjectEventTemplate *objectEventTemp
  {
      u8 objectEventId;
      struct SpriteTemplate spriteTemplate;
@@ -11519,7 +11767,16 @@ index 29286bdf..c63f12ce 100644
      const struct ObjectEventGraphicsInfo *graphicsInfo;
      const struct SubspriteTable *subspriteTables = NULL;
      const struct ObjectEventTemplate objectEventTemplateLocal = TryGetObjectEventTemplateForOWE(objectEventTemplate);
-@@ -2882,10 +2885,10 @@ void TrySpawnObjectEvents(s16 cameraX, s16 cameraY)
+@@ -2352,7 +2358,7 @@ void UpdateFollowingPokemon(void)
+     // 3. flag is set
+     // 4. a follower NPC is present
+     if (OW_POKEMON_OBJECT_EVENTS == FALSE
+-     || OW_FOLLOWERS_ENABLED == FALSE
++     || !CtrExtras_Get("follower")
+      || FlagGet(B_FLAG_FOLLOWERS_DISABLED)
+      || !GetFollowerInfo(&species, &shiny, &female)
+      || SpeciesToGraphicsInfo(species, shiny, female) == NULL
+@@ -2882,10 +2888,10 @@ void TrySpawnObjectEvents(s16 cameraX, s16 cameraY)
  
      if (gMapHeader.events != NULL)
      {
@@ -11534,7 +11791,7 @@ index 29286bdf..c63f12ce 100644
  
          if (CurrentBattlePyramidLocation() != PYRAMID_LOCATION_NONE)
              objectCount = GetNumBattlePyramidObjectEvents();
-@@ -2945,10 +2948,12 @@ void RemoveObjectEventsOutsideView(void)
+@@ -2945,10 +2951,12 @@ void RemoveObjectEventsOutsideView(void)
  
  static void RemoveObjectEventIfOutsideView(struct ObjectEvent *objectEvent)
  {
@@ -11551,7 +11808,7 @@ index 29286bdf..c63f12ce 100644
  
      if (objectEvent->currentCoords.x >= left && objectEvent->currentCoords.x <= right
       && objectEvent->currentCoords.y >= top && objectEvent->currentCoords.y <= bottom)
-@@ -2983,7 +2988,7 @@ static void SpawnObjectEventOnReturnToField(u8 objectEventId, s16 x, s16 y)
+@@ -2983,7 +2991,7 @@ static void SpawnObjectEventOnReturnToField(u8 objectEventId, s16 x, s16 y)
      struct Sprite *sprite;
      struct ObjectEvent *objectEvent;
      struct SpriteTemplate spriteTemplate;
@@ -11560,7 +11817,20 @@ index 29286bdf..c63f12ce 100644
      const struct SubspriteTable *subspriteTables;
      const struct ObjectEventGraphicsInfo *graphicsInfo;
  
-@@ -6919,6 +6924,13 @@ static enum Direction GetCopyDirection(u8 copyInitDir, enum Direction playerInit
+@@ -3455,6 +3463,12 @@ void UpdateObjectEventCoordsForCameraUpdate(void)
+                 gObjectEvents[i].previousCoords.y -= dy;
+             }
+         }
++#ifdef PLATFORM_3DS
++        {
++            extern void VisibleWild_CameraShift(s16 dx, s16 dy);
++            VisibleWild_CameraShift(dx, dy);
++        }
++#endif
+     }
+ }
+ 
+@@ -6919,6 +6933,13 @@ static enum Direction GetCopyDirection(u8 copyInitDir, enum Direction playerInit
  
  static void ObjectEventExecHeldMovementAction(struct ObjectEvent *objectEvent, struct Sprite *sprite)
  {
@@ -11574,7 +11844,7 @@ index 29286bdf..c63f12ce 100644
      objectEvent->movementActionId = TryUpdateMovementActionOnStairs(objectEvent, objectEvent->movementActionId);
      if (gMovementActionFuncs[objectEvent->movementActionId][sprite->sActionFuncId](objectEvent, sprite))
          objectEvent->heldMovementFinished = TRUE;
-@@ -9572,14 +9584,16 @@ static void UpdateObjectEventOffscreen(struct ObjectEvent *objectEvent, struct S
+@@ -9572,14 +9593,16 @@ static void UpdateObjectEventOffscreen(struct ObjectEvent *objectEvent, struct S
      x2 = x + graphicsInfo->width;
      y2 = y + graphicsInfo->height;
  
@@ -11595,7 +11865,7 @@ index 29286bdf..c63f12ce 100644
          objectEvent->offScreen = TRUE;
  }
  
-@@ -10946,9 +10960,11 @@ void UpdateObjectEventSpriteInvisibility(struct Sprite *sprite, bool8 invisible)
+@@ -10946,9 +10969,11 @@ void UpdateObjectEventSpriteInvisibility(struct Sprite *sprite, bool8 invisible)
      x2 = x - (sprite->centerToCornerVecX >> 1);
      y2 = y - (sprite->centerToCornerVecY >> 1);
  
@@ -11609,7 +11879,7 @@ index 29286bdf..c63f12ce 100644
          sprite->invisible = TRUE;
  }
  
-@@ -11139,6 +11155,13 @@ static void DoShadowFieldEffect(struct ObjectEvent *objectEvent)
+@@ -11139,6 +11164,13 @@ static void DoShadowFieldEffect(struct ObjectEvent *objectEvent)
  {
      if (objectEvent->noShadow)
      {
@@ -12091,7 +12361,7 @@ index 96223eb2..6bac077b 100644
  
  static void CameraPanningCB_PanAhead(void)
 diff --git c/src/field_control_avatar.c w/src/field_control_avatar.c
-index b271b1d2..3bfdab71 100644
+index b271b1d2..aa86fd5f 100644
 --- c/src/field_control_avatar.c
 +++ w/src/field_control_avatar.c
 @@ -113,6 +113,10 @@ void FieldGetPlayerInput(struct FieldInput *input, u16 newKeys, u16 heldKeys)
@@ -12137,6 +12407,22 @@ index b271b1d2..3bfdab71 100644
      if (CanTriggerSpinEvolution())
      {
          ResetSpinTimer();
+@@ -912,6 +918,15 @@ static bool32 ShouldDisableRandomEncounters(void)
+ 
+ static bool8 CheckStandardWildEncounter(u16 metatileBehavior)
+ {
++#ifdef PLATFORM_3DS
++    extern bool8 VisibleWild_StepOnto(void);
++    if (VisibleWild_StepOnto())
++    {
++        sWildEncounterImmunitySteps = 0;
++        sPrevMetatileBehavior = metatileBehavior;
++        return TRUE;
++    }
++#endif
+     if (ShouldDisableRandomEncounters())
+         return FALSE;
+ 
 diff --git c/src/field_door.c w/src/field_door.c
 index 508efc0f..d7c0c90d 100644
 --- c/src/field_door.c
@@ -12408,10 +12694,18 @@ index 7e7e6e4c..7e9684b6 100755
      {
          FieldEffectStop(sprite, FLDEFF_SHADOW);
 diff --git c/src/field_player_avatar.c w/src/field_player_avatar.c
-index 10b04bbc..aa402e91 100644
+index 10b04bbc..fc730709 100644
 --- c/src/field_player_avatar.c
 +++ w/src/field_player_avatar.c
-@@ -1524,6 +1524,13 @@ enum Direction GetPlayerMovementDirection(void)
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "main.h"
+ #include "bike.h"
+ #include "event_data.h"
+@@ -1524,6 +1527,13 @@ enum Direction GetPlayerMovementDirection(void)
  
  u8 PlayerGetElevation(void)
  {
@@ -12425,7 +12719,17 @@ index 10b04bbc..aa402e91 100644
      return gObjectEvents[gPlayerAvatar.objectEventId].previousElevation;
  }
  
-@@ -1702,12 +1709,21 @@ void InitPlayerAvatar(s16 x, s16 y, enum Direction direction, enum Gender gender
+@@ -1623,7 +1633,8 @@ bool8 PartyHasMonWithSurf(void)
+         {
+             if (GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES) == SPECIES_NONE)
+                 break;
+-            if (MonKnowsMove(&gParties[B_TRAINER_PLAYER][i], MOVE_SURF))
++            if (MonKnowsMove(&gParties[B_TRAINER_PLAYER][i], MOVE_SURF)
++                || (CtrExtras_FieldHm(MOVE_SURF) && !GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_IS_EGG)))
+                 return TRUE;
+         }
+     }
+@@ -1702,12 +1713,21 @@ void InitPlayerAvatar(s16 x, s16 y, enum Direction direction, enum Gender gender
      struct ObjectEventTemplate playerObjEventTemplate;
      u8 objectEventId;
      struct ObjectEvent *objectEvent;
@@ -13971,10 +14275,21 @@ index d5acdfd9..6141b48c
 +}
 +#endif
 diff --git c/src/item_use.c w/src/item_use.c
-index d6ab7971..73061a6d 100644
+index d6ab7971..5e04f456 100644
 --- c/src/item_use.c
 +++ w/src/item_use.c
-@@ -98,7 +98,7 @@ static const u8 sText_PlayedPokeFlute[] = _("Played the POKé FLUTE.");
+@@ -1,4 +1,10 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#include "braille_puzzles.h"
++#include "fldeff.h"
++#include "region_map.h"
++#endif
+ #include "item_use.h"
+ #include "battle.h"
+ #include "battle_anim.h"
+@@ -98,7 +104,7 @@ static const u8 sText_PlayedPokeFlute[] = _("Played the POKé FLUTE.");
  static const u8 sText_PokeFluteAwakenedMon[] = _("The POKé FLUTE awakened sleeping\nPOKéMON.{PAUSE_UNTIL_PRESS}");
  
  // EWRAM variables
@@ -13983,7 +14298,94 @@ index d6ab7971..73061a6d 100644
  
  // Below is set TRUE by UseRegisteredKeyItemOnField
  #define tUsingRegisteredKeyItem  data[3]
-@@ -1198,7 +1198,7 @@ bool32 CannotUseItemsInBattle(enum Item itemId, struct Pokemon *mon)
+@@ -911,8 +917,86 @@ void ItemUseOutOfBattle_DynamaxCandy(u8 taskId)
+     SetUpItemUseCallback(taskId);
+ }
+ 
++#ifdef PLATFORM_3DS
++static u8 FieldHmUser(u16 move)
++{
++    for (u32 i = 0; i < PARTY_SIZE; ++i)
++        if (GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES)
++            && !GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_IS_EGG))
++            return i;
++    return PARTY_SIZE;
++}
++extern bool8 gFlyMapFromBag;
++#endif
++
++#ifdef PLATFORM_3DS
++// HMs without the move (OPTIONS, ENHANCEMENTS): Fly and Flash are used from a
++// Pokemon's menu, never by a field script, so with the option their HMs are
++// used from the Bag - with the badge, where the move works, by the Pokemon
++// the option has stand in for the others (FieldHmUser, scrcmd.c).
++static bool8 CanUseFieldHmFromBag(u16 item)
++{
++    if (!CtrExtras_Get("field_hms") || FieldHmUser(ItemIdToBattleMoveId(item)) >= PARTY_SIZE)
++        return FALSE;
++    if (item == ITEM_HM02)
++        return FlagGet(FLAG_BADGE06_GET) && Overworld_MapTypeAllowsTeleportAndFly(gMapHeader.mapType);
++    if (item == ITEM_HM05)
++        return FlagGet(FLAG_BADGE02_GET)
++            && (ShouldDoBrailleRegisteelEffect() || (gMapHeader.cave == TRUE && !FlagGet(FLAG_SYS_USE_FLASH)));
++    return FALSE;
++}
++
++static void UseFieldHmFromBag(u8 taskId)
++{
++    gPartyMenu.slotId = FieldHmUser(ItemIdToBattleMoveId(gSpecialVar_ItemId));
++    if (gSpecialVar_ItemId == ITEM_HM02)
++    {
++        // cancelled, the Fly map goes back to the Bag (region_map.c)
++        gFlyMapFromBag = TRUE;
++        gBagMenu->newScreenCallback = CB2_OpenFlyMap;
++        Task_FadeAndCloseBagMenu(taskId);
++    }
++    else if (SetUpFieldMove_Flash())
++    {
++        gBagMenu->newScreenCallback = CB2_ReturnToField;
++        Task_FadeAndCloseBagMenu(taskId);
++    }
++    else
++    {
++        CloseItemMessage(taskId);
++    }
++}
++
++static void BootUpFieldHmInstead(u8 taskId)
++{
++    DisplayItemMessage(taskId, FONT_NORMAL, sText_BootedUpHM, BootUpSoundTMHM);
++}
++
++static const struct YesNoFuncTable sUseFieldHmFromBagYesNoFuncTable =
++{
++    .yesFunc = UseFieldHmFromBag,
++    .noFunc = BootUpFieldHmInstead,
++};
++
++static const u8 sText_UseFieldHmNow[] = _("Use {STR_VAR_1} now?");
++
++static void UseFieldHmFromBagYesNo(u8 taskId)
++{
++    BagMenu_YesNo(taskId, ITEMWIN_YESNO_HIGH, &sUseFieldHmFromBagYesNoFuncTable);
++}
++#endif
++
+ void ItemUseOutOfBattle_TMHM(u8 taskId)
+ {
++#ifdef PLATFORM_3DS
++    if (CanUseFieldHmFromBag(gSpecialVar_ItemId))
++    {
++        StringCopy(gStringVar1, GetMoveName(ItemIdToBattleMoveId(gSpecialVar_ItemId)));
++        StringExpandPlaceholders(gStringVar4, sText_UseFieldHmNow);
++        DisplayItemMessage(taskId, FONT_NORMAL, gStringVar4, UseFieldHmFromBagYesNo);
++        return;
++    }
++#endif
+     if (GetItemTMHMIndex(gSpecialVar_ItemId) > NUM_TECHNICAL_MACHINES)
+         DisplayItemMessage(taskId, FONT_NORMAL, sText_BootedUpHM, BootUpSoundTMHM); // HM
+     else
+@@ -1198,7 +1282,7 @@ bool32 CannotUseItemsInBattle(enum Item itemId, struct Pokemon *mon)
      bool8 cannotUse = FALSE;
      const u8* failStr = NULL;
      u32 i, battlerTarget;
@@ -16776,6 +17178,29 @@ index e2317c36..130147b8 100644
 +    return ChooseMonMarking();
 +}
 +#endif
+diff --git c/src/money.c w/src/money.c
+index 15bdbedd..33bc2595 100644
+--- c/src/money.c
++++ w/src/money.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "money.h"
+ #include "graphics.h"
+ #include "event_data.h"
+@@ -68,6 +71,10 @@ static const struct SpritePalette sSpritePalette_MoneyLabel =
+ 
+ u32 GetMoney(u32 *moneyPtr)
+ {
++#ifdef PLATFORM_3DS
++    if (moneyPtr == &gSaveBlock1Ptr->money && CtrExtras_Get("infinite_money"))
++        *moneyPtr = MAX_MONEY ^ gSaveBlock2Ptr->encryptionKey;
++#endif
+     return *moneyPtr ^ gSaveBlock2Ptr->encryptionKey;
+ }
+ 
 diff --git c/src/multiboot.c w/src/multiboot.c
 index 15b062ed..93cb72b2 100644
 --- c/src/multiboot.c
@@ -17748,10 +18173,19 @@ index 89a2bf4c..4f39f218 100644
  }
  
 diff --git c/src/overworld.c w/src/overworld.c
-index 4d01b45e..c4f9f2bc 100644
+index 4d01b45e..de532a13 100644
 --- c/src/overworld.c
 +++ w/src/overworld.c
-@@ -36,6 +36,7 @@
+@@ -1,4 +1,8 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#include "3ds_daynight.h"
++#endif
+ #include "overworld.h"
+ #include "battle_pyramid.h"
+ #include "battle_setup.h"
+@@ -36,6 +40,7 @@
  #include "link.h"
  #include "link_rfu.h"
  #include "load_save.h"
@@ -17759,7 +18193,7 @@ index 4d01b45e..c4f9f2bc 100644
  #include "main.h"
  #include "malloc.h"
  #include "m4a.h"
-@@ -85,6 +86,10 @@
+@@ -85,6 +90,10 @@
  #include "constants/trainer_hill.h"
  #include "constants/weather.h"
  
@@ -17770,7 +18204,7 @@ index 4d01b45e..c4f9f2bc 100644
  STATIC_ASSERT((B_FLAG_FOLLOWERS_DISABLED == 0 || OW_FOLLOWERS_ENABLED), FollowersFlagAssignedWithoutEnablingThem);
  
  struct CableClubPlayer
-@@ -312,8 +317,13 @@ static const struct BgTemplate sOverworldBgTemplates[] =
+@@ -312,8 +321,13 @@ static const struct BgTemplate sOverworldBgTemplates[] =
      {
          .bg = 1,
          .charBaseIndex = 0,
@@ -17784,7 +18218,7 @@ index 4d01b45e..c4f9f2bc 100644
          .paletteMode = 0,
          .priority = 1,
          .baseTile = 0
-@@ -321,8 +331,13 @@ static const struct BgTemplate sOverworldBgTemplates[] =
+@@ -321,8 +335,13 @@ static const struct BgTemplate sOverworldBgTemplates[] =
      {
          .bg = 2,
          .charBaseIndex = 0,
@@ -17798,7 +18232,7 @@ index 4d01b45e..c4f9f2bc 100644
          .paletteMode = 0,
          .priority = 2,
          .baseTile = 0
-@@ -330,8 +345,13 @@ static const struct BgTemplate sOverworldBgTemplates[] =
+@@ -330,8 +349,13 @@ static const struct BgTemplate sOverworldBgTemplates[] =
      {
          .bg = 3,
          .charBaseIndex = 0,
@@ -17812,7 +18246,7 @@ index 4d01b45e..c4f9f2bc 100644
          .paletteMode = 0,
          .priority = 3,
          .baseTile = 0
-@@ -569,8 +589,14 @@ void LoadSaveblockObjEventScripts(void)
+@@ -569,8 +593,14 @@ void LoadSaveblockObjEventScripts(void)
      struct ObjectEventTemplate *savObjTemplates = gSaveBlock1Ptr->objectEventTemplates;
      s32 i;
  
@@ -17829,7 +18263,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  static struct ObjectEventTemplate *GetObjectEventTemplate(u8 localId)
-@@ -613,7 +639,21 @@ static void InitMapView(void)
+@@ -613,7 +643,21 @@ static void InitMapView(void)
  
  const struct MapLayout *GetMapLayout(u16 mapLayoutId)
  {
@@ -17851,7 +18285,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  void ApplyCurrentWarp(void)
-@@ -657,7 +697,11 @@ static bool32 IsDummyWarp(struct WarpData *warp)
+@@ -657,7 +701,11 @@ static bool32 IsDummyWarp(struct WarpData *warp)
  
  struct MapHeader const *const Overworld_GetMapHeaderByGroupAndId(u16 mapGroup, u16 mapNum)
  {
@@ -17863,7 +18297,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  struct MapHeader const *const GetDestinationWarpMapHeader(void)
-@@ -669,8 +713,22 @@ static void LoadCurrentMapData(void)
+@@ -669,8 +717,22 @@ static void LoadCurrentMapData(void)
  {
      sLastMapSectionId = gMapHeader.regionMapSectionId;
      gMapHeader = *Overworld_GetMapHeaderByGroupAndId(gSaveBlock1Ptr->location.mapGroup, gSaveBlock1Ptr->location.mapNum);
@@ -17886,7 +18320,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  static void LoadSaveblockMapHeader(void)
-@@ -700,6 +758,14 @@ static void SetPlayerCoordsFromWarp(void)
+@@ -700,6 +762,14 @@ static void SetPlayerCoordsFromWarp(void)
          gSaveBlock1Ptr->pos.x = gMapHeader.mapLayout->width / 2;
          gSaveBlock1Ptr->pos.y = gMapHeader.mapLayout->height / 2;
      }
@@ -17901,7 +18335,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  void WarpIntoMap(void)
-@@ -828,10 +894,13 @@ void SetContinueGameWarpToDynamicWarp(int unused)
+@@ -828,10 +898,13 @@ void SetContinueGameWarpToDynamicWarp(int unused)
  
  const struct MapConnection *GetMapConnection(u8 dir)
  {
@@ -17916,7 +18350,7 @@ index 4d01b45e..c4f9f2bc 100644
      if (connection == NULL)
          return NULL;
  
-@@ -1015,8 +1084,26 @@ static struct InitialPlayerAvatarState *GetInitialPlayerAvatarState(void)
+@@ -1015,8 +1088,26 @@ static struct InitialPlayerAvatarState *GetInitialPlayerAvatarState(void)
      enum MapType mapType = GetCurrentMapType();
      u16 metatileBehavior = GetCenterScreenMetatileBehavior();
      u8 transitionFlags = GetAdjustedInitialTransitionFlags(&sInitialPlayerAvatarState, metatileBehavior, mapType);
@@ -17943,7 +18377,7 @@ index 4d01b45e..c4f9f2bc 100644
      sInitialPlayerAvatarState = playerStruct;
      return &sInitialPlayerAvatarState;
  }
-@@ -1087,6 +1174,13 @@ static enum Direction GetAdjustedInitialDirection(struct InitialPlayerAvatarStat
+@@ -1087,6 +1178,13 @@ static enum Direction GetAdjustedInitialDirection(struct InitialPlayerAvatarStat
  
  static u16 GetCenterScreenMetatileBehavior(void)
  {
@@ -17957,7 +18391,7 @@ index 4d01b45e..c4f9f2bc 100644
      return MapGridGetMetatileBehaviorAt(gSaveBlock1Ptr->pos.x + MAP_OFFSET, gSaveBlock1Ptr->pos.y + MAP_OFFSET);
  }
  
-@@ -1603,9 +1697,15 @@ static void InitOverworldBgs(void)
+@@ -1603,9 +1701,15 @@ static void InitOverworldBgs(void)
      SetBgAttribute(1, BG_ATTR_MOSAIC, 1);
      SetBgAttribute(2, BG_ATTR_MOSAIC, 1);
      SetBgAttribute(3, BG_ATTR_MOSAIC, 1);
@@ -17973,7 +18407,75 @@ index 4d01b45e..c4f9f2bc 100644
      SetBgTilemapBuffer(1, gOverworldTilemapBuffer_Bg1);
      SetBgTilemapBuffer(2, gOverworldTilemapBuffer_Bg2);
      SetBgTilemapBuffer(3, gOverworldTilemapBuffer_Bg3);
-@@ -1930,6 +2030,13 @@ static bool8 RunFieldCallback(void)
+@@ -1677,10 +1781,27 @@ static void DoCB1_Overworld(u16 newKeys, u16 heldKeys)
+         ObjectEventSetHeldMovement(&gObjectEvents[GetFollowerNPCObjectId()], GetFaceDirectionAnimNum(gObjectEvents[GetFollowerNPCObjectId()].facingDirection));
+ }
+ 
++#ifdef PLATFORM_3DS
++void VisibleWild_Update(void);
++#endif
++
+ void CB1_Overworld(void)
+ {
+     if (gMain.callback2 == CB2_Overworld)
+         DoCB1_Overworld(gMain.newKeys, gMain.heldKeys);
++#ifdef PLATFORM_3DS
++    if (gMain.callback2 == CB2_Overworld)
++    {
++        static int previousFollowerSetting = -1;
++        int setting = CtrExtras_Get("follower");
++        if (setting != previousFollowerSetting)
++        {
++            UpdateFollowingPokemon();
++            previousFollowerSetting = setting;
++        }
++    }
++    VisibleWild_Update();
++#endif
+ }
+ 
+ #define TINT_NIGHT Q_8_8(0.456) | Q_8_8(0.456) << 8 | Q_8_8(0.615) << 16
+@@ -1704,6 +1825,16 @@ void UpdateTimeOfDay(bool32 updateBlend)
+     RtcCalcLocalTime();
+     hours = sHoursOverride ? sHoursOverride : gLocalTime.hours;
+     minutes = sHoursOverride ? 0 : gLocalTime.minutes;
++#ifdef PLATFORM_3DS
++    {
++        unsigned seconds, rate;
++        if (!sHoursOverride && CtrDayNight_Time(&seconds, &rate))
++        {
++            hours = seconds / 3600;
++            minutes = seconds / 60 % 60;
++        }
++    }
++#endif
+ 
+     if (IsBetweenHours(hours, MORNING_HOUR_BEGIN, MORNING_HOUR_MIDDLE)) // night->morning
+     {
+@@ -1777,6 +1908,11 @@ void UpdateTimeOfDay(bool32 updateBlend)
+ // Whether a map type is naturally lit/outside
+ bool32 MapHasNaturalLight(enum MapType mapType)
+ {
++#ifdef PLATFORM_3DS
++    /* The shared renderer owns optional day/night tint on both screens.
++     * Keeping native DNS too would tint the same scenery twice. */
++    return FALSE;
++#endif
+     return (OW_ENABLE_DNS
+          && (mapType == MAP_TYPE_TOWN
+           || mapType == MAP_TYPE_CITY
+@@ -1886,6 +2022,10 @@ void CB2_OverworldBasic(void)
+ void CB2_Overworld(void)
+ {
+     bool32 fading = (gPaletteFade.active != 0);
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_BerryDue())
++        DoTimeBasedEvents();
++#endif
+     if (fading)
+         SetVBlankCallback(NULL);
+     OverworldBasic();
+@@ -1930,6 +2070,13 @@ static bool8 RunFieldCallback(void)
  
  void CB2_NewGame(void)
  {
@@ -17987,7 +18489,7 @@ index 4d01b45e..c4f9f2bc 100644
      FieldClearVBlankHBlankCallbacks();
      StopMapMusic();
      ResetSafariZoneFlag_();
-@@ -2135,12 +2242,24 @@ void CB2_ContinueSavedGame(void)
+@@ -2135,12 +2282,24 @@ void CB2_ContinueSavedGame(void)
      UnfreezeObjectEvents();
      DoTimeBasedEvents();
      UpdateMiscOverworldStates();
@@ -18012,7 +18514,7 @@ index 4d01b45e..c4f9f2bc 100644
  
      PlayTimeCounter_Start();
      ScriptContext_Init();
-@@ -2300,6 +2419,13 @@ static bool32 LoadMapInStepsLink(u8 *state)
+@@ -2300,6 +2459,13 @@ static bool32 LoadMapInStepsLink(u8 *state)
  
  static bool32 LoadMapInStepsLocal(u8 *state, bool32 a2)
  {
@@ -18026,7 +18528,7 @@ index 4d01b45e..c4f9f2bc 100644
      switch (*state)
      {
      case 0:
-@@ -2495,6 +2621,11 @@ static void ResetMirageTowerAndSaveBlockPtrs(void)
+@@ -2495,6 +2661,11 @@ static void ResetMirageTowerAndSaveBlockPtrs(void)
  {
      ClearMirageTowerPulseBlend();
      MoveSaveBlocks_ResetHeap();
@@ -18038,7 +18540,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  static void ResetScreenForMapLoad(void)
-@@ -2616,19 +2747,64 @@ static void InitObjectEventsLocal(void)
+@@ -2616,19 +2787,64 @@ static void InitObjectEventsLocal(void)
  {
      u16 x, y;
      struct InitialPlayerAvatarState *player;
@@ -18103,7 +18605,7 @@ index 4d01b45e..c4f9f2bc 100644
  }
  
  static void InitObjectEventsReturnToField(void)
-@@ -2640,8 +2816,18 @@ static void InitObjectEventsReturnToField(void)
+@@ -2640,8 +2856,18 @@ static void InitObjectEventsReturnToField(void)
  
  static void SetCameraToTrackPlayer(void)
  {
@@ -18257,10 +18759,18 @@ index f84336aa..1c809db7 100644
      gTasks[taskId].tCoeffTarget = coeffTarget;
  
 diff --git c/src/party_menu.c w/src/party_menu.c
-index 7c6393d6..7f31af2b 100644
+index 7c6393d6..ee7af05e 100644
 --- c/src/party_menu.c
 +++ w/src/party_menu.c
-@@ -514,11 +514,46 @@ static const u8 sText_CannotSendMonToBoxPartner[] = _("Cannot send a mon that do
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "malloc.h"
+ #include "battle.h"
+ #include "battle_anim.h"
+@@ -514,11 +517,46 @@ static const u8 sText_CannotSendMonToBoxPartner[] = _("Cannot send a mon that do
  // static const data
  #include "data/party_menu.h"
  
@@ -18307,7 +18817,7 @@ index 7c6393d6..7f31af2b 100644
      ResetPartyMenu();
      sPartyMenuInternal = Alloc(sizeof(struct PartyMenuInternal));
      if (sPartyMenuInternal == NULL)
-@@ -1412,8 +1447,18 @@ static bool8 PartyBoxPal_ParnterOrDisqualifiedInArena(u8 slot)
+@@ -1412,8 +1450,18 @@ static bool8 PartyBoxPal_ParnterOrDisqualifiedInArena(u8 slot)
  
  static void DrawCancelConfirmButtons(void)
  {
@@ -18326,7 +18836,7 @@ index 7c6393d6..7f31af2b 100644
      ScheduleBgCopyTilemapToVram(1);
  }
  
-@@ -1470,13 +1515,151 @@ u8 GetPartyMenuType(void)
+@@ -1470,13 +1518,151 @@ u8 GetPartyMenuType(void)
      return gPartyMenu.menuType;
  }
  
@@ -18478,7 +18988,7 @@ index 7c6393d6..7f31af2b 100644
          {
          case A_BUTTON: // Selected mon
              HandleChooseMonSelection(taskId, slotPtr);
-@@ -1732,7 +1915,7 @@ static void Task_CancelChooseMonYesNo(u8 taskId)
+@@ -1732,7 +1918,7 @@ static void Task_CancelChooseMonYesNo(u8 taskId)
  
  static void Task_HandleCancelChooseMonYesNoInput(u8 taskId)
  {
@@ -18487,7 +18997,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          gPartyMenuUseExitCallback = FALSE;
-@@ -2336,7 +2519,7 @@ static void Task_CancelParticipationYesNo(u8 taskId)
+@@ -2336,7 +2522,7 @@ static void Task_CancelParticipationYesNo(u8 taskId)
  
  static void Task_HandleCancelParticipationYesNoInput(u8 taskId)
  {
@@ -18496,7 +19006,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          gSpecialVar_0x8004 = PARTY_SIZE + 1;
-@@ -2449,6 +2632,15 @@ static void BlitBitmapToPartyWindow(u8 windowId, const u8 *b, u8 c, u8 x, u8 y,
+@@ -2449,6 +2635,15 @@ static void BlitBitmapToPartyWindow(u8 windowId, const u8 *b, u8 c, u8 x, u8 y,
      u8 *pixels = AllocZeroed(height * width * 32);
      u8 i, j;
  
@@ -18512,7 +19022,7 @@ index 7c6393d6..7f31af2b 100644
      if (pixels != NULL)
      {
          for (i = 0; i < height; i++)
-@@ -2906,8 +3098,15 @@ static u8 DisplaySelectionWindow(u8 windowType)
+@@ -2906,8 +3101,15 @@ static u8 DisplaySelectionWindow(u8 windowType)
      return sPartyMenuInternal->windowId[0];
  }
  
@@ -18528,7 +19038,7 @@ index 7c6393d6..7f31af2b 100644
      DrawStdFrameWithCustomTileAndPalette(WIN_MSG, FALSE, 0x4F, 13);
      gTextFlags.canABSpeedUpPrint = TRUE;
      AddTextPrinterParameterized2(WIN_MSG, FONT_NORMAL, text, GetPlayerTextSpeedDelay(), 0, TEXT_COLOR_DARK_GRAY, TEXT_COLOR_WHITE, TEXT_COLOR_LIGHT_GRAY);
-@@ -3094,10 +3293,16 @@ static void Task_HandleSelectionMenuInput(u8 taskId)
+@@ -3094,10 +3296,16 @@ static void Task_HandleSelectionMenuInput(u8 taskId)
          s8 input;
          s16 *data = gTasks[taskId].data;
  
@@ -18549,7 +19059,7 @@ index 7c6393d6..7f31af2b 100644
  
          data[0] = Menu_GetCursorPos();
          switch (input)
-@@ -3542,7 +3747,7 @@ static void Task_SwitchItemsYesNo(u8 taskId)
+@@ -3542,7 +3750,7 @@ static void Task_SwitchItemsYesNo(u8 taskId)
  
  static void Task_HandleSwitchItemsYesNoInput(u8 taskId)
  {
@@ -18558,7 +19068,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0: // Yes, switch items
          RemoveBagItem(gSpecialVar_ItemId, 1);
-@@ -3717,7 +3922,7 @@ static void Task_HandleTossHeldItemYesNoInput(u8 taskId)
+@@ -3717,7 +3925,7 @@ static void Task_HandleTossHeldItemYesNoInput(u8 taskId)
  {
      struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][gPartyMenu.slotId];
  
@@ -18567,7 +19077,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          CopyItemName(GetMonData(mon, MON_DATA_HELD_ITEM), gStringVar1);
-@@ -3799,7 +4004,7 @@ static void Task_SendMailToPCYesNo(u8 taskId)
+@@ -3799,7 +4007,7 @@ static void Task_SendMailToPCYesNo(u8 taskId)
  
  static void Task_HandleSendMailToPCYesNoInput(u8 taskId)
  {
@@ -18576,7 +19086,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0: // Yes, send to PC
          if (TakeMailFromMonAndSave(&gParties[B_TRAINER_PLAYER][gPartyMenu.slotId]) != MAIL_NONE)
-@@ -3836,7 +4041,7 @@ static void Task_HandleLoseMailMessageYesNoInput(u8 taskId)
+@@ -3836,7 +4044,7 @@ static void Task_HandleLoseMailMessageYesNoInput(u8 taskId)
  {
      enum Item item;
  
@@ -18585,7 +19095,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0: // Yes, lose mail message
          item = GetMonData(&gParties[B_TRAINER_PLAYER][gPartyMenu.slotId], MON_DATA_HELD_ITEM);
-@@ -4071,7 +4276,7 @@ static void Task_SpinTradeYesNo(u8 taskId)
+@@ -4071,7 +4279,7 @@ static void Task_SpinTradeYesNo(u8 taskId)
  // See comment on CursorCb_Trade2. Because no callback is set, selecting YES (0) to spin trade just closes the party menu
  static void Task_HandleSpinTradeYesNoInput(u8 taskId)
  {
@@ -18594,7 +19104,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          Task_ClosePartyMenu(taskId);
-@@ -4176,7 +4381,7 @@ static void Task_FieldMoveExitAreaYesNo(u8 taskId)
+@@ -4176,7 +4384,7 @@ static void Task_FieldMoveExitAreaYesNo(u8 taskId)
  
  static void Task_HandleFieldMoveExitAreaYesNoInput(u8 taskId)
  {
@@ -18603,7 +19113,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          gPartyMenu.exitCallback = CB2_ReturnToField;
-@@ -4264,7 +4469,7 @@ static enum Species GetFieldMoveMonSpecies(void)
+@@ -4264,7 +4472,7 @@ static enum Species GetFieldMoveMonSpecies(void)
  
  static void Task_CancelAfterAorBPress(u8 taskId)
  {
@@ -18612,7 +19122,7 @@ index 7c6393d6..7f31af2b 100644
          CursorCb_Cancel1(taskId);
  }
  
-@@ -4991,7 +5196,7 @@ void Task_AbilityCapsule(u8 taskId)
+@@ -4991,7 +5199,7 @@ void Task_AbilityCapsule(u8 taskId)
          }
          break;
      case 2:
@@ -18621,7 +19131,7 @@ index 7c6393d6..7f31af2b 100644
          {
          case 0:
              tState++;
-@@ -5076,7 +5281,7 @@ void Task_AbilityPatch(u8 taskId)
+@@ -5076,7 +5284,7 @@ void Task_AbilityPatch(u8 taskId)
          }
          break;
      case 2:
@@ -18630,7 +19140,7 @@ index 7c6393d6..7f31af2b 100644
          {
          case 0:
              tState++;
-@@ -5176,7 +5381,7 @@ void Task_Mint(u8 taskId)
+@@ -5176,7 +5384,7 @@ void Task_Mint(u8 taskId)
          }
          break;
      case 2:
@@ -18639,7 +19149,7 @@ index 7c6393d6..7f31af2b 100644
          {
          case 0:
              tState++;
-@@ -5401,7 +5606,14 @@ static void ShowMoveSelectWindow(u8 slot)
+@@ -5401,7 +5609,14 @@ static void ShowMoveSelectWindow(u8 slot)
  
  static void Task_HandleWhichMoveInput(u8 taskId)
  {
@@ -18654,7 +19164,16 @@ index 7c6393d6..7f31af2b 100644
  
      if (input != MENU_NOTHING_CHOSEN)
      {
-@@ -5629,7 +5841,7 @@ static void Task_DoLearnedMoveFanfareAfterText(u8 taskId)
+@@ -5607,7 +5822,7 @@ static void Task_LearnedMove(u8 taskId)
+     if (gPartyMenu.learnMoveState == 0)
+     {
+         AdjustFriendship(mon, FRIENDSHIP_EVENT_LEARN_TMHM);
+-        if (!GetItemImportance(item))
++        if (!GetItemImportance(item) && !CtrExtras_Get("infinite_tms"))
+             RemoveBagItem(item, 1);
+     }
+     GetMonNickname(mon, gStringVar1);
+@@ -5629,7 +5844,7 @@ static void Task_DoLearnedMoveFanfareAfterText(u8 taskId)
  
  static void Task_LearnNextMoveOrClosePartyMenu(u8 taskId)
  {
@@ -18663,7 +19182,7 @@ index 7c6393d6..7f31af2b 100644
      {
          if (gPartyMenu.learnMoveState == 1)
          {
-@@ -5655,7 +5867,7 @@ static void Task_ReplaceMoveYesNo(u8 taskId)
+@@ -5655,7 +5870,7 @@ static void Task_ReplaceMoveYesNo(u8 taskId)
  
  static void Task_HandleReplaceMoveYesNoInput(u8 taskId)
  {
@@ -18672,7 +19191,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          DisplayPartyMenuMessage(gText_WhichMoveToForget, TRUE);
-@@ -5770,7 +5982,7 @@ static void Task_HandleStopLearningMoveYesNoInput(u8 taskId)
+@@ -5770,7 +5985,7 @@ static void Task_HandleStopLearningMoveYesNoInput(u8 taskId)
  {
      struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][gPartyMenu.slotId];
  
@@ -18681,7 +19200,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0:
          GetMonNickname(mon, gStringVar1);
-@@ -5927,7 +6139,7 @@ static void UpdateMonDisplayInfoAfterRareCandy(u8 slot, struct Pokemon *mon)
+@@ -5927,7 +6142,7 @@ static void UpdateMonDisplayInfoAfterRareCandy(u8 slot, struct Pokemon *mon)
  
  static void Task_DisplayLevelUpStatsPg1(u8 taskId)
  {
@@ -18690,7 +19209,7 @@ index 7c6393d6..7f31af2b 100644
      {
          PlaySE(SE_SELECT);
          DisplayLevelUpStatsPg1(taskId);
-@@ -5937,7 +6149,7 @@ static void Task_DisplayLevelUpStatsPg1(u8 taskId)
+@@ -5937,7 +6152,7 @@ static void Task_DisplayLevelUpStatsPg1(u8 taskId)
  
  static void Task_DisplayLevelUpStatsPg2(u8 taskId)
  {
@@ -18699,7 +19218,7 @@ index 7c6393d6..7f31af2b 100644
      {
          PlaySE(SE_SELECT);
          DisplayLevelUpStatsPg2(taskId);
-@@ -5969,7 +6181,7 @@ static void Task_TryLearnNewMoves(u8 taskId)
+@@ -5969,7 +6184,7 @@ static void Task_TryLearnNewMoves(u8 taskId)
  {
      u16 learnMove;
  
@@ -18708,7 +19227,7 @@ index 7c6393d6..7f31af2b 100644
      {
          RemoveLevelUpStatsWindow();
          for (; sInitialLevel <= sFinalLevel; sInitialLevel++)
-@@ -7208,7 +7420,7 @@ static void Task_HandleSwitchItemsFromBagYesNoInput(u8 taskId)
+@@ -7208,7 +7423,7 @@ static void Task_HandleSwitchItemsFromBagYesNoInput(u8 taskId)
  {
      enum Item item;
  
@@ -18717,7 +19236,7 @@ index 7c6393d6..7f31af2b 100644
      {
      case 0: // Yes, switch items
          item = gPartyMenu.bagItem;
-@@ -7403,7 +7615,7 @@ static void Task_ValidateChosenHalfParty(u8 taskId)
+@@ -7403,7 +7618,7 @@ static void Task_ValidateChosenHalfParty(u8 taskId)
  
  static void Task_ContinueChoosingHalfParty(u8 taskId)
  {
@@ -18726,7 +19245,7 @@ index 7c6393d6..7f31af2b 100644
      {
          PlaySE(SE_SELECT);
          DisplayPartyMenuStdMessage(PARTY_MSG_CHOOSE_MON);
-@@ -8624,3 +8836,35 @@ s8 Test_UpdatePartySelectionSingleLayout(s8 slotId, s8 movementDir, bool8 choose
+@@ -8624,3 +8839,35 @@ s8 Test_UpdatePartySelectionSingleLayout(s8 slotId, s8 movementDir, bool8 choose
      return slotId;
  }
  #endif
@@ -24793,10 +25312,18 @@ index 550127f5..c5b5c237 100644
      u16 offset;
      u16 temp;
 diff --git c/src/pokemon.c w/src/pokemon.c
-index 82017777..7c7b8e3b 100644
+index 82017777..8740279e 100644
 --- c/src/pokemon.c
 +++ w/src/pokemon.c
-@@ -77,6 +77,10 @@
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "malloc.h"
+ #include "apprentice.h"
+ #include "battle.h"
+@@ -77,6 +80,10 @@
  #include "constants/union_room.h"
  #include "constants/weather.h"
  
@@ -24807,7 +25334,37 @@ index 82017777..7c7b8e3b 100644
  extern enum Item gSpecialVar_ItemId;
  
  #define FRIENDSHIP_EVO_THRESHOLD ((P_FRIENDSHIP_EVO_THRESHOLD >= GEN_8) ? 160 : 220)
-@@ -1019,6 +1023,21 @@ void CreateBoxMon(struct BoxPokemon *boxMon, enum Species species, u8 level, u32
+@@ -880,6 +887,13 @@ bool32 ComputePlayerShinyOdds(u32 personality, u32 value)
+     if (P_NO_SHINIES_WITHOUT_POKEBALLS && !HasAtLeastOnePokeBall() && FlagGet(FLAG_SYS_POKEDEX_GET))
+         return FALSE;
+ 
++#ifdef PLATFORM_3DS
++    static const u32 thresholds[] = {8, 16, 64, 256, 1024, 65536};
++    u32 setting = CtrExtras_Get("shiny_odds");
++    u32 shinyThreshold = thresholds[setting < ARRAY_COUNT(thresholds) ? setting : 0];
++#else
++    u32 shinyThreshold = SHINY_ODDS;
++#endif
+     u32 totalRerolls = 0;
+ 
+     if (CheckBagHasItem(ITEM_SHINY_CHARM, 1))
+@@ -893,13 +907,13 @@ bool32 ComputePlayerShinyOdds(u32 personality, u32 value)
+     if (gDexNavSpecies)
+         totalRerolls += CalculateDexNavShinyRolls();
+ 
+-    while (GET_SHINY_VALUE(value, personality) >= SHINY_ODDS && totalRerolls > 0)
++    while (GET_SHINY_VALUE(value, personality) >= shinyThreshold && totalRerolls > 0)
+     {
+         personality = Random32();
+         totalRerolls--;
+     }
+ 
+-    return GET_SHINY_VALUE(value, personality) < SHINY_ODDS;
++    return GET_SHINY_VALUE(value, personality) < shinyThreshold;
+ }
+ 
+ void SetBoxMonIVs(struct BoxPokemon *mon, u8 fixedIV)
+@@ -1019,6 +1033,21 @@ void CreateBoxMon(struct BoxPokemon *boxMon, enum Species species, u8 level, u32
      //using gen 3-4 ability formula, it was changed in later gens
      if (GetSpeciesAbility(species, 1))
          SetBoxMonData(boxMon, MON_DATA_ABILITY_NUM, &value);
@@ -24829,6 +25386,32 @@ index 82017777..7c7b8e3b 100644
  }
  
  static bool32 IsValidGender(u32 gender)
+@@ -4234,6 +4263,13 @@ bool32 DoesMonMeetAdditionalConditions(struct Pokemon *mon, const struct Evoluti
+             break;
+         // Gen 5
+         case IF_TRADE_PARTNER_SPECIES:
++#ifdef PLATFORM_3DS
++            if (!tradePartner && CtrExtras_Get("trade_evo") && GetMonData(mon, MON_DATA_LEVEL) >= 40)
++            {
++                currentCondition = TRUE;
++                break;
++            }
++#endif
+             if (params[i].arg1 == partnerSpecies && partnerHoldEffect != HOLD_EFFECT_PREVENT_EVOLVE)
+                 currentCondition = TRUE;
+             break;
+@@ -4440,6 +4476,11 @@ enum Species GetEvolutionTargetSpecies(struct Pokemon *mon, enum EvolutionMode m
+                 if (evolutions[i].param <= level)
+                     conditionsMet = TRUE;
+                 break;
++#ifdef PLATFORM_3DS
++            case EVO_TRADE:
++                conditionsMet = mode == EVO_MODE_NORMAL && CtrExtras_Get("trade_evo") && level >= 40;
++                break;
++#endif
+             case EVO_LEVEL_BATTLE_ONLY:
+                 if (mode == EVO_MODE_BATTLE_ONLY && evolutions[i].param <= level)
+                     conditionsMet = TRUE;
 diff --git c/src/pokemon_animation.c w/src/pokemon_animation.c
 index 222590c7..8b21c04a 100644
 --- c/src/pokemon_animation.c
@@ -25727,10 +26310,18 @@ index 034c187e..4f5dfc97 100644
      {
          if (JOY_NEW(A_BUTTON))
 diff --git c/src/pokemon_summary_screen.c w/src/pokemon_summary_screen.c
-index 801dfe07..04d42a4a 100644
+index 801dfe07..d33c0b47 100644
 --- c/src/pokemon_summary_screen.c
 +++ w/src/pokemon_summary_screen.c
-@@ -51,6 +51,9 @@
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "main.h"
+ #include "battle.h"
+ #include "battle_anim.h"
+@@ -51,6 +54,9 @@
  #include "constants/region_map_sections.h"
  #include "constants/rgb.h"
  #include "constants/songs.h"
@@ -25740,7 +26331,7 @@ index 801dfe07..04d42a4a 100644
  
  // Screen titles (upper left)
  #define PSS_LABEL_WINDOW_POKEMON_INFO_TITLE 0
-@@ -1736,10 +1739,189 @@ static void HandleMoveRelearnerInput(u8 taskId)
+@@ -1736,10 +1742,189 @@ static void HandleMoveRelearnerInput(u8 taskId)
      }
  }
  
@@ -25930,7 +26521,7 @@ index 801dfe07..04d42a4a 100644
          if (JOY_NEW(DPAD_UP))
          {
              ChangeSummaryPokemon(taskId, -1);
-@@ -2325,6 +2507,17 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+@@ -2325,6 +2510,17 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
  
      if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
      {
@@ -25948,7 +26539,7 @@ index 801dfe07..04d42a4a 100644
          if (JOY_NEW(DPAD_UP))
          {
              data[0] = 4;
-@@ -2335,7 +2528,7 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+@@ -2335,7 +2531,7 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
              data[0] = 4;
              ChangeSelectedMove(data, 1, &sMonSummaryScreen->firstMoveIndex);
          }
@@ -25957,7 +26548,7 @@ index 801dfe07..04d42a4a 100644
          {
              if (sMonSummaryScreen->lockMovesFlag == TRUE
                  || (sMonSummaryScreen->newMove == MOVE_NONE && sMonSummaryScreen->firstMoveIndex == MAX_MON_MOVES))
-@@ -2355,11 +2548,13 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
+@@ -2355,11 +2551,13 @@ static void Task_HandleInput_MoveSelect(u8 taskId)
                  PlaySE(SE_FAILURE);
              }
          }
@@ -25972,7 +26563,7 @@ index 801dfe07..04d42a4a 100644
      }
  }
  
-@@ -2471,6 +2666,17 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+@@ -2471,6 +2669,17 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
  
      if (MenuHelpers_ShouldWaitForLinkRecv() != TRUE)
      {
@@ -25990,7 +26581,7 @@ index 801dfe07..04d42a4a 100644
          if (JOY_NEW(DPAD_UP))
          {
              data[0] = 3;
-@@ -2481,17 +2687,19 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
+@@ -2481,17 +2690,19 @@ static void Task_HandleInput_MovePositionSwitch(u8 taskId)
              data[0] = 3;
              ChangeSelectedMove(&data[0], 1, &sMonSummaryScreen->secondMoveIndex);
          }
@@ -26012,7 +26603,7 @@ index 801dfe07..04d42a4a 100644
      }
  }
  
-@@ -2614,6 +2822,17 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2614,6 +2825,17 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
      {
          if (gPaletteFade.active != TRUE)
          {
@@ -26030,7 +26621,7 @@ index 801dfe07..04d42a4a 100644
              if (JOY_NEW(DPAD_UP))
              {
                  data[0] = 4;
-@@ -2632,7 +2851,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2632,7 +2854,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
              {
                  ChangePage(taskId, 1);
              }
@@ -26039,7 +26630,7 @@ index 801dfe07..04d42a4a 100644
              {
                  if (CanReplaceMove() == TRUE)
                  {
-@@ -2649,7 +2868,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2649,7 +2871,7 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
                      ShowCantForgetHMsWindow(taskId);
                  }
              }
@@ -26048,7 +26639,7 @@ index 801dfe07..04d42a4a 100644
              {
                  StopPokemonAnimations();
                  PlaySE(SE_SELECT);
-@@ -2658,6 +2877,8 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
+@@ -2658,6 +2880,8 @@ static void Task_HandleReplaceMoveInput(u8 taskId)
                  gSpecialVar_Result = FALSE;
                  BeginCloseSummaryScreen(taskId);
              }
@@ -26057,7 +26648,7 @@ index 801dfe07..04d42a4a 100644
          }
      }
  }
-@@ -2735,7 +2956,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
+@@ -2735,7 +2959,7 @@ static void Task_HandleInputCantForgetHMsMoves(u8 taskId)
                  PositionAppealJamSlidingWindow(9, -2, move);
              }
          }
@@ -26066,6 +26657,16 @@ index 801dfe07..04d42a4a 100644
          {
              ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_SPECIES);
              if (!gSprites[sMonSummaryScreen->spriteIds[SPRITE_ARR_ID_STATUS]].invisible)
+@@ -4760,6 +4984,9 @@ static inline bool32 ShouldShowRename(void)
+ 
+ static inline bool32 ShouldShowIvEvPrompt(void)
+ {
++#ifdef PLATFORM_3DS
++    return CtrExtras_Get("ivs_evs") != 0;
++#endif
+     if (P_SUMMARY_SCREEN_IV_EV_BOX_ONLY)
+     {
+         return (P_SUMMARY_SCREEN_IV_EV_INFO || FlagGet(P_FLAG_SUMMARY_SCREEN_IV_EV_INFO))
 diff --git c/src/pokenav.c w/src/pokenav.c
 index c826d58e..a133fb0c 100644
 --- c/src/pokenav.c
@@ -26713,10 +27314,19 @@ index 846dd0b4..298e44be 100644
      sRayScene = AllocZeroed(sizeof(*sRayScene));
      sRayScene->animId = animId;
 diff --git c/src/region_map.c w/src/region_map.c
-index e6e91752..5ad76c61 100644
+index e6e91752..11535dd7 100644
 --- c/src/region_map.c
 +++ w/src/region_map.c
-@@ -2404,6 +2404,10 @@ static void TryCreateRedOutlineFlyDestIcons(void)
+@@ -1,4 +1,8 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#include "item_menu.h"
++#endif
+ #include "main.h"
+ #include "text.h"
+ #include "menu.h"
+@@ -2404,6 +2408,10 @@ static void TryCreateRedOutlineFlyDestIcons(void)
  // Flickers fly destination icon color (by hiding the fly icon sprite) if the cursor is currently on it
  static void SpriteCB_FlyDestIcon(struct Sprite *sprite)
  {
@@ -26727,7 +27337,7 @@ index e6e91752..5ad76c61 100644
      if (sFlyMap->regionMap.mapSecId == sprite->sIconMapSec)
      {
          if (++sprite->sFlickerTimer > 16)
-@@ -2417,6 +2421,7 @@ static void SpriteCB_FlyDestIcon(struct Sprite *sprite)
+@@ -2417,6 +2425,7 @@ static void SpriteCB_FlyDestIcon(struct Sprite *sprite)
          sprite->sFlickerTimer = 16;
          sprite->invisible = FALSE;
      }
@@ -26735,7 +27345,31 @@ index e6e91752..5ad76c61 100644
  }
  
  #undef sIconMapSec
-@@ -2528,3 +2533,19 @@ void SetFlyDestination(struct RegionMap* regionMap)
+@@ -2469,6 +2478,8 @@ static void CB_HandleFlyMapInput(void)
+     }
+ }
+ 
++bool8 gFlyMapFromBag;
++
+ static void CB_ExitFlyMap(void)
+ {
+     switch (sFlyMap->state)
+@@ -2486,8 +2497,14 @@ static void CB_ExitFlyMap(void)
+                 struct RegionMap* tempRegionMap = &sFlyMap->regionMap;
+ 
+                 SetFlyDestination(tempRegionMap);
++                gFlyMapFromBag = FALSE;
+                 ReturnToFieldFromFlyMapSelect();
+             }
++            else if (gFlyMapFromBag)
++            {
++                gFlyMapFromBag = FALSE;
++                SetMainCallback2(CB2_ReturnToBagMenuPocket);
++            }
+             else
+             {
+                 SetMainCallback2(CB2_ReturnToPartyMenuFromFlyMap);
+@@ -2528,3 +2545,19 @@ void SetFlyDestination(struct RegionMap* regionMap)
      else
          SetWarpDestinationToMapWarp(sMapHealLocations[regionMap->mapSecId][0], sMapHealLocations[regionMap->mapSecId][1], WARP_ID_NONE);
  }
@@ -26822,16 +27456,21 @@ index 0d013601..167f578a 100644
      dest = ConvertIntToHexStringN(dest, year, STR_CONV_MODE_LEADING_ZEROS, 4);
      *dest++ = CHAR_HYPHEN;
 diff --git c/src/save.c w/src/save.c
-index 055b0729..ba52c98b 100644
+index 055b0729..671cfd40 100644
 --- c/src/save.c
 +++ w/src/save.c
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,10 @@
  #include "global.h"
++#ifdef PLATFORM_3DS
++#include "clock.h"
++#include "3ds_clock_store.h"
++#include "3ds_daynight.h"
++#endif
 +#include "platform.h"
  #include "agb_flash.h"
  #include "gba/flash_internal.h"
  #include "fieldmap.h"
-@@ -9,6 +10,7 @@
+@@ -9,6 +15,7 @@
  #include "overworld.h"
  #include "hall_of_fame.h"
  #include "pokemon_storage_system.h"
@@ -26839,7 +27478,7 @@ index 055b0729..ba52c98b 100644
  #include "trainer_hill.h"
  #include "link.h"
  #include "constants/game_stat.h"
-@@ -90,7 +92,7 @@ COMMON_DATA u32 gSaveCounter = 0;
+@@ -90,7 +97,7 @@ COMMON_DATA u32 gSaveCounter = 0;
  COMMON_DATA struct SaveSector *gReadWriteSector = NULL; // Pointer to a buffer for reading/writing a sector
  COMMON_DATA u16 gIncrementalSectorId = 0;
  COMMON_DATA u16 gSaveFileStatus = 0;
@@ -26848,7 +27487,7 @@ index 055b0729..ba52c98b 100644
  COMMON_DATA struct SaveSectorLocation gRamSaveSectorLocations[NUM_SECTORS_PER_SLOT] = {0};
  COMMON_DATA u16 gSaveAttemptStatus = 0;
  
-@@ -343,6 +345,14 @@ static u8 HandleReplaceSector(u16 sectorId, const struct SaveSectorLocation *loc
+@@ -343,6 +350,14 @@ static u8 HandleReplaceSector(u16 sectorId, const struct SaveSectorLocation *loc
  
      gReadWriteSector->checksum = CalculateChecksum(data, size);
  
@@ -26863,7 +27502,7 @@ index 055b0729..ba52c98b 100644
      // Erase old save data
      EraseFlashSector(sector);
  
-@@ -393,6 +403,7 @@ static u8 HandleReplaceSector(u16 sectorId, const struct SaveSectorLocation *loc
+@@ -393,6 +408,7 @@ static u8 HandleReplaceSector(u16 sectorId, const struct SaveSectorLocation *loc
              return SAVE_STATUS_OK;
          }
      }
@@ -26871,7 +27510,7 @@ index 055b0729..ba52c98b 100644
  }
  
  static u8 WriteSectorSignatureByte_NoOffset(u16 sectorId, const struct SaveSectorLocation *locations)
-@@ -480,7 +491,8 @@ static u8 TryLoadSaveSlot(u16 sectorId, struct SaveSectorLocation *locations)
+@@ -480,7 +496,8 @@ static u8 TryLoadSaveSlot(u16 sectorId, struct SaveSectorLocation *locations)
      else
      {
          status = GetSaveValidStatus(locations);
@@ -26881,7 +27520,7 @@ index 055b0729..ba52c98b 100644
      }
  
      return status;
-@@ -499,6 +511,8 @@ static u8 CopySaveSlotData(u16 sectorId, struct SaveSectorLocation *locations)
+@@ -499,6 +516,8 @@ static u8 CopySaveSlotData(u16 sectorId, struct SaveSectorLocation *locations)
          ReadFlashSector(i + slotOffset, gReadWriteSector);
  
          id = gReadWriteSector->id;
@@ -26890,7 +27529,7 @@ index 055b0729..ba52c98b 100644
          if (id == 0)
              gLastWrittenSector = i;
  
-@@ -535,6 +549,8 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
+@@ -535,6 +554,8 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
          if (gReadWriteSector->signature == SECTOR_SIGNATURE)
          {
              signatureValid = TRUE;
@@ -26899,7 +27538,7 @@ index 055b0729..ba52c98b 100644
              checksum = CalculateChecksum(gReadWriteSector->data, locations[gReadWriteSector->id].size);
              if (gReadWriteSector->checksum == checksum)
              {
-@@ -567,6 +583,8 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
+@@ -567,6 +588,8 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
          if (gReadWriteSector->signature == SECTOR_SIGNATURE)
          {
              signatureValid = TRUE;
@@ -26908,19 +27547,82 @@ index 055b0729..ba52c98b 100644
              checksum = CalculateChecksum(gReadWriteSector->data, locations[gReadWriteSector->id].size);
              if (gReadWriteSector->checksum == checksum)
              {
-@@ -766,6 +784,7 @@ u8 HandleSavingData(u8 saveType)
+@@ -715,6 +738,10 @@ u8 HandleSavingData(u8 saveType)
+     u8 i;
+     u32 *backupVar = gTrainerHillVBlankCounter;
+ 
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_Active())
++        DoTimeBasedEvents();
++#endif
+     gTrainerHillVBlankCounter = NULL;
+     UpdateSaveAddresses();
+     switch (saveType)
+@@ -766,7 +793,12 @@ u8 HandleSavingData(u8 saveType)
          WriteSaveSectorOrSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
          break;
      }
 +
      gTrainerHillVBlankCounter = backupVar;
++#ifdef PLATFORM_3DS
++    if (!gDamagedSaveSectors)
++        CtrClockStore_Save(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
      return 0;
  }
-@@ -894,7 +913,7 @@ u8 LoadGameSave(u8 saveType)
+ 
+@@ -796,6 +828,10 @@ bool8 LinkFullSave_Init(void)
+ {
+     if (gFlashMemoryPresent != TRUE)
+         return TRUE;
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_Active())
++        DoTimeBasedEvents();
++#endif
+     UpdateSaveAddresses();
+     CopyPartyAndObjectsToSave();
+     RestoreSaveBackupVarsAndIncrement(gRamSaveSectorLocations);
+@@ -830,6 +866,10 @@ bool8 LinkFullSave_SetLastSectorSignature(void)
+     CopySectorSignatureByte(NUM_SECTORS_PER_SLOT, gRamSaveSectorLocations);
+     if (gDamagedSaveSectors)
+         DoSaveFailedScreen(SAVE_NORMAL);
++#ifdef PLATFORM_3DS
++    if (!gDamagedSaveSectors)
++        CtrClockStore_Save(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
+     return FALSE;
+ }
+ 
+@@ -838,6 +878,10 @@ bool8 WriteSaveBlock2(void)
+     if (gFlashMemoryPresent != TRUE)
+         return TRUE;
+ 
++#ifdef PLATFORM_3DS
++    if (CtrDayNight_Active())
++        DoTimeBasedEvents();
++#endif
+     UpdateSaveAddresses();
+     CopyPartyAndObjectsToSave();
+     RestoreSaveBackupVars(gRamSaveSectorLocations);
+@@ -873,6 +917,10 @@ bool8 WriteSaveBlock1Sector(void)
+     if (gDamagedSaveSectors)
+         DoSaveFailedScreen(SAVE_LINK);
+ 
++#ifdef PLATFORM_3DS
++    if (finished && !gDamagedSaveSectors)
++        CtrClockStore_Save(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
+     return finished;
+ }
+ 
+@@ -894,7 +942,10 @@ u8 LoadGameSave(u8 saveType)
          status = TryLoadSaveSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
          CopyPartyAndObjectsFromSave();
          gSaveFileStatus = status;
 -        gGameContinueCallback = NULL;
++#ifdef PLATFORM_3DS
++        CtrClockStore_Load(FLASH_BASE, sizeof(FLASH_BASE));
++#endif
 +        gGameContinueCallback = 0;
          break;
      case SAVE_HALL_OF_FAME:
@@ -26992,10 +27694,18 @@ index ce9bf190..af2e1c5f 100644
  }
  
 diff --git c/src/scrcmd.c w/src/scrcmd.c
-index aa3d8725..926c98a4 100644
+index aa3d8725..faa0d900 100644
 --- c/src/scrcmd.c
 +++ w/src/scrcmd.c
-@@ -64,6 +64,9 @@
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "frontier_util.h"
+ #include "battle_setup.h"
+ #include "battle_util.h"
+@@ -64,6 +67,9 @@
  #include "malloc.h"
  #include "battle.h"
  #include "constants/comparison_operators.h"
@@ -27005,7 +27715,7 @@ index aa3d8725..926c98a4 100644
  #include "constants/event_objects.h"
  #include "constants/map_types.h"
  #include "constants/party_menu.h"
-@@ -465,7 +468,11 @@ bool8 ScrCmd_copyvar(struct ScriptContext *ctx)
+@@ -465,7 +471,11 @@ bool8 ScrCmd_copyvar(struct ScriptContext *ctx)
      Script_RequestEffects(SCREFF_V1);
      Script_RequestWriteVar(varId);
  
@@ -27017,7 +27727,7 @@ index aa3d8725..926c98a4 100644
      return FALSE;
  }
  
-@@ -1279,6 +1286,7 @@ bool8 ScrCmd_applymovement(struct ScriptContext *ctx)
+@@ -1279,6 +1289,7 @@ bool8 ScrCmd_applymovement(struct ScriptContext *ctx)
      u16 localId = VarGet(ScriptReadHalfword(ctx));
      const u8 *movementScript = (const u8 *)ScriptReadWord(ctx);
      struct ObjectEvent *objEvent;
@@ -27025,7 +27735,7 @@ index aa3d8725..926c98a4 100644
  
      Script_RequestEffects(SCREFF_V1 | SCREFF_HARDWARE);
  
-@@ -1291,7 +1299,14 @@ bool8 ScrCmd_applymovement(struct ScriptContext *ctx)
+@@ -1291,7 +1302,14 @@ bool8 ScrCmd_applymovement(struct ScriptContext *ctx)
      }
  
      gObjectEvents[GetObjectEventIdByLocalId(localId)].directionOverwrite = DIR_NONE;
@@ -27041,7 +27751,7 @@ index aa3d8725..926c98a4 100644
      sMovingNpcId = localId;
      if (localId != OBJ_EVENT_ID_FOLLOWER
       && !FlagGet(FLAG_SAFE_FOLLOWER_MOVEMENT)
-@@ -1319,7 +1334,17 @@ bool8 ScrCmd_applymovementat(struct ScriptContext *ctx)
+@@ -1319,7 +1337,17 @@ bool8 ScrCmd_applymovementat(struct ScriptContext *ctx)
  
  static bool8 WaitForMovementFinish(void)
  {
@@ -27060,7 +27770,7 @@ index aa3d8725..926c98a4 100644
      {
          struct ObjectEvent *objEvent = GetFollowerObject();
          // If the follower is still entering the pokeball, wait for it to finish too
-@@ -1400,10 +1425,17 @@ bool8 ScrCmd_removeobjectat(struct ScriptContext *ctx)
+@@ -1400,10 +1428,17 @@ bool8 ScrCmd_removeobjectat(struct ScriptContext *ctx)
  bool8 ScrCmd_addobject(struct ScriptContext *ctx)
  {
      u16 objectId = VarGet(ScriptReadHalfword(ctx));
@@ -27079,7 +27789,7 @@ index aa3d8725..926c98a4 100644
      return FALSE;
  }
  
-@@ -1600,6 +1632,23 @@ bool8 ScrCmd_lockall(struct ScriptContext *ctx)
+@@ -1600,6 +1635,23 @@ bool8 ScrCmd_lockall(struct ScriptContext *ctx)
      else
      {
          struct ObjectEvent *followerObj = GetFollowerObject();
@@ -27103,7 +27813,7 @@ index aa3d8725..926c98a4 100644
          FreezeObjects_WaitForPlayer();
          SetupNativeScript(ctx, IsFreezePlayerFinished);
          if (FlagGet(FLAG_SAFE_FOLLOWER_MOVEMENT) && followerObj) // Unfreeze follower object (conditionally)
-@@ -1621,6 +1670,27 @@ bool8 ScrCmd_lock(struct ScriptContext *ctx)
+@@ -1621,6 +1673,27 @@ bool8 ScrCmd_lock(struct ScriptContext *ctx)
      else
      {
          struct ObjectEvent *followerObj = GetFollowerObject();
@@ -27131,7 +27841,7 @@ index aa3d8725..926c98a4 100644
          if (gObjectEvents[gSelectedObjectEvent].active)
          {
              FreezeObjects_WaitForPlayerAndSelected();
-@@ -1652,6 +1722,13 @@ bool8 ScrCmd_releaseall(struct ScriptContext *ctx)
+@@ -1652,6 +1725,13 @@ bool8 ScrCmd_releaseall(struct ScriptContext *ctx)
  
      HideFieldMessageBox();
      playerObjectId = GetObjectEventIdByLocalIdAndMap(LOCALID_PLAYER, 0, 0);
@@ -27145,7 +27855,7 @@ index aa3d8725..926c98a4 100644
      ObjectEventClearHeldMovementIfFinished(&gObjectEvents[playerObjectId]);
      ScriptMovement_UnfreezeObjectEvents();
      UnfreezeObjectEvents();
-@@ -1688,6 +1765,9 @@ bool8 ScrCmd_message(struct ScriptContext *ctx)
+@@ -1688,6 +1768,9 @@ bool8 ScrCmd_message(struct ScriptContext *ctx)
  
      if (msg == NULL)
          msg = (const u8 *)ctx->data[0];
@@ -27155,7 +27865,7 @@ index aa3d8725..926c98a4 100644
      ShowFieldMessage(msg);
      return FALSE;
  }
-@@ -1700,6 +1780,9 @@ bool8 ScrCmd_pokenavcall(struct ScriptContext *ctx)
+@@ -1700,6 +1783,9 @@ bool8 ScrCmd_pokenavcall(struct ScriptContext *ctx)
  
      if (msg == NULL)
          msg = (const u8 *)ctx->data[0];
@@ -27165,7 +27875,7 @@ index aa3d8725..926c98a4 100644
      ShowPokenavFieldMessage(msg);
      return FALSE;
  }
-@@ -1712,6 +1795,9 @@ bool8 ScrCmd_messageautoscroll(struct ScriptContext *ctx)
+@@ -1712,6 +1798,9 @@ bool8 ScrCmd_messageautoscroll(struct ScriptContext *ctx)
  
      if (msg == NULL)
          msg = (const u8 *)ctx->data[0];
@@ -27175,7 +27885,7 @@ index aa3d8725..926c98a4 100644
      gTextFlags.autoScroll = TRUE;
      gTextFlags.forceMidTextSpeed = TRUE;
      ShowFieldAutoScrollMessage(msg);
-@@ -1727,6 +1813,9 @@ bool8 ScrCmd_messageinstant(struct ScriptContext *ctx)
+@@ -1727,6 +1816,9 @@ bool8 ScrCmd_messageinstant(struct ScriptContext *ctx)
  
      if (msg == NULL)
          msg = (const u8 *)ctx->data[0];
@@ -27185,7 +27895,7 @@ index aa3d8725..926c98a4 100644
      LoadMessageBoxAndBorderGfx();
      DrawDialogueFrame(0, TRUE);
      AddTextPrinterParameterized(0, FONT_NORMAL, msg, 0, 1, 0, NULL);
-@@ -2036,6 +2125,10 @@ bool8 ScrCmd_braillemessage(struct ScriptContext *ctx)
+@@ -2036,6 +2128,10 @@ bool8 ScrCmd_braillemessage(struct ScriptContext *ctx)
      u8 xWindow, yWindow, xText, yText;
      u8 temp;
  
@@ -27196,7 +27906,16 @@ index aa3d8725..926c98a4 100644
      // + 6 for the 6 bytes at the start of a braille message (brailleformat macro)
      // In RS these bytes are used to position the text and window, but
      // in Emerald they are unused and position is calculated below instead
-@@ -2425,7 +2518,7 @@ bool8 ScrCmd_gotopostbattlescript(struct ScriptContext *ctx)
+@@ -2309,7 +2405,7 @@ bool8 ScrCmd_checkfieldmove(struct ScriptContext *ctx)
+         enum Species species = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES);
+         if (!species)
+             break;
+-        if (!GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_IS_EGG) && MonKnowsMove(&gParties[B_TRAINER_PLAYER][i], move) == TRUE)
++        if (!GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_IS_EGG) && (MonKnowsMove(&gParties[B_TRAINER_PLAYER][i], move) == TRUE || CtrExtras_FieldHm(move)))
+         {
+             gSpecialVar_Result = i;
+             gSpecialVar_0x8004 = species;
+@@ -2425,7 +2521,7 @@ bool8 ScrCmd_gotopostbattlescript(struct ScriptContext *ctx)
  {
      Script_RequestEffects(SCREFF_V1);
  
@@ -27205,7 +27924,7 @@ index aa3d8725..926c98a4 100644
      return FALSE;
  }
  
-@@ -2433,7 +2526,7 @@ bool8 ScrCmd_gotobeatenscript(struct ScriptContext *ctx)
+@@ -2433,7 +2529,7 @@ bool8 ScrCmd_gotobeatenscript(struct ScriptContext *ctx)
  {
      Script_RequestEffects(SCREFF_V1);
  
@@ -27214,7 +27933,7 @@ index aa3d8725..926c98a4 100644
      return FALSE;
  }
  
-@@ -2662,9 +2755,32 @@ bool8 ScrCmd_setrespawn(struct ScriptContext *ctx)
+@@ -2662,9 +2758,32 @@ bool8 ScrCmd_setrespawn(struct ScriptContext *ctx)
  
  bool8 ScrCmd_checkplayergender(struct ScriptContext *ctx)
  {
@@ -28535,6 +29254,29 @@ index 00000000..e99ff4c0
 +    }
 +    return gBDPCMBlockBuffer[current & 63]; // index same as current % 64
 +}
+diff --git c/src/sprays.c w/src/sprays.c
+index 1a57e3fe..6645c543 100644
+--- c/src/sprays.c
++++ w/src/sprays.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h"
++#endif
+ #include "event_data.h"
+ #include "script_menu.h"
+ #include "strings.h"
+@@ -48,6 +51,10 @@ u32 CountOrGetSprays(u32 func)
+ 
+ u32 GetNumberSprayStrength(void)
+ {
++#ifdef PLATFORM_3DS
++    if (!CtrExtras_Get("repel_prompt"))
++        return 0;
++#endif
+     return CountOrGetSprays(SPRAY_COUNT);
+ }
+ 
 diff --git c/src/sprite.c w/src/sprite.c
 index 400ff93f..52c28041 100644
 --- c/src/sprite.c
@@ -30654,7 +31396,7 @@ index e8ef8bde..4789b598 100644
  }
  
 diff --git c/src/wild_encounter.c w/src/wild_encounter.c
-index dd6a0c88..d17874a4 100644
+index dd6a0c88..95bb4538 100644
 --- c/src/wild_encounter.c
 +++ w/src/wild_encounter.c
 @@ -1,8 +1,7 @@
@@ -30692,3 +31434,918 @@ index dd6a0c88..d17874a4 100644
  #include "battle_pike.h"
  #include "battle_pyramid.h"
  #include "constants/abilities.h"
+@@ -48,6 +45,9 @@ extern const u8 EventScript_SprayWoreOff[];
+ static u16 FeebasRandom(void);
+ static void FeebasSeedRng(u16 seed);
+ static void ApplyFluteEncounterRateMod(u32 *encRate);
++#ifdef PLATFORM_3DS
++static u32 EncounterRatePercent(void);
++#endif
+ static void ApplyCleanseTagEncounterRateMod(u32 *encRate);
+ static u8 GetMaxLevelOfSpeciesInWildTable(const struct WildPokemon *wildMon, enum Species species, enum WildPokemonArea area);
+ #ifdef BUGFIX
+@@ -605,6 +605,9 @@ static bool8 EncounterOddsCheck(u16 encounterRate)
+ static bool8 WildEncounterCheck(u32 encounterRate, bool8 ignoreAbility)
+ {
+     encounterRate *= 16;
++#ifdef PLATFORM_3DS
++    encounterRate = encounterRate * EncounterRatePercent() / 100;
++#endif
+     if (TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_MACH_BIKE | PLAYER_AVATAR_FLAG_ACRO_BIKE))
+         encounterRate = encounterRate * 80 / 100;
+     ApplyFluteEncounterRateMod(&encounterRate);
+@@ -662,6 +665,843 @@ bool8 AreLegendariesInSootopolisPreventingEncounters(void)
+     return FlagGet(FLAG_LEGENDARIES_IN_SOOTOPOLIS);
+ }
+ 
++#ifdef PLATFORM_3DS
++/*
++ * Visible wild Pokemon (OPTIONS, ENHANCEMENTS): the map's wild Pokemon wander
++ * its encounter tiles as their party icons, and touching one starts a battle with exactly that
++ * Pokemon. Species and level come from the map's own table; the personality
++ * (so a shiny) is rolled when it appears, and a shiny one sparkles. FEW and
++ * SOME come on top of the random encounters in grass, caves and water; MANY
++ * replaces them. Roamers still meet the player at random.
++ *
++ * Each one is a record (where it is, what it is) apart from its sprite, so
++ * it outlives the sprite: a battle, a menu or anything else that resets the
++ * field takes the sprites, and once back on the same map each one gets its
++ * own again where it stood. Walking into the next map keeps them too, their
++ * tiles shifted with the camera (VisibleWild_CameraShift); a warp ends them.
++ * They appear growing from a dot over a rustle of the grass (a splash on
++ * water, dust elsewhere) and vanish shrinking, on an OAM matrix the 2D
++ * compositor draws and the voxel view reads as the card's scale.
++ *
++ * They are map-anchored sprites (coordOffsetEnabled), placed each frame from
++ * their tile as object events are, so the voxel view draws them as cards.
++ * Called every overworld frame (overworld.c, CB1_Overworld); what they do
++ * goes to port.log (CTR_LOG_GAME, "visible wild: ...").
++ */
++#include "3ds_log.h"
++#include "event_object_movement.h"
++#include "field_effect.h"
++#include "field_player_avatar.h"
++#include "fieldmap.h"
++#include "3ds_extras.h"
++#include "3ds_encounters.h"
++#include "palette.h"
++#include "pokemon_icon.h"
++#include "port_platform.h"
++#include "script.h"
++#include "sound.h"
++#include "constants/field_effects.h"
++#include "constants/pokemon_icon.h"
++#include "constants/songs.h"
++
++/* The setting: off, or how many may be about at once (FEW, SOME, MANY). */
++static const u8 sVisibleMost[] = {0, 2, 4, 6};
++
++static u32 VisibleSetting(void)
++{
++    u32 setting = CtrExtras_Get("visible_wild");
++
++    return setting < ARRAY_COUNT(sVisibleMost) ? setting : 0;
++}
++
++#define VISIBLE_MOST() sVisibleMost[VisibleSetting()]
++/* MANY: they are the only wild Pokemon met by walking or surfing. */
++#define VISIBLE_REPLACES_RANDOM() (VisibleSetting() == ARRAY_COUNT(sVisibleMost) - 1)
++
++static const struct WildPokemonInfo *GetLandMonsInfo(u16 headerId)
++{
++    const struct WildPokemonHeader *header = &gWildMonHeaders[headerId];
++    const struct WildPokemonInfo *original = header->encounterTypes[GetTimeOfDayForEncounters(headerId, WILD_AREA_LAND)].landMonsInfo;
++    return CtrEncounters_Land(original, header->mapGroup, header->mapNum);
++}
++
++static u32 EncounterRatePercent(void)
++{
++    static const u16 rates[] = {100, 0, 25, 50, 200};
++    u32 setting = CtrExtras_Get("encounter_rate");
++    return setting < ARRAY_COUNT(rates) ? rates[setting] : 100;
++}
++
++#define VW_MAX 6
++#define VW_MAGIC 0x5657          /* in data[7]: the sprite is one of these */
++#define VW_RANGE_X 11            /* tiles from the player they appear within */
++#define VW_RANGE_Y 6
++#define VW_NEAREST 3             /* never closer than this when they appear */
++#define VW_FORGET 15             /* gone beyond this */
++#define VW_TRIES 24              /* tiles tried for one to appear on */
++#define VW_GROW 12               /* frames it takes to appear */
++#define VW_GROW_BACK 8           /* to be back after a battle or a menu */
++#define VW_VANISH 12             /* to vanish */
++#define VW_NONE MAX_SPRITES
++
++struct VisibleWild
++{
++    bool8 active, water, shiny;
++    bool8 vanishing;             /* shrinking away, gone at the end */
++    u8 spriteId;                 /* VW_NONE: none now (a field reset took it), made again on its tile */
++    u8 matrix;                   /* its OAM matrix while it grows or shrinks, else 0xFF */
++    u8 scaleTime, scaleFrames;   /* how far into growing or shrinking */
++    u8 level, progress;
++    s8 dx, dy;
++    s8 faceX, faceY;             /* the way it last walked */
++    u16 species, idle, sparkle;
++    s16 x, y;                    /* map coordinates (MAP_OFFSET included) */
++    u32 personality;
++};
++
++static struct VisibleWild sVisible[VW_MAX];
++static u8 sVisibleMapGroup = 0xFF, sVisibleMapNum = 0xFF;
++static bool8 sVisibleShifted;    /* the camera crossed into the next map (VisibleWild_CameraShift) */
++static u16 sVisibleSpawnTimer, sVisibleRetry;
++static u32 sVisibleFrames, sVisibleLastFail, sVisibleLastOut;
++static const char *sVisibleFailReason;
++
++#define VW_ABS(n) ((n) < 0 ? -(n) : (n))
++
++/* Why none appeared, once a reason is new or every ten seconds: a run on the
++ * console tells from port.log what held them back. */
++static void VisibleLogFail(const char *reason, u16 species)
++{
++    if (reason == sVisibleFailReason && sVisibleFrames - sVisibleLastFail < 600)
++        return;
++    sVisibleFailReason = reason;
++    sVisibleLastFail = sVisibleFrames;
++    CtrLog_Write(CTR_LOG_GAME, "visible wild: %s (species %u)", reason, species);
++}
++
++static u32 VisibleOtId(void)
++{
++    return gSaveBlock2Ptr->playerTrainerId[0]
++         | (gSaveBlock2Ptr->playerTrainerId[1] << 8)
++         | (gSaveBlock2Ptr->playerTrainerId[2] << 16)
++         | (gSaveBlock2Ptr->playerTrainerId[3] << 24);
++}
++
++static bool8 VisibleSpriteValid(const struct VisibleWild *v)
++{
++    return v->spriteId < MAX_SPRITES && gSprites[v->spriteId].inUse
++        && gSprites[v->spriteId].data[7] == VW_MAGIC;
++}
++
++/*
++ * Icon palettes. On the field OBJ palette slots 0-11 belong to the objects
++ * (written directly, gReservedSpritePaletteCount), so tags get only 12-15,
++ * shared with the field effects. A palette is loaded only when a slot is free
++ * (else that one does not appear: an icon without its slot showed another
++ * palette's colours), and freed when the last icon using it goes.
++ */
++static u16 VisiblePaletteTag(u16 species)
++{
++    return POKE_ICON_BASE_PAL_TAG + GetMonIconPaletteIndexFromSpecies(species);
++}
++
++static bool8 VisibleLoadPalette(u16 species)
++{
++    if (IndexOfSpritePaletteTag(VisiblePaletteTag(species)) == 0xFF)
++        LoadMonIconPalette(species);
++    return IndexOfSpritePaletteTag(VisiblePaletteTag(species)) != 0xFF;
++}
++
++/* Its sprite destroyed now (the record stays). */
++static void VisibleDropSprite(struct VisibleWild *v)
++{
++    if (VisibleSpriteValid(v))
++    {
++        struct Sprite *sprite = &gSprites[v->spriteId];
++
++        if (v->matrix != 0xFF)
++        {
++            sprite->oam.affineMode = ST_OAM_AFFINE_OFF;
++            sprite->oam.matrixNum = 0;
++            FreeOamMatrix(v->matrix);
++        }
++
++        {
++            u32 i;
++            bool8 shared = FALSE;
++
++            FreeAndDestroyMonIconSprite(sprite);
++            for (i = 0; i < VW_MAX; i++)
++                if (&sVisible[i] != v && sVisible[i].active && VisibleSpriteValid(&sVisible[i])
++                 && GetMonIconPaletteIndexFromSpecies(sVisible[i].species) == GetMonIconPaletteIndexFromSpecies(v->species))
++                    shared = TRUE;
++            if (!shared)
++                FreeMonIconPalette(v->species);
++        }
++    }
++    v->spriteId = VW_NONE;
++    v->matrix = 0xFF;
++}
++
++/* Its sprite went with the field (a battle, a menu, a warp): only what it
++ * held is let go; the matrices went with the sprites. */
++static void VisibleForgetSprite(struct VisibleWild *v)
++{
++
++    v->spriteId = VW_NONE;
++    v->matrix = 0xFF;
++}
++
++static void VisibleRemove(struct VisibleWild *v)
++{
++    if (v->active)
++        VisibleDropSprite(v);
++    v->active = FALSE;
++}
++
++static void VisibleRemoveAll(void)
++{
++    u32 i;
++
++    for (i = 0; i < VW_MAX; i++)
++        VisibleRemove(&sVisible[i]);
++}
++
++static u32 VisibleCount(void)
++{
++    u32 i, count = 0;
++
++    for (i = 0; i < VW_MAX; i++)
++        count += sVisible[i].active && !sVisible[i].vanishing;
++    return count;
++}
++
++static struct VisibleWild *VisibleAt(s16 x, s16 y, const struct VisibleWild *except)
++{
++    u32 i;
++
++    for (i = 0; i < VW_MAX; i++)
++    {
++        struct VisibleWild *v = &sVisible[i];
++
++        if (!v->active || v == except)
++            continue;
++        if ((v->x == x && v->y == y) || (v->progress && v->x + v->dx == x && v->y + v->dy == y))
++            return v;
++    }
++    return NULL;
++}
++
++/* A tile of the right kind (grass or cave floor, or water) one can stand on. */
++static bool8 VisibleTileKind(s16 x, s16 y, bool8 water)
++{
++    u32 behavior = MapGridGetMetatileBehaviorAt(x, y);
++
++    if (water ? !MetatileBehavior_IsWaterWildEncounter(behavior)
++              : !MetatileBehavior_IsLandWildEncounter(behavior))
++        return FALSE;
++    return MapGridGetCollisionAt(x, y) == 0;
++}
++
++/* ...and no one on it. */
++static bool8 VisibleTileFits(s16 x, s16 y, bool8 water)
++{
++    return VisibleTileKind(x, y, water) && GetObjectEventIdByXY(x, y) == OBJECT_EVENTS_COUNT;
++}
++
++
++static u32 VisibleRollPersonality(enum Species species)
++{
++    return GetMonPersonality(species, GetSynchronizedGender(WILDMON_ORIGIN, species),
++                             PickWildMonNature(species), RANDOM_UNOWN_LETTER);
++}
++
++/*
++ * Their icons' two frames, copied straight into OBJ VRAM. The game's own
++ * callback queues the copy for VBlank with a pointer into the asset cache,
++ * and on the field, where many assets stream through it, that slot can be
++ * reused before the copy runs: the frame came out as garbage.
++ */
++#define VW_ICON_BYTES 0x200      /* 32x32, 4bpp */
++#define VW_ICON_FRAME 14         /* frames per icon frame: a slow bob */
++
++static void SpriteCB_VisibleIcon(struct Sprite *sprite)
++{
++    if (sprite->data[6] > 0)
++    {
++        sprite->data[6]--;
++        return;
++    }
++    {
++        /* The icon is one asset holding both frames: resolve the asset, then
++         * step into it. The placeholder plus 0x200 is another symbol. */
++        const u8 *icon = Port_ResolveAssetPointer(sprite->images);
++
++        if (icon != NULL)
++            CpuCopy16(icon + VW_ICON_BYTES * sprite->data[5],
++                      (void *)(OBJ_VRAM0 + sprite->oam.tileNum * TILE_SIZE_4BPP), VW_ICON_BYTES);
++    }
++    sprite->data[5] ^= 1;
++    sprite->data[6] = VW_ICON_FRAME;
++}
++
++static void VisibleSparkle(const struct VisibleWild *v)
++{
++    gFieldEffectArguments[0] = v->x - MAP_OFFSET;
++    gFieldEffectArguments[1] = v->y - MAP_OFFSET;
++    gFieldEffectArguments[2] = 2;
++    FieldEffectStart(FLDEFF_SPARKLE);
++}
++
++/* Where it appears: the grass rustles (a splash on water, dust on a cave's
++ * floor or sand), the effects a landing jump leaves on the same tiles. */
++static void VisibleRustle(const struct VisibleWild *v)
++{
++    u32 behavior = MapGridGetMetatileBehaviorAt(v->x, v->y);
++    u8 effect;
++
++    if (v->water)
++        effect = FLDEFF_JUMP_SMALL_SPLASH;
++    else if (MetatileBehavior_IsTallGrass(behavior))
++        effect = FLDEFF_JUMP_TALL_GRASS;
++    else if (MetatileBehavior_IsLongGrass(behavior))
++        effect = FLDEFF_JUMP_LONG_GRASS;
++    else
++        effect = FLDEFF_DUST;
++    gFieldEffectArguments[0] = v->x;
++    gFieldEffectArguments[1] = v->y;
++    gFieldEffectArguments[2] = gObjectEvents[gPlayerAvatar.objectEventId].previousElevation;
++    gFieldEffectArguments[3] = 2;
++    FieldEffectStart(effect);
++}
++
++/* Growing (or shrinking): its size this frame, on its OAM matrix. Done, the
++ * sprite is an ordinary one again. Eased: fast at first, settling at the end. */
++static void VisibleScaleStep(struct VisibleWild *v)
++{
++    struct Sprite *sprite = &gSprites[v->spriteId];
++    u32 t, inv, scale;
++
++    if (v->scaleFrames == 0)
++        return;
++    if (v->scaleTime < v->scaleFrames)
++        v->scaleTime++;
++    t = v->scaleTime * 256 / v->scaleFrames;
++    if (v->vanishing)
++        t = 256 - t;
++    inv = 256 - t;
++    scale = 256 - inv * inv / 256;           /* 1/256ths */
++    if (v->scaleTime >= v->scaleFrames && !v->vanishing)
++    {
++        /* Full size: an ordinary sprite again, facing as it was. */
++        sprite->oam.affineMode = ST_OAM_AFFINE_OFF;
++        sprite->oam.matrixNum = 0;
++        if (v->matrix != 0xFF)
++            FreeOamMatrix(v->matrix);
++        v->matrix = 0xFF;
++        v->scaleFrames = 0;
++
++        return;
++    }
++    if (v->matrix == 0xFF)
++        return;
++    if (scale < 16)
++        scale = 16;
++    /* The matrix maps the screen onto the picture: one over the scale. */
++    SetOamMatrix(v->matrix, 0x10000 / scale, 0, 0, 0x10000 / scale);
++}
++
++static void VisibleStartScale(struct VisibleWild *v, u8 frames)
++{
++    struct Sprite *sprite = &gSprites[v->spriteId];
++
++    v->scaleTime = 0;
++    v->scaleFrames = frames;
++    if (v->matrix == 0xFF)
++        v->matrix = AllocOamMatrix();
++    if (v->matrix == 0xFF)
++    {
++        /* None free: it just appears (or goes) at once. */
++        v->scaleTime = frames;
++        return;
++    }
++
++    sprite->oam.affineMode = ST_OAM_AFFINE_NORMAL;
++    sprite->oam.matrixNum = v->matrix;
++    VisibleScaleStep(v);
++}
++
++static void VisibleVanish(struct VisibleWild *v)
++{
++    if (v->vanishing)
++        return;
++    if (!VisibleSpriteValid(v))
++    {
++        VisibleRemove(v);
++        return;
++    }
++    v->vanishing = TRUE;
++    v->dx = v->dy = 0;
++    v->progress = 0;
++    VisibleStartScale(v, VW_VANISH);
++}
++
++static void VisiblePlace(struct VisibleWild *v)
++{
++    struct Sprite *sprite = &gSprites[v->spriteId];
++    s16 x, y, step = v->progress / 2;   /* half a pixel a frame (VisibleMove) */
++
++    SetSpritePosToMapCoords(v->x, v->y, &x, &y);
++    sprite->x = x + 8 + v->dx * step;
++    sprite->y = y + v->dy * step;
++
++    /* Further down the screen, drawn over: as the map's objects are. */
++    sprite->subpriority = 200 - ((sprite->y + 64) >> 1 & 0x7F);
++}
++
++/* Its party icon grows in over `grow` frames. */
++static bool8 VisibleMakeSprite(struct VisibleWild *v, u8 grow)
++{
++    struct Sprite *sprite;
++
++    v->matrix = 0xFF;
++    {
++        if (!VisibleLoadPalette(v->species))
++        {
++            v->spriteId = VW_NONE;
++            VisibleLogFail("no icon palette slot free", v->species);
++            return FALSE;
++        }
++        v->spriteId = CreateMonIcon(v->species, SpriteCB_VisibleIcon, 0, 0, 1, v->personality);
++        if (v->spriteId >= MAX_SPRITES)
++        {
++            v->spriteId = VW_NONE;
++            VisibleLogFail("no sprite free for an icon", v->species);
++            return FALSE;
++        }
++        /* Its size is ours (VisibleScaleStep), not the icon's own anims'. */
++        gSprites[v->spriteId].affineAnims = gDummySpriteAffineAnimTable;
++    }
++    sprite = &gSprites[v->spriteId];
++    sprite->coordOffsetEnabled = TRUE;
++    sprite->oam.priority = 2;
++    sprite->data[7] = VW_MAGIC;
++    sprite->data[5] = 0;
++    sprite->data[6] = 0;
++    v->scaleFrames = 0;
++    VisiblePlace(v);
++    VisibleStartScale(v, grow);
++    VisiblePlace(v);
++    return TRUE;
++}
++
++static void VisibleTrySpawn(u16 headerId)
++{
++    struct ObjectEvent *player = &gObjectEvents[gPlayerAvatar.objectEventId];
++    struct VisibleWild *v = NULL;
++    const struct WildPokemonInfo *info;
++    const struct WildPokemon *wild;
++    u32 i, tries;
++    s16 x, y;
++    bool8 water;
++
++    for (i = 0; i < VW_MAX && v == NULL; i++)
++        if (!sVisible[i].active)
++            v = &sVisible[i];
++    if (v == NULL)
++        return;
++    for (tries = 0; tries < VW_TRIES; tries++)
++    {
++        x = player->currentCoords.x + (s16)(Random() % (2 * VW_RANGE_X + 1)) - VW_RANGE_X;
++        y = player->currentCoords.y + (s16)(Random() % (2 * VW_RANGE_Y + 1)) - VW_RANGE_Y;
++        if (VW_ABS(x - player->currentCoords.x) < VW_NEAREST && VW_ABS(y - player->currentCoords.y) < VW_NEAREST)
++            continue;
++        if (VisibleAt(x, y, NULL) != NULL)
++            continue;
++        water = MetatileBehavior_IsWaterWildEncounter(MapGridGetMetatileBehaviorAt(x, y));
++        info = water ? gWildMonHeaders[headerId].encounterTypes[GetTimeOfDayForEncounters(headerId, WILD_AREA_WATER)].waterMonsInfo : GetLandMonsInfo(headerId);
++        if (info == NULL || !VisibleTileFits(x, y, water))
++            continue;
++        if (water && AreLegendariesInSootopolisPreventingEncounters())
++            continue;
++        wild = &info->wildPokemon[water ? ChooseWildMonIndex_Water() : ChooseWildMonIndex_Land()];
++        v->level = ChooseWildMonLevel(info->wildPokemon, wild - info->wildPokemon, water ? WILD_AREA_WATER : WILD_AREA_LAND);
++        if (!IsWildLevelAllowedByRepel(v->level))
++        {
++            VisibleLogFail("kept away by a repel", wild->species);
++            return;
++        }
++        v->species = wild->species;
++        v->personality = VisibleRollPersonality(v->species);
++        v->shiny = ComputePlayerShinyOdds(v->personality, VisibleOtId());
++        v->faceX = 0;
++        v->faceY = 1;
++        v->water = water;
++        v->x = x;
++        v->y = y;
++        v->dx = v->dy = 0;
++        v->progress = 0;
++        v->vanishing = FALSE;
++        v->idle = VW_GROW + 30 + Random() % 90;
++        v->sparkle = 0;
++        if (!VisibleMakeSprite(v, VW_GROW))
++            return;
++        v->active = TRUE;
++        VisibleRustle(v);
++        if (v->shiny)
++        {
++            VisibleSparkle(v);
++            PlaySE(SE_SHINY);
++        }
++        CtrLog_Write(CTR_LOG_GAME, "visible wild: species %u lv %u%s at %d,%d on %s %u (pal %u, tile %u)",
++                     v->species, v->level, v->shiny ? " (shiny)" : "", x - MAP_OFFSET, y - MAP_OFFSET,
++                     "icon", v->spriteId,
++                     gSprites[v->spriteId].oam.paletteNum,
++                     gSprites[v->spriteId].oam.tileNum);
++        return;
++    }
++    VisibleLogFail("no free encounter tile near the player", 0);
++}
++
++/* Touched: the battle with this Pokemon, as a random encounter starts one. */
++static void VisibleStartBattle(struct VisibleWild *v)
++{
++    ZeroEnemyPartyMons();
++    CreateMonWithIVs(&gParties[B_TRAINER_OPPONENT_A][0], v->species, v->level, v->personality, OTID_STRUCT_PLAYER_ID, USE_RANDOM_IVS);
++    GiveMonInitialMoveset(&gParties[B_TRAINER_OPPONENT_A][0]);
++    {
++        bool32 shiny = v->shiny;
++        SetMonData(&gParties[B_TRAINER_OPPONENT_A][0], MON_DATA_IS_SHINY, &shiny);
++    }
++    gIsSurfingEncounter = v->water;
++    CtrLog_Write(CTR_LOG_GAME, "visible wild: battle with species %u lv %u", v->species, v->level);
++    VisibleRemove(v);
++    BattleSetup_StartWildBattle();
++}
++
++static void VisibleMove(struct VisibleWild *v, s16 px, s16 py, bool8 surfing)
++{
++    static const s8 sSteps[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
++    u32 dir;
++    s16 tx, ty;
++
++    if (v->progress)
++    {
++        /* Half a pixel a frame: a stroll. */
++        if (++v->progress >= 32)
++        {
++            v->x += v->dx;
++            v->y += v->dy;
++            v->dx = v->dy = 0;
++            v->progress = 0;
++            v->idle = 40 + Random() % 120;
++        }
++        return;
++    }
++    if (v->idle && --v->idle)
++        return;
++    dir = Random() % 4;
++    tx = v->x + sSteps[dir][0];
++    ty = v->y + sSteps[dir][1];
++    if (tx == px && ty == py)
++    {
++        /* Into the player: a battle, if the player stands where it lives. */
++        if (v->water == surfing)
++            v->idle = 0xFFFF;    /* asks for the battle (VisibleWild_Update) */
++        else
++            v->idle = 60;
++        return;
++    }
++    if (!VisibleTileFits(tx, ty, v->water) || VisibleAt(tx, ty, v) != NULL)
++    {
++        v->idle = 30;
++        return;
++    }
++    v->dx = v->faceX = sSteps[dir][0];
++    v->dy = v->faceY = sSteps[dir][1];
++    v->progress = 1;
++}
++
++/*
++ * Into the next map (event_object_movement.c, as the objects' coordinates
++ * shift with the camera): they keep walking where they were, in the new
++ * map's coordinates. Those left off the loaded map vanish next frame.
++ */
++void VisibleWild_CameraShift(s16 dx, s16 dy)
++{
++    u32 i;
++
++    for (i = 0; i < VW_MAX; i++)
++    {
++        sVisible[i].x -= dx;
++        sVisible[i].y -= dy;
++    }
++    sVisibleShifted = TRUE;
++}
++
++/*
++ * The player's step ended on one (field_control_avatar.c, every step, before
++ * the steps a random encounter waits after the last battle): its battle.
++ * VisibleWild_Update only meets one while the player stands still, so
++ * walking or running over it started nothing. On the tile it is on or, half
++ * way through a step, the one it is walking onto; never one not on show.
++ */
++bool8 VisibleWild_StepOnto(void)
++{
++    struct ObjectEvent *player = &gObjectEvents[gPlayerAvatar.objectEventId];
++    bool8 surfing = TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_SURFING) != 0;
++    s16 px = player->currentCoords.x, py = player->currentCoords.y;
++    u32 i;
++
++    if (!VISIBLE_MOST() || sWildEncountersDisabled == TRUE)
++        return FALSE;
++    for (i = 0; i < VW_MAX; i++)
++    {
++        struct VisibleWild *v = &sVisible[i];
++
++        if (!v->active || v->vanishing || v->spriteId == VW_NONE || v->water != surfing)
++            continue;
++        if ((v->x == px && v->y == py) || (v->progress && v->x + v->dx == px && v->y + v->dy == py))
++        {
++            VisibleStartBattle(v);
++            return TRUE;
++        }
++    }
++    return FALSE;
++}
++
++/*
++ * The sprite is one of these (the voxel world, 3ds_port/src/voxel/
++ * voxel_entities.c): one a tile south of the player has its middle inside the
++ * player's picture, and taken for an effect drawn over the player it was put
++ * at the player's feet, a tile underground, and vanished.
++ */
++bool8 VisibleWild_IsSprite(u8 spriteId)
++{
++    u32 i;
++
++    for (i = 0; i < VW_MAX; i++)
++        if (sVisible[i].active && sVisible[i].spriteId == spriteId && VisibleSpriteValid(&sVisible[i]))
++            return TRUE;
++    return FALSE;
++}
++
++/*
++ * On each new map, whatever decides if wild Pokemon are met there at all,
++ * random or visible: a console's port.log then tells a map without them
++ * from a setting, a repel or a lock that keeps them away.
++ */
++static void WildLogMap(void)
++{
++    static u8 sGroup = 0xFF, sNum = 0xFF;
++    u16 headerId;
++
++    if (gSaveBlock1Ptr->location.mapGroup == sGroup && gSaveBlock1Ptr->location.mapNum == sNum)
++        return;
++    sGroup = gSaveBlock1Ptr->location.mapGroup;
++    sNum = gSaveBlock1Ptr->location.mapNum;
++    headerId = GetCurrentMapWildMonHeaderId();
++    CtrLog_Write(CTR_LOG_GAME, "wild: map %d/%d header %d (land %d water %d) rate %lu%% disabled %d "
++                 "repel %u lead lv %d visible %lu (replaces random %d)",
++                 sGroup, sNum, headerId == HEADER_NONE ? -1 : headerId,
++                 headerId != HEADER_NONE && GetLandMonsInfo(headerId) != NULL,
++                 headerId != HEADER_NONE && gWildMonHeaders[headerId].encounterTypes[GetTimeOfDayForEncounters(headerId, WILD_AREA_WATER)].waterMonsInfo != NULL,
++                 (unsigned long)EncounterRatePercent(), sWildEncountersDisabled, VarGet(VAR_REPEL_STEP_COUNT),
++                 (int)GetMonData(&gPlayerParty[0], MON_DATA_LEVEL), (unsigned long)VISIBLE_MOST(),
++                 VISIBLE_REPLACES_RANDOM());
++}
++
++void VisibleWild_Update(void)
++{
++    struct ObjectEvent *player;
++    u16 headerId;
++    u32 i, percent, most;
++    bool8 surfing, idle, settled;
++
++    if (gMain.callback2 == CB2_Overworld)
++        WildLogMap();
++    most = VISIBLE_MOST();
++    if (most == 0)
++    {
++        for (i = 0; i < VW_MAX; i++)
++        {
++            if (!sVisible[i].active)
++                continue;
++            if (gMain.callback2 == CB2_Overworld)
++                VisibleRemove(&sVisible[i]);
++            else
++                VisibleForgetSprite(&sVisible[i]);
++            sVisible[i].active = FALSE;
++        }
++        sVisibleShifted = FALSE;
++        return;
++    }
++    if (gMain.callback2 != CB2_Overworld)
++        return;
++    sVisibleFrames++;
++
++    /* A battle, a menu, a warp: the sprites went with the field. The
++     * records stay; on the same map each gets its sprite back. */
++    {
++        u32 lost = 0;
++
++        for (i = 0; i < VW_MAX; i++)
++        {
++            struct VisibleWild *v = &sVisible[i];
++
++            if (v->active && v->spriteId != VW_NONE && !VisibleSpriteValid(v))
++            {
++                VisibleForgetSprite(v);
++                if (v->vanishing)
++                    v->active = FALSE;
++                else
++                    lost++;
++            }
++        }
++        if (lost)
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: %lu lost their sprites with the field", (unsigned long)lost);
++    }
++    if (gSaveBlock1Ptr->location.mapGroup != sVisibleMapGroup || gSaveBlock1Ptr->location.mapNum != sVisibleMapNum)
++    {
++        if (sVisibleShifted)
++        {
++            /* Walked into the next map: those still on loaded ground stay. */
++            u32 kept = 0, gone = 0;
++
++            for (i = 0; i < VW_MAX; i++)
++            {
++                if (!sVisible[i].active)
++                    continue;
++                if (VisibleTileKind(sVisible[i].x, sVisible[i].y, sVisible[i].water))
++                {
++                    kept++;
++                    continue;
++                }
++                VisibleVanish(&sVisible[i]);
++                gone++;
++            }
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: into map %d/%d, %lu kept, %lu off the loaded ground",
++                         gSaveBlock1Ptr->location.mapGroup, gSaveBlock1Ptr->location.mapNum,
++                         (unsigned long)kept, (unsigned long)gone);
++        }
++        else
++        {
++            /* A warp: another place. */
++            VisibleRemoveAll();
++            sVisibleSpawnTimer = 30;
++        }
++        sVisibleMapGroup = gSaveBlock1Ptr->location.mapGroup;
++        sVisibleMapNum = gSaveBlock1Ptr->location.mapNum;
++    }
++    sVisibleShifted = FALSE;
++
++    headerId = GetCurrentMapWildMonHeaderId();
++    player = &gObjectEvents[gPlayerAvatar.objectEventId];
++    surfing = TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_SURFING) != 0;
++    idle = !ArePlayerFieldControlsLocked() && !ScriptContext_IsEnabled()
++        && gPlayerAvatar.tileTransitionState == T_NOT_MOVING;
++    settled = !gPaletteFade.active;
++
++    /* Fewer wanted now (the setting lowered): the extra ones vanish. */
++    for (i = VW_MAX; i-- > 0 && VisibleCount() > most;)
++        if (sVisible[i].active && !sVisible[i].vanishing)
++            VisibleVanish(&sVisible[i]);
++
++    if (sVisibleRetry)
++        sVisibleRetry--;
++    for (i = 0; i < VW_MAX; i++)
++    {
++        struct VisibleWild *v = &sVisible[i];
++
++        if (!v->active)
++            continue;
++        if (VW_ABS(v->x - player->currentCoords.x) > VW_FORGET || VW_ABS(v->y - player->currentCoords.y) > VW_FORGET)
++        {
++            VisibleRemove(v);
++            continue;
++        }
++        if (v->spriteId == VW_NONE)
++        {
++            /* Back from a battle or a menu: its sprite again, once the
++             * screen's fade is over. A failure waits a moment (each try
++             * reads the sprite's file). */
++            if (!settled || sVisibleRetry || v->vanishing)
++                continue;
++            if (!VisibleMakeSprite(v, VW_GROW_BACK))
++            {
++                sVisibleRetry = 30;
++                continue;
++            }
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: species %u back at %d,%d", v->species,
++                         v->x - MAP_OFFSET, v->y - MAP_OFFSET);
++        }
++        if (v->scaleFrames)
++        {
++            VisibleScaleStep(v);
++            if (v->vanishing && v->scaleTime >= v->scaleFrames)
++            {
++                VisibleRemove(v);
++                continue;
++            }
++        }
++        else if (idle)
++        {
++            bool8 touched = v->idle == 0xFFFF
++                || (v->x == player->currentCoords.x && v->y == player->currentCoords.y && !v->progress);
++
++            // It walked into the player: a repel keeps it off, as it keeps random ones.
++            if (touched && v->water == surfing && (v->idle != 0xFFFF || IsWildLevelAllowedByRepel(v->level)))
++            {
++                VisibleStartBattle(v);
++                return;
++            }
++            if (v->idle == 0xFFFF)
++                v->idle = 60;
++            VisibleMove(v, player->currentCoords.x, player->currentCoords.y, surfing);
++            // Often enough to be told from the others at a glance: a shiny
++            // one's icon is drawn in the same colours as any other's.
++            if (v->shiny && ++v->sparkle >= 40)
++            {
++                v->sparkle = 0;
++                VisibleSparkle(v);
++            }
++        }
++        VisiblePlace(v);
++    }
++
++    percent = EncounterRatePercent();
++    /* None about for a while where some could be: what holds them back. */
++    if (headerId != HEADER_NONE && VisibleCount() == 0)
++    {
++        if (sVisibleFrames - sVisibleLastOut >= 1200)
++        {
++            sVisibleLastOut = sVisibleFrames;
++            CtrLog_Write(CTR_LOG_GAME, "visible wild: none out (idle %d: locked %d script %d step %d; settled %d "
++                         "rate %u%% disabled %d timer %u)", idle, ArePlayerFieldControlsLocked(),
++                         ScriptContext_IsEnabled(), gPlayerAvatar.tileTransitionState, settled, (unsigned)percent,
++                         sWildEncountersDisabled, sVisibleSpawnTimer);
++        }
++    }
++    else
++    {
++        sVisibleLastOut = sVisibleFrames;
++    }
++    if (!idle || !settled || headerId == HEADER_NONE || percent == 0 || sWildEncountersDisabled)
++        return;
++    if (sVisibleSpawnTimer)
++    {
++        sVisibleSpawnTimer--;
++        return;
++    }
++    /* One more every two seconds at the NORMAL encounter rate (1/2: every
++     * four, 2X: every second), up to the setting's number. */
++    sVisibleSpawnTimer = 120 * 100 / percent;
++    if (VisibleCount() < most)
++        VisibleTrySpawn(headerId);
++}
++#endif
++
++
+ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+ {
+     u32 headerId;
+@@ -714,11 +1554,11 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+         {
+             timeOfDay = GetTimeOfDayForEncounters(headerId, WILD_AREA_LAND);
+ 
+-            if (gWildMonHeaders[headerId].encounterTypes[timeOfDay].landMonsInfo == NULL)
++            if (GetLandMonsInfo(headerId) == NULL)
+                 return FALSE;
+             else if (prevMetatileBehavior != curMetatileBehavior && !AllowWildCheckOnNewMetatile())
+                 return FALSE;
+-            else if (WildEncounterCheck(gWildMonHeaders[headerId].encounterTypes[timeOfDay].landMonsInfo->encounterRate, FALSE) != TRUE)
++            else if (WildEncounterCheck(GetLandMonsInfo(headerId)->encounterRate, FALSE) != TRUE)
+                 return FALSE;
+ 
+             if (TryStartRoamerEncounter())
+@@ -732,6 +1572,10 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+             }
+             else
+             {
++#ifdef PLATFORM_3DS
++                if (VISIBLE_REPLACES_RANDOM())
++                    return FALSE;
++#endif
+                 if (DoMassOutbreakEncounterTest() == TRUE && SetUpMassOutbreakEncounter(WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
+                 {
+                     BattleSetup_StartWildBattle();
+@@ -739,12 +1583,12 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+                 }
+ 
+                 // try a regular wild land encounter
+-                if (TryGenerateWildMon(gWildMonHeaders[headerId].encounterTypes[timeOfDay].landMonsInfo, WILD_AREA_LAND, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
++                if (TryGenerateWildMon(GetLandMonsInfo(headerId), WILD_AREA_LAND, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
+                 {
+                     if (TryDoDoubleWildBattle())
+                     {
+                         struct Pokemon mon1 = gParties[B_TRAINER_OPPONENT_A][0];
+-                        TryGenerateWildMon(gWildMonHeaders[headerId].encounterTypes[timeOfDay].landMonsInfo, WILD_AREA_LAND, WILD_CHECK_KEEN_EYE);
++                        TryGenerateWildMon(GetLandMonsInfo(headerId), WILD_AREA_LAND, WILD_CHECK_KEEN_EYE);
+                         gParties[B_TRAINER_OPPONENT_A][1] = mon1;
+                         BattleSetup_StartDoubleWildBattle();
+                     }
+@@ -783,6 +1627,10 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
+             }
+             else // try a regular surfing encounter
+             {
++#ifdef PLATFORM_3DS
++                if (VISIBLE_REPLACES_RANDOM())
++                    return FALSE;
++#endif
+                 if (TryGenerateWildMon(gWildMonHeaders[headerId].encounterTypes[timeOfDay].waterMonsInfo, WILD_AREA_WATER, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
+                 {
+                     gIsSurfingEncounter = TRUE;

@@ -2,6 +2,16 @@
 
 ## Unreleased (expansion fork)
 
+- Connect all shared gameplay enhancements and cheats to expansion's native
+  battle, evolution, field-move, follower, item and summary systems. Add
+  visible encounters with stable identity, native movesets and map/menu
+  lifecycle handling. See `docs/EXPANSION_FEATURES.md` for the audit.
+- Integrate accelerated clock/berry updates and clock persistence with the
+  expansion save flow. Use the shared day/night renderer without double tint.
+- Draw expansion category icons at their actual 16x16 size and support all
+  six party-icon palettes in the save screen (including Lotad's palette).
+  Show the expansion's physical/special split as always on natively.
+
 - Restore expansion palette groups in the asset index. A merged check for
   text-bearing structures excluded `INCGFX` palette arrays, leaving voxel
   terrain black and party icons without their colours. Regression tests

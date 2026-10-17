@@ -587,7 +587,11 @@ static struct
     const u8 *categoryTiles;
     Pal categoryPal;
     /* The SAVE view's party. */
+#ifdef PORT_EXPANSION
+    Pal monIconPal[6];
+#else
     Pal monIconPal[3];
+#endif
     /* Region map. */
     u8 *mapTiles;
     u32 mapTileCount;
@@ -749,7 +753,7 @@ static void LoadResources(void)
         if (pal)
             ToPals(&sRes.categoryPal, pal, 1);
     }
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < (int)ARRAY_COUNT(sRes.monIconPal); ++i)
         PalSymbol(gMonIconPaletteTable[i].data, &sRes.monIconPal[i], 1);
 
 #ifdef PORT_EXPANSION
@@ -4332,7 +4336,7 @@ static void DrawSaveFile(const ViewState *s)
             u8 pal = gMonIconPaletteIndices[mon->iconSpecies];
 #endif
 
-            if (tiles && pal < 3)
+            if (tiles && pal < ARRAY_COUNT(sRes.monIconPal))
                 DrawSprite(tiles, 4, 4, x, y - 2, sRes.monIconPal[pal].c);
         }
         else
@@ -4731,7 +4735,11 @@ static Rgb Shade(Rgb c, int keep)
 static void DrawCategoryIcon(u16 move, int x, int y)
 {
     if (sRes.categoryTiles && move < MOVES_COUNT && BottomMoveSplitEnabled())
+#ifdef PORT_EXPANSION
+        DrawSprite(sRes.categoryTiles + MoveCategory(move) * 4 * 32, 2, 2, x + 8, y, sRes.categoryPal.c);
+#else
         DrawSprite(sRes.categoryTiles + MoveCategory(move) * 8 * 32, 4, 2, x, y, sRes.categoryPal.c);
+#endif
 }
 
 static void DrawTypeIcon(u8 type, int x, int y)

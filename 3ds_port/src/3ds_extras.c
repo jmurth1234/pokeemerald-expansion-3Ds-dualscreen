@@ -21,9 +21,14 @@
 #endif
 #include "constants/item.h"
 #include "constants/items.h"
+#include "constants/moves.h"
 #include "constants/songs.h"
 
 const char *const gCtrExtrasOffOn[2] = {CTR_TEXT("OFF", "NO", "NON", "NO"), CTR_TEXT("ON", "SÍ", "OUI", "SÌ")};
+
+#ifdef PORT_EXPANSION
+static const char *const sNativeSplit[] = {"ON (NATIVE)"};
+#endif
 
 static const char *const sDayNight[] = {CTR_TEXT("OFF", "NO", "NON", "NO"), "AUTO"};
 static const char *const sClockSpeeds[] = {"1X", "6X", "12X", "24X", "60X", "120X"};
@@ -222,7 +227,11 @@ const CtrExtra gCtrExtras[] =
     {CTR_EXTRAS_ENHANCEMENTS, CTR_TEXT("RUN INDOORS", "CORRER DENTRO", "COURSE INTÉR.", "CORRI DENTRO"), "run_indoors", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
     /* Moves physical or special by their own category, as from Gen IV on
      * (pokemon.c, MoveSplitEnabled). */
+#ifdef PORT_EXPANSION
+    {CTR_EXTRAS_ENHANCEMENTS, CTR_TEXT("PHYS/SPEC SPLIT", "FÍSICO / ESPECIAL", "PHYS./SPÉC.", "FIS./SPEC."), "move_split", 1, 0, sNativeSplit, NULL, NULL, NULL},
+#else
     {CTR_EXTRAS_ENHANCEMENTS, CTR_TEXT("PHYS/SPEC SPLIT", "FÍSICO / ESPECIAL", "PHYS./SPÉC.", "FIS./SPEC."), "move_split", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
+#endif
     {CTR_EXTRAS_CHEATS, CTR_TEXT("WILD ENCOUNTERS", "ENC. SALVAJES", "RENCONTRES", "INCONTRI"), "encounter_rate", 5, 0, sEncounterRate, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("SHINY ODDS", "PROB. VARIOCOLOR", "CHROMATIQUES", "PROB. SHINY"), "shiny_odds", 6, 0, sShinyOdds, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("ALWAYS CATCH", "CAPTURA SEGURA", "CAPTURE SÛRE", "CATTURA SICURA"), "always_catch", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
@@ -300,4 +309,12 @@ bool CtrExtras_PageUsed(unsigned page)
         if (CTR_EXTRAS_TAB(gCtrExtras[i].page) == page)
             return true;
     return false;
+}
+
+/* Badge and map checks stay with the game's callers. */
+bool CtrExtras_FieldHm(uint16_t move)
+{
+    return CtrExtras_Get("field_hms") && (move == MOVE_CUT || move == MOVE_FLY
+        || move == MOVE_SURF || move == MOVE_STRENGTH || move == MOVE_FLASH
+        || move == MOVE_ROCK_SMASH || move == MOVE_WATERFALL || move == MOVE_DIVE);
 }

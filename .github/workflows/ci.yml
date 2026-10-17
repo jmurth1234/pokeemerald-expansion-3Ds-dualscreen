@@ -79,6 +79,9 @@ jobs:
           python3 tools/bootstrap.py --upstream ${{ matrix.upstream }} --dir build/${{ matrix.tree }} --make -j4 --python python3
       - name: Host tests and link audit
         run: make -C build/${{ matrix.tree }}/3ds_port verify PYTHON=python3
+      - name: Expansion gameplay settings regression fixtures
+        if: matrix.upstream == 'pokeemerald-expansion'
+        run: python3 -m unittest builder.tests.test_expansion_enhancements -v
       - name: Production timed encounter rules
         if: matrix.upstream == 'pokeemerald'
         run: python3 3ds_port/tests/encounter_tables_test.py --tree build/${{ matrix.tree }}

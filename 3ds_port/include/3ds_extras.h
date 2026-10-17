@@ -52,6 +52,7 @@ int CtrExtras_Value(const CtrExtra *extra);
 /* For the game code: the value of the extra with this key (0 when no build
  * line has it). */
 int CtrExtras_Get(const char *key);
+bool CtrExtras_FieldHm(uint16_t move);
 void CtrExtras_Step(const CtrExtra *extra, int direction);
 /* An extra that acts on the voxel overworld alone. */
 bool CtrExtras_NeedsVoxel(const CtrExtra *extra);

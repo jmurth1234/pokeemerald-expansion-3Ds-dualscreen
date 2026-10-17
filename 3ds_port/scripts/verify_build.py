@@ -51,6 +51,8 @@ def main():
         # The expansion provides these as a static inline and a macro, so no
         # such symbols are emitted; check the real functions behind them.
         required = ['CtrGame_Init', 'CpuSet', 'DmaSet', 'Random32', 'AllocZeroed_', 'CtrInput_Update']
+    if args.full and args.expansion:
+        required += ['VisibleWild_Update', 'VisibleWild_StepOnto', 'VisibleWild_CameraShift', 'VisibleWild_IsSprite']
     if args.full:
         required += ['AgbMain', 'CtrGame_VBlank', 'CB2_Overworld', 'CtrScripts_Init',
                      'CtrMaps_Init', 'CtrSongs_Init', 'Port_ResolveAssetPointer']
