@@ -11,6 +11,18 @@ CC = shutil.which("cc") or shutil.which("gcc")
 
 @unittest.skipUnless(CC, "requires a host C compiler")
 class LocaleTextTests(unittest.TestCase):
+    def test_expansion_without_language_macros_defaults_to_english(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "constants").mkdir()
+            (root / "constants/global.h").write_text("/* expansion constants */\n")
+            source = root / "language.c"
+            source.write_text('#include "3ds_locale.h"\nCTR_TEXT("EN", "ES", "FR", "IT")\n')
+            result = subprocess.check_output([
+                CC, "-E", "-P", "-I", str(root), "-I", str(ROOT / "3ds_port/include"), str(source)
+            ], text=True)
+            self.assertEqual(result.strip(), '("EN")')
+
     def test_encoding_bounds_and_language_selection(self):
         code = r'''
 #include <assert.h>

@@ -91,6 +91,20 @@ def main():
         # Full-game INCBIN stubs are deliberate RomFS lookup keys, unlike the
         # bootstrap's compile-only placeholders. Validate their resource index.
         subprocess.check_call([sys.executable, str(root / 'scripts/verify_assets.py')])
+        if args.expansion:
+            # Indexed rows alone cannot reveal an entire palette group omitted
+            # by the generator: the game then reads its zero-filled link stub.
+            addresses = {line.split()[-1]: int(line.split()[0], 16)
+                         for line in symbols.splitlines() if len(line.split()) >= 3}
+            assets = {int(row[0], 16): (int(row[1], 16), row[2])
+                      for line in (root / 'romfs/assets/asset_map.txt').read_text().splitlines()
+                      if not line.startswith('#') and (row := line.split(maxsplit=2))}
+            for name, size in [('gMonIconPalettes', 192), ('gTilesetPalettes_General', 512),
+                               ('gTilesetPalettes_Rustboro', 512)]:
+                entry = assets.get(addresses[name])
+                assert entry and entry[0] == size, f'Missing expansion palette group: {name}'
+                data = (root / 'romfs' / entry[1].removeprefix('romfs:/')).read_bytes()
+                assert any(data), f'Empty expansion palette group: {name}'
 
     if args.full:
         objects = [root / name for name in (root / 'build/link.rsp').read_text().split()]

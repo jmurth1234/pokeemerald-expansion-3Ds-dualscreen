@@ -11,6 +11,36 @@ spec.loader.exec_module(asset_table)
 
 
 class AssetTableCompatibilityTests(unittest.TestCase):
+    def test_grouped_expansion_palettes_are_not_mistaken_for_text_structs(self):
+        source = r'''
+const u16 gTilesetPalettes_General[][16] = {
+    INCGFX_U16("data/tilesets/primary/general/palettes/00.pal", ".gbapal"),
+    INCGFX_U16("data/tilesets/primary/general/palettes/01.pal", ".gbapal"),
+};
+const u16 gMonIconPalettes[][16] = {
+    INCBIN_U16("graphics/pokemon/icon_palettes/pal0.gbapal"),
+    INCGFX_U16("graphics/pokemon/icon_palettes/pal1.pal", ".gbapal"),
+};
+const struct Floor sFloors[] = {
+    { .nickname = __("TRAINER"), .tiles = INCBIN_U8("graphics/floor.bin") },
+};
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/graphics.c").write_text(source)
+            with patch.object(asset_table, "ROOT", root):
+                rows = {name: paths for _, name, paths, _ in asset_table.parse_incbins_by_source()}
+        self.assertEqual(rows["gTilesetPalettes_General"], [
+            "build/assets/data/tilesets/primary/general/palettes/00.pal.gbapal",
+            "build/assets/data/tilesets/primary/general/palettes/01.pal.gbapal",
+        ])
+        self.assertEqual(rows["gMonIconPalettes"], [
+            "graphics/pokemon/icon_palettes/pal0.gbapal",
+            "build/assets/graphics/pokemon/icon_palettes/pal1.pal.gbapal",
+        ])
+        self.assertNotIn("sFloors", rows)
+
     def test_single_and_concatenated_assets_preserve_uris_and_offsets(self):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)

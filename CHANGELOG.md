@@ -2,6 +2,13 @@
 
 ## Unreleased (expansion fork)
 
+- Restore expansion palette groups in the asset index. A merged check for
+  text-bearing structures excluded `INCGFX` palette arrays, leaving voxel
+  terrain black and party icons without their colours. Regression tests
+  cover expansion and mixed asset groups while still excluding text structs.
+- Default the native UI to English when the expansion provides no vanilla
+  language macros, instead of comparing two undefined macros as zero.
+
 - Merge ZallaxDev's upstream 0.4.0 (`b98cc23`), preserving builds of both
   the original game and the pinned pokeemerald-expansion engine.
 - Adapt the shared renderer and touch UI to the expansion's graphics, move

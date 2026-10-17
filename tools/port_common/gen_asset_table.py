@@ -112,7 +112,7 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
         re.S,
     )
     path_pattern = re.compile(r'"([^"]+)"')
-    incbin_pattern = re.compile(r"INCBIN_[A-Z0-9]+\s*\([^)]*\)")
+    asset_call_pattern = re.compile(r"(?:INCBIN|INCGFX)_[A-Z0-9]+\s*\([^)]*\)")
 
     result: list[tuple[Path, str, list[str], bool]] = []
     src_root = ROOT / "src"
@@ -159,10 +159,10 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
                 continue
             if not paths:
                 continue
-            # Text outside the INCBINs: a struct with members of its own
+            # Text outside the INCBIN/INCGFX calls: a struct with members of its own
             # (trainer_hill.h's sFloors_*, whose __("...") nicknames are no
             # files), not one blob of assets.
-            if path_pattern.search(incbin_pattern.sub("", init)):
+            if path_pattern.search(asset_call_pattern.sub("", init)):
                 continue
 
             is_static = "static" in decl.split("=")[0]
