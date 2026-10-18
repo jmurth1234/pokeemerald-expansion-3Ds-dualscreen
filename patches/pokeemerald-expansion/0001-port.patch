@@ -2601,6 +2601,523 @@ index f04e022b..e896dcb7 100644
  AI_CheckOrder:
  	if_user_order_eq MON_1, AI_CheckOrder_1stUp
  	if_user_order_eq MON_2, AI_CheckOrder_2ndUp
+diff --git c/data/event_scripts.s w/data/event_scripts.s
+index bc9688b6..29122391 100644
+--- c/data/event_scripts.s
++++ w/data/event_scripts.s
+@@ -1738,3 +1738,8 @@ EventScript_PalletTown_PlayersHouse_2F_TurnOnPC::
+ 	.include "data/scripts/battle_frontier.inc"
+ 	.include "data/scripts/apricorn_tree.inc"
+ 	.include "data/scripts/wild_encounter.inc"
++	.include "data/scripts/mega_progression.inc"
++	.include "data/scripts/kanto_ferry.inc"
++	.include "data/maps/KantoVisit_Vermilion/scripts.inc"
++	.include "data/maps/KantoVisit_PokemonCenter/scripts.inc"
++	.include "data/maps/KantoVisit_Mart/scripts.inc"
+diff --git c/data/layouts/layouts.json w/data/layouts/layouts.json
+index 2b25587a..4d6ef47a 100644
+--- c/data/layouts/layouts.json
++++ w/data/layouts/layouts.json
+@@ -4941,7 +4941,8 @@
+       "secondary_tileset": "gTileset_PokemonCenterFrlg",
+       "border_filepath": "data/layouts/PokemonCenter_1F_Frlg/border.bin",
+       "blockdata_filepath": "data/layouts/PokemonCenter_1F_Frlg/map.bin",
+-      "layout_version": "frlg"
++      "layout_version": "frlg",
++      "include_in_emerald": true
+     },
+     {
+       "id": "LAYOUT_POKEMON_CENTER_2F_FRLG",
+@@ -4967,7 +4968,8 @@
+       "secondary_tileset": "gTileset_Mart",
+       "border_filepath": "data/layouts/Mart_Frlg/border.bin",
+       "blockdata_filepath": "data/layouts/Mart_Frlg/map.bin",
+-      "layout_version": "frlg"
++      "layout_version": "frlg",
++      "include_in_emerald": true
+     },
+     {
+       "id": "LAYOUT_HOUSE3_FRLG",
+@@ -5435,7 +5437,8 @@
+       "secondary_tileset": "gTileset_VermilionCity",
+       "border_filepath": "data/layouts/VermilionCity_Frlg/border.bin",
+       "blockdata_filepath": "data/layouts/VermilionCity_Frlg/map.bin",
+-      "layout_version": "frlg"
++      "layout_version": "frlg",
++      "include_in_emerald": true
+     },
+     {
+       "id": "LAYOUT_CELADON_CITY",
+diff --git c/data/maps/KantoVisit_Mart/map.json w/data/maps/KantoVisit_Mart/map.json
+new file mode 100644
+index 00000000..b6d40f6b
+--- /dev/null
++++ w/data/maps/KantoVisit_Mart/map.json
+@@ -0,0 +1,59 @@
++{
++  "id": "MAP_KANTO_VISIT_MART",
++  "name": "KantoVisit_Mart",
++  "layout": "LAYOUT_MART_FRLG",
++  "music": "MUS_RG_POKE_CENTER",
++  "region": "REGION_KANTO",
++  "region_map_section": "MAPSEC_VERMILION_CITY",
++  "requires_flash": false,
++  "weather": "WEATHER_NONE",
++  "map_type": "MAP_TYPE_INDOOR",
++  "allow_cycling": false,
++  "allow_escaping": false,
++  "allow_running": false,
++  "show_map_name": false,
++  "floor_number": 0,
++  "battle_scene": "MAP_BATTLE_SCENE_NORMAL",
++  "connections": null,
++  "object_events": [
++    {
++      "graphics_id": "OBJ_EVENT_GFX_CLERK",
++      "x": 2,
++      "y": 3,
++      "elevation": 0,
++      "movement_type": "MOVEMENT_TYPE_FACE_RIGHT",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Clerk",
++      "flag": "0"
++    }
++  ],
++  "warp_events": [
++    {
++      "x": 3,
++      "y": 7,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_VERMILION",
++      "dest_warp_id": "1"
++    },
++    {
++      "x": 4,
++      "y": 7,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_VERMILION",
++      "dest_warp_id": "1"
++    },
++    {
++      "x": 5,
++      "y": 7,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_VERMILION",
++      "dest_warp_id": "1"
++    }
++  ],
++  "coord_events": [],
++  "bg_events": [],
++  "include_in_emerald": true
++}
+diff --git c/data/maps/KantoVisit_Mart/scripts.inc w/data/maps/KantoVisit_Mart/scripts.inc
+new file mode 100644
+index 00000000..ca052006
+--- /dev/null
++++ w/data/maps/KantoVisit_Mart/scripts.inc
+@@ -0,0 +1,2 @@
++KantoVisit_Mart_MapScripts::
++	.byte 0
+diff --git c/data/maps/KantoVisit_PokemonCenter/map.json w/data/maps/KantoVisit_PokemonCenter/map.json
+new file mode 100644
+index 00000000..45c42482
+--- /dev/null
++++ w/data/maps/KantoVisit_PokemonCenter/map.json
+@@ -0,0 +1,72 @@
++{
++  "id": "MAP_KANTO_VISIT_POKEMON_CENTER",
++  "name": "KantoVisit_PokemonCenter",
++  "layout": "LAYOUT_POKEMON_CENTER_1F_FRLG",
++  "music": "MUS_RG_POKE_CENTER",
++  "region": "REGION_KANTO",
++  "region_map_section": "MAPSEC_VERMILION_CITY",
++  "requires_flash": false,
++  "weather": "WEATHER_NONE",
++  "map_type": "MAP_TYPE_INDOOR",
++  "allow_cycling": false,
++  "allow_escaping": false,
++  "allow_running": false,
++  "show_map_name": false,
++  "floor_number": 0,
++  "battle_scene": "MAP_BATTLE_SCENE_NORMAL",
++  "connections": null,
++  "object_events": [
++    {
++      "graphics_id": "OBJ_EVENT_GFX_NURSE_FRLG",
++      "x": 7,
++      "y": 2,
++      "elevation": 3,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Nurse",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_MAN",
++      "x": 1,
++      "y": 6,
++      "elevation": 4,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Closed",
++      "flag": "0"
++    }
++  ],
++  "warp_events": [
++    {
++      "x": 6,
++      "y": 8,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_VERMILION",
++      "dest_warp_id": "0"
++    },
++    {
++      "x": 7,
++      "y": 8,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_VERMILION",
++      "dest_warp_id": "0"
++    },
++    {
++      "x": 8,
++      "y": 8,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_VERMILION",
++      "dest_warp_id": "0"
++    }
++  ],
++  "coord_events": [],
++  "bg_events": [],
++  "include_in_emerald": true
++}
+diff --git c/data/maps/KantoVisit_PokemonCenter/scripts.inc w/data/maps/KantoVisit_PokemonCenter/scripts.inc
+new file mode 100644
+index 00000000..d1bd4a1b
+--- /dev/null
++++ w/data/maps/KantoVisit_PokemonCenter/scripts.inc
+@@ -0,0 +1,2 @@
++KantoVisit_PokemonCenter_MapScripts::
++	.byte 0
+diff --git c/data/maps/KantoVisit_Vermilion/map.json w/data/maps/KantoVisit_Vermilion/map.json
+new file mode 100644
+index 00000000..f9b8926a
+--- /dev/null
++++ w/data/maps/KantoVisit_Vermilion/map.json
+@@ -0,0 +1,171 @@
++{
++  "id": "MAP_KANTO_VISIT_VERMILION",
++  "name": "KantoVisit_Vermilion",
++  "layout": "LAYOUT_VERMILION_CITY",
++  "music": "MUS_RG_VERMILLION",
++  "region": "REGION_KANTO",
++  "region_map_section": "MAPSEC_VERMILION_CITY",
++  "requires_flash": false,
++  "weather": "WEATHER_SUNNY",
++  "map_type": "MAP_TYPE_TOWN",
++  "allow_cycling": true,
++  "allow_escaping": false,
++  "allow_running": true,
++  "show_map_name": true,
++  "floor_number": 0,
++  "battle_scene": "MAP_BATTLE_SCENE_NORMAL",
++  "connections": null,
++  "object_events": [
++    {
++      "graphics_id": "OBJ_EVENT_GFX_SAILOR",
++      "x": 24,
++      "y": 33,
++      "elevation": 3,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoFerry_Return",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_OLD_MAN",
++      "x": 17,
++      "y": 9,
++      "elevation": 3,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Local",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_SAILOR",
++      "x": 31,
++      "y": 30,
++      "elevation": 3,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Local",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_MAN",
++      "x": 9,
++      "y": 6,
++      "elevation": 0,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Closed",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_MAN",
++      "x": 12,
++      "y": 17,
++      "elevation": 0,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Closed",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_MAN",
++      "x": 19,
++      "y": 17,
++      "elevation": 0,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Closed",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_MAN",
++      "x": 28,
++      "y": 24,
++      "elevation": 0,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Closed",
++      "flag": "0"
++    },
++    {
++      "graphics_id": "OBJ_EVENT_GFX_MAN",
++      "x": 14,
++      "y": 25,
++      "elevation": 0,
++      "movement_type": "MOVEMENT_TYPE_FACE_DOWN",
++      "movement_range_x": 0,
++      "movement_range_y": 0,
++      "trainer_type": "TRAINER_TYPE_NONE",
++      "trainer_sight_or_berry_tree_id": "0",
++      "script": "KantoVisit_Closed",
++      "flag": "0"
++    }
++  ],
++  "warp_events": [
++    {
++      "x": 15,
++      "y": 6,
++      "elevation": 3,
++      "dest_map": "MAP_KANTO_VISIT_POKEMON_CENTER",
++      "dest_warp_id": "0"
++    },
++    {
++      "x": 29,
++      "y": 17,
++      "elevation": 0,
++      "dest_map": "MAP_KANTO_VISIT_MART",
++      "dest_warp_id": "0"
++    }
++  ],
++  "coord_events": [
++    {
++      "type": "trigger",
++      "x": 22,
++      "y": 34,
++      "elevation": 0,
++      "var": "VAR_TEMP_2",
++      "var_value": "0",
++      "script": "KantoFerry_DockReturn"
++    },
++    {
++      "type": "trigger",
++      "x": 23,
++      "y": 34,
++      "elevation": 0,
++      "var": "VAR_TEMP_2",
++      "var_value": "0",
++      "script": "KantoFerry_DockReturn"
++    },
++    {
++      "type": "trigger",
++      "x": 24,
++      "y": 34,
++      "elevation": 0,
++      "var": "VAR_TEMP_2",
++      "var_value": "0",
++      "script": "KantoFerry_DockReturn"
++    }
++  ],
++  "bg_events": [],
++  "include_in_emerald": true
++}
+diff --git c/data/maps/KantoVisit_Vermilion/scripts.inc w/data/maps/KantoVisit_Vermilion/scripts.inc
+new file mode 100644
+index 00000000..6c919128
+--- /dev/null
++++ w/data/maps/KantoVisit_Vermilion/scripts.inc
+@@ -0,0 +1,22 @@
++KantoVisit_Vermilion_MapScripts::
++	map_script MAP_SCRIPT_ON_TRANSITION, KantoVisit_OnTransition
++	map_script MAP_SCRIPT_ON_FRAME_TABLE, KantoVisit_OnFrame
++	.byte 0
++KantoVisit_OnTransition::
++	setvar VAR_TEMP_1, 0
++	setvar VAR_TEMP_2, 0
++	call_if_unset FLAG_KANTO_FERRY_INTRO_SEEN, KantoVisit_QueueIntro
++	end
++KantoVisit_QueueIntro::
++	setvar VAR_TEMP_1, 1
++	return
++KantoVisit_OnFrame::
++	map_script_2 VAR_TEMP_1, 1, KantoVisit_Introduction
++	.2byte 0
++KantoVisit_Introduction::
++	lockall
++	setvar VAR_TEMP_1, 0
++	msgbox KantoVisit_Text_Welcome, MSGBOX_DEFAULT
++	setflag FLAG_KANTO_FERRY_INTRO_SEEN
++	releaseall
++	end
+diff --git c/data/maps/MauvilleCity/scripts.inc w/data/maps/MauvilleCity/scripts.inc
+index 6f6ea027..6eafa65d 100644
+--- c/data/maps/MauvilleCity/scripts.inc
++++ w/data/maps/MauvilleCity/scripts.inc
+@@ -431,6 +431,7 @@ MauvilleCity_EventScript_BegunNewMauville::
+ 	end
+ 
+ MauvilleCity_EventScript_CompletedNewMauville::
++	call MegaProgression_EventScript_MANECTITE
+ 	msgbox MauvilleCity_Text_WattsonThanksTakeTM, MSGBOX_DEFAULT
+ 	giveitem ITEM_TM_THUNDERBOLT
+ 	goto_if_eq VAR_RESULT, FALSE, Common_EventScript_ShowBagIsFull
+@@ -440,6 +441,7 @@ MauvilleCity_EventScript_CompletedNewMauville::
+ 	end
+ 
+ MauvilleCity_EventScript_ReceivedThunderbolt::
++	call MegaProgression_EventScript_MANECTITE
+ 	msgbox MauvilleCity_Text_WattsonYoungTakeCharge, MSGBOX_DEFAULT
+ 	release
+ 	end
+diff --git c/data/maps/Route114_FossilManiacsHouse/scripts.inc w/data/maps/Route114_FossilManiacsHouse/scripts.inc
+index 2586ea10..3502e3a7 100644
+--- c/data/maps/Route114_FossilManiacsHouse/scripts.inc
++++ w/data/maps/Route114_FossilManiacsHouse/scripts.inc
+@@ -9,6 +9,7 @@ Route114_FossilManiacsHouse_OnTransition:
+ Route114_FossilManiacsHouse_EventScript_FossilManiacsBrother::
+ 	lock
+ 	faceplayer
++	call MegaProgression_EventScript_MAWILITE
+ 	goto_if_set FLAG_RECEIVED_TM_DIG, Route114_FossilManiacsHouse_EventScript_ReceivedDig
+ 	msgbox Route114_FossilManiacsHouse_Text_HaveThisToDigLikeMyBrother, MSGBOX_DEFAULT
+ 	giveitem ITEM_TM_DIG
+diff --git c/data/maps/Route118/scripts.inc w/data/maps/Route118/scripts.inc
+index 92dd1059..afad7097 100644
+--- c/data/maps/Route118/scripts.inc
++++ w/data/maps/Route118/scripts.inc
+@@ -94,6 +94,7 @@ Route118_EventScript_StevenTrigger::
+ 	waitmovement 0
+ 	delay 30
+ 	msgbox Route118_Text_StevenQuestions, MSGBOX_DEFAULT
++	call MegaProgression_EventScript_Starter
+ 	closemessage
+ 	call_if_eq VAR_0x8008, 0, Route118_EventScript_StevenExit0
+ 	call_if_eq VAR_0x8008, 1, Route118_EventScript_StevenExit1
+diff --git c/data/maps/Route120/scripts.inc w/data/maps/Route120/scripts.inc
+index c3162ecd..6261fe45 100644
+--- c/data/maps/Route120/scripts.inc
++++ w/data/maps/Route120/scripts.inc
+@@ -86,6 +86,7 @@ Route120_EventScript_SetRainyWeather::
+ Route120_EventScript_BerryBeauty::
+ 	lock
+ 	faceplayer
++	call MegaProgression_EventScript_ABSOLITE
+ 	dotimebasedevents
+ 	goto_if_set FLAG_DAILY_ROUTE_120_RECEIVED_BERRY, Route120_EventScript_ReceivedBerry
+ 	msgbox Route120_Text_BerriesExpressionOfLoveIsntIt, MSGBOX_YESNO
+diff --git c/data/maps/RustboroCity_DevonCorp_1F/scripts.inc w/data/maps/RustboroCity_DevonCorp_1F/scripts.inc
+index c9111d0e..f725073a 100644
+--- c/data/maps/RustboroCity_DevonCorp_1F/scripts.inc
++++ w/data/maps/RustboroCity_DevonCorp_1F/scripts.inc
+@@ -14,6 +14,7 @@ RustboroCity_DevonCorp_1F_EventScript_BlockStairs::
+ RustboroCity_DevonCorp_1F_EventScript_Employee::
+ 	lock
+ 	faceplayer
++	goto_if_set FLAG_BADGE05_GET, MegaProgression_EventScript_Devon
+ 	goto_if_set FLAG_RETURNED_DEVON_GOODS, RustboroCity_DevonCorp_1F_EventScript_GoodsRecovered
+ 	goto_if_set FLAG_DEVON_GOODS_STOLEN, RustboroCity_DevonCorp_1F_EventScript_RobberWasntBright
+ 	msgbox RustboroCity_DevonCorp_1F_Text_ThoseShoesAreOurProduct, MSGBOX_DEFAULT
+diff --git c/data/maps/SlateportCity_Harbor/scripts.inc w/data/maps/SlateportCity_Harbor/scripts.inc
+index 52fd04ec..30f3df99 100644
+--- c/data/maps/SlateportCity_Harbor/scripts.inc
++++ w/data/maps/SlateportCity_Harbor/scripts.inc
+@@ -157,7 +157,7 @@ SlateportCity_Harbor_Movement_PlayerWalkUp:
+ SlateportCity_Harbor_EventScript_FerryAttendant::
+ 	lock
+ 	faceplayer
+-	goto_if_set FLAG_SYS_GAME_CLEAR, SlateportCity_Harbor_EventScript_AskForTicket
++	goto_if_set FLAG_SYS_GAME_CLEAR, KantoFerry_Offer
+ 	msgbox SlateportCity_Harbor_Text_FerryServiceUnavailable, MSGBOX_DEFAULT
+ 	release
+ 	end
+diff --git c/data/maps/map_groups.json w/data/maps/map_groups.json
+index d6320f48..933b72ef 100644
+--- c/data/maps/map_groups.json
++++ w/data/maps/map_groups.json
+@@ -74,7 +74,8 @@
+     "gMapGroup_IndoorFiveIslandRoute_Frlg",
+     "gMapGroup_IndoorTwoIslandRoute_Frlg",
+     "gMapGroup_IndoorSixIslandRoute_Frlg",
+-    "gMapGroup_IndoorSevenIslandRoute_Frlg"
++    "gMapGroup_IndoorSevenIslandRoute_Frlg",
++    "gMapGroup_KantoVisit"
+   ],
+   "gMapGroup_TownsAndRoutes": [
+     "PetalburgCity",
+@@ -1160,5 +1161,10 @@
+   ],
+   "gMapGroup_IndoorSevenIslandRoute_Frlg": [
+     "SevenIsland_SevaultCanyon_House_Frlg"
++  ],
++  "gMapGroup_KantoVisit": [
++    "KantoVisit_Vermilion",
++    "KantoVisit_PokemonCenter",
++    "KantoVisit_Mart"
+   ]
+ }
 diff --git c/data/multiboot_berry_glitch_fix.s w/data/multiboot_berry_glitch_fix.s
 index d0d54d55..ddb93846 100644
 --- c/data/multiboot_berry_glitch_fix.s
@@ -3238,6 +3755,146 @@ index e102bf88..1e80473e 100644
  EventScript_ContestLiveInterview::
  	setvar VAR_0x8005, TVSHOW_CONTEST_LIVE_UPDATES
  	special InterviewBefore
+diff --git c/data/scripts/kanto_ferry.inc w/data/scripts/kanto_ferry.inc
+new file mode 100644
+index 00000000..ff772a3d
+--- /dev/null
++++ w/data/scripts/kanto_ferry.inc
+@@ -0,0 +1,134 @@
++@ Emerald-only visitor service. Never read/write FRLG story flags or badge IDs.
++KantoFerry_Offer::
++	goto_if_unset FLAG_SYS_GAME_CLEAR, KantoFerry_Unavailable
++	msgbox KantoFerry_Text_Offer, MSGBOX_YESNO
++	goto_if_eq VAR_RESULT, NO, SlateportCity_Harbor_EventScript_AskForTicket
++	call SlateportCity_Harbor_EventScript_BoardFerry
++	warp MAP_KANTO_VISIT_VERMILION, 23, 32
++	waitstate
++	releaseall
++	end
++KantoFerry_Unavailable::
++	msgbox SlateportCity_Harbor_Text_FerryServiceUnavailable, MSGBOX_DEFAULT
++	releaseall
++	end
++
++@ Return is unconditional: a visitor can always get home, even on an unusual save.
++KantoFerry_Return::
++	lock
++	faceplayer
++	goto KantoFerry_ReturnMenu
++KantoFerry_DockReturn::
++	lockall
++	applymovement LOCALID_PLAYER, Common_Movement_WalkInPlaceFasterUp
++	waitmovement 0
++	applymovement LOCALID_PLAYER, KantoFerry_StepOffDock
++	waitmovement 0
++	goto KantoFerry_ReturnMenu
++KantoFerry_StepOffDock:
++	walk_up
++	step_end
++KantoFerry_ReturnMenu::
++	msgbox KantoFerry_Text_Return, MSGBOX_YESNO
++	goto_if_eq VAR_RESULT, NO, KantoFerry_Cancel
++	closemessage
++	playse SE_SHIP
++	fadescreen FADE_TO_BLACK
++	warp MAP_SLATEPORT_CITY_HARBOR, 8, 11
++	waitstate
++	releaseall
++	end
++KantoFerry_Cancel::
++	releaseall
++	end
++
++KantoVisit_Local::
++	msgbox KantoVisit_Text_Local, MSGBOX_NPC
++	end
++KantoVisit_Closed::
++	msgbox KantoVisit_Text_Closed, MSGBOX_NPC
++	end
++KantoVisit_Sign::
++	msgbox KantoVisit_Text_Sign, MSGBOX_SIGN
++	end
++KantoVisit_Nurse::
++	lock
++	faceplayer
++	msgbox KantoVisit_Text_Heal, MSGBOX_YESNO
++	goto_if_eq VAR_RESULT, NO, KantoFerry_Cancel
++	closemessage
++	fadescreen FADE_TO_BLACK
++	special HealPlayerParty
++	playfanfare MUS_HEAL
++	waitfanfare
++	fadescreen FADE_FROM_BLACK
++	msgbox KantoVisit_Text_Healed, MSGBOX_DEFAULT
++	releaseall
++	end
++KantoVisit_Clerk::
++	lock
++	faceplayer
++	message gText_HowMayIServeYou
++	waitmessage
++	pokemart KantoVisit_Stock
++	msgbox gText_PleaseComeAgain, MSGBOX_DEFAULT
++	releaseall
++	end
++	.align 2
++KantoVisit_Stock:
++	.2byte ITEM_ULTRA_BALL
++	.2byte ITEM_HYPER_POTION
++	.2byte ITEM_FULL_RESTORE
++	.2byte ITEM_FULL_HEAL
++	.2byte ITEM_REVIVE
++	.2byte ITEM_MAX_REPEL
++	.2byte ITEM_NONE
++
++KantoFerry_Text_Offer:
++	.string "CHAMPION! Our new ferry service\n"
++	.string "connects HOENN with KANTO.\p"
++	.string "Would you like to sail to\n"
++	.string "VERMILION CITY? Passage is free.\p"
++	.string "Choose NO for our usual\n"
++	.string "HOENN destinations.$"
++
++KantoFerry_Text_Return:
++	.string "Ready to sail back to\n"
++	.string "SLATEPORT CITY in HOENN?\p"
++	.string "The return trip is always free!$"
++
++KantoVisit_Text_Welcome:
++	.string "Welcome to VERMILION CITY,\n"
++	.string "HOENN CHAMPION!\p"
++	.string "Our new ferry connects this port\n"
++	.string "with SLATEPORT CITY.\p"
++	.string "The POKéMON CENTER and MART are\n"
++	.string "open to visitors. Enjoy your stay!\p"
++	.string "Other KANTO destinations and the\n"
++	.string "GYM are not open to visitors yet.\p"
++	.string "Speak to the sailor at this dock\n"
++	.string "whenever you want to return home.$"
++
++KantoVisit_Text_Local:
++	.string "Welcome to our port! The MART and\n"
++	.string "POKéMON CENTER are open.\p"
++	.string "The sailor at the southern dock\n"
++	.string "can take you back to HOENN.$"
++
++KantoVisit_Text_Closed:
++	.string "Sorry, this area is closed\n"
++	.string "to visitors for now.$"
++
++KantoVisit_Text_Sign:
++	.string "VERMILION CITY\n"
++	.string "HOENN ferry: southern dock.\p"
++	.string "Travel beyond the city is\n"
++	.string "not available yet.$"
++
++KantoVisit_Text_Heal:
++	.string "Welcome! Shall we restore your\n"
++	.string "POKéMON to full health?$"
++
++KantoVisit_Text_Healed:
++	.string "Your POKéMON are fully healed.\n"
++	.string "Enjoy your visit to VERMILION!$"
 diff --git c/data/scripts/lilycove_lady.inc w/data/scripts/lilycove_lady.inc
 index 270795bf..c3a21b9a 100644
 --- c/data/scripts/lilycove_lady.inc
@@ -3383,6 +4040,280 @@ index 1dac6004..2a0b8122 100644
  MauvilleCity_PokemonCenter_1F_EventScript_GiddyTellTale::
  	special GenerateGiddyLine
  	special ShowFieldMessageStringVar4
+diff --git c/data/scripts/mega_progression.inc w/data/scripts/mega_progression.inc
+new file mode 100644
+index 00000000..4d6dac2a
+--- /dev/null
++++ w/data/scripts/mega_progression.inc
+@@ -0,0 +1,268 @@
++@ Shared, retryable rewards. Only mark a gift received after giveitem succeeds.
++@ These routines do not touch VAR_0x8008 (Route 118 Steven movement selector).
++MegaProgression_EventScript_Starter::
++	goto_if_unset FLAG_BADGE05_GET, MegaProgression_EventScript_Return
++	checkitem ITEM_MEGA_RING
++	goto_if_eq VAR_RESULT, TRUE, MegaProgression_EventScript_StarterStone
++	msgbox MegaProgression_Text_Introduction, MSGBOX_DEFAULT
++	giveitem ITEM_MEGA_RING
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++MegaProgression_EventScript_StarterStone::
++	goto_if_set FLAG_RECEIVED_MEGA_STARTER, MegaProgression_EventScript_Return
++	setvar VAR_0x8004, ITEM_SCEPTILITE
++	call_if_eq VAR_STARTER_MON, 1, MegaProgression_EventScript_Torchic
++	call_if_eq VAR_STARTER_MON, 2, MegaProgression_EventScript_Mudkip
++	giveitem VAR_0x8004
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_STARTER
++	msgbox MegaProgression_Text_Instructions, MSGBOX_DEFAULT
++	return
++MegaProgression_EventScript_Torchic::
++	setvar VAR_0x8004, ITEM_BLAZIKENITE
++	return
++MegaProgression_EventScript_Mudkip::
++	setvar VAR_0x8004, ITEM_SWAMPERTITE
++	return
++MegaProgression_EventScript_Return::
++	return
++
++MegaProgression_EventScript_Devon::
++	msgbox MegaProgression_Text_Devon, MSGBOX_DEFAULT
++	call MegaProgression_EventScript_Starter
++	call MegaProgression_EventScript_MANECTITE
++	call MegaProgression_EventScript_MAWILITE
++	call MegaProgression_EventScript_ABSOLITE
++	call MegaProgression_EventScript_GARDEVOIRITE
++	call MegaProgression_EventScript_AGGRONITE
++	call MegaProgression_EventScript_BANETTITE
++	call MegaProgression_EventScript_CAMERUPTITE
++	call MegaProgression_EventScript_SHARPEDONITE
++	call MegaProgression_EventScript_GLALITITE
++	call MegaProgression_EventScript_ALTARIANITE
++	goto_if_set FLAG_SYS_GAME_CLEAR, MegaProgression_EventScript_Shop
++	msgbox MegaProgression_Text_ComeBack, MSGBOX_DEFAULT
++	release
++	end
++MegaProgression_EventScript_Shop::
++	msgbox MegaProgression_Text_Shop, MSGBOX_DEFAULT
++	pokemart MegaProgression_Mart
++	release
++	end
++
++MegaProgression_EventScript_MANECTITE::
++	goto_if_unset FLAG_BADGE06_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_MANECTITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_MANECTITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_MANECTITE
++	return
++
++MegaProgression_EventScript_MAWILITE::
++	goto_if_unset FLAG_BADGE06_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_MAWILITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_MAWILITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_MAWILITE
++	return
++
++MegaProgression_EventScript_ABSOLITE::
++	goto_if_unset FLAG_BADGE06_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_ABSOLITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_ABSOLITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_ABSOLITE
++	return
++
++MegaProgression_EventScript_GARDEVOIRITE::
++	goto_if_unset FLAG_BADGE07_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_GARDEVOIRITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_GARDEVOIRITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_GARDEVOIRITE
++	return
++
++MegaProgression_EventScript_AGGRONITE::
++	goto_if_unset FLAG_BADGE07_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_AGGRONITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_AGGRONITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_AGGRONITE
++	return
++
++MegaProgression_EventScript_BANETTITE::
++	goto_if_unset FLAG_BADGE07_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_BANETTITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_BANETTITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_BANETTITE
++	return
++
++MegaProgression_EventScript_CAMERUPTITE::
++	goto_if_unset FLAG_BADGE08_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_CAMERUPTITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_CAMERUPTITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_CAMERUPTITE
++	return
++
++MegaProgression_EventScript_SHARPEDONITE::
++	goto_if_unset FLAG_BADGE08_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_SHARPEDONITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_SHARPEDONITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_SHARPEDONITE
++	return
++
++MegaProgression_EventScript_GLALITITE::
++	goto_if_unset FLAG_BADGE08_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_GLALITITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_GLALITITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_GLALITITE
++	return
++
++MegaProgression_EventScript_ALTARIANITE::
++	goto_if_unset FLAG_BADGE08_GET, MegaProgression_EventScript_Return
++	goto_if_set FLAG_RECEIVED_MEGA_ALTARIANITE, MegaProgression_EventScript_Return
++	msgbox MegaProgression_Text_StoneGift, MSGBOX_DEFAULT
++	giveitem ITEM_ALTARIANITE
++	goto_if_eq VAR_RESULT, FALSE, MegaProgression_EventScript_Return
++	setflag FLAG_RECEIVED_MEGA_ALTARIANITE
++	return
++
++MegaProgression_Text_Introduction:
++	.string "This MEGA RING is for you!\n"
++	.string "It unlocks a new kind of evolution.$"
++
++MegaProgression_Text_Instructions:
++	.string "Give this stone to your fully\n"
++	.string "evolved starter to hold.\p"
++	.string "In battle, press START while\n"
++	.string "choosing a move, then select it.\p"
++	.string "You can Mega Evolve one POKéMON\n"
++	.string "per battle. It changes back after.\p"
++	.string "DEVON in RUSTBORO has more stones\n"
++	.string "as you earn more GYM BADGES!$"
++
++MegaProgression_Text_Devon:
++	.string "STEVEN told us about your journey!\n"
++	.string "Let me check your Mega Stone gifts.$"
++
++MegaProgression_Text_ComeBack:
++	.string "More gifts unlock at six, seven,\n"
++	.string "and eight BADGES. Come back then!\p"
++	.string "After you become CHAMPION, our\n"
++	.string "full Mega Stone shop will open.$"
++
++MegaProgression_Text_StoneGift:
++	.string "Your progress has earned you\n"
++	.string "this Mega Stone!$"
++
++MegaProgression_Text_Shop:
++	.string "Our full Mega Stone collection\n"
++	.string "is now available. Each is ¥20,000.$"
++
++	.align 2
++MegaProgression_Mart:
++	.2byte ITEM_VENUSAURITE
++	.2byte ITEM_CHARIZARDITE_X
++	.2byte ITEM_CHARIZARDITE_Y
++	.2byte ITEM_BLASTOISINITE
++	.2byte ITEM_BEEDRILLITE
++	.2byte ITEM_PIDGEOTITE
++	.2byte ITEM_ALAKAZITE
++	.2byte ITEM_SLOWBRONITE
++	.2byte ITEM_GENGARITE
++	.2byte ITEM_KANGASKHANITE
++	.2byte ITEM_PINSIRITE
++	.2byte ITEM_GYARADOSITE
++	.2byte ITEM_AERODACTYLITE
++	.2byte ITEM_MEWTWONITE_X
++	.2byte ITEM_MEWTWONITE_Y
++	.2byte ITEM_AMPHAROSITE
++	.2byte ITEM_STEELIXITE
++	.2byte ITEM_SCIZORITE
++	.2byte ITEM_HERACRONITE
++	.2byte ITEM_HOUNDOOMINITE
++	.2byte ITEM_TYRANITARITE
++	.2byte ITEM_SCEPTILITE
++	.2byte ITEM_BLAZIKENITE
++	.2byte ITEM_SWAMPERTITE
++	.2byte ITEM_GARDEVOIRITE
++	.2byte ITEM_SABLENITE
++	.2byte ITEM_MAWILITE
++	.2byte ITEM_AGGRONITE
++	.2byte ITEM_MEDICHAMITE
++	.2byte ITEM_MANECTITE
++	.2byte ITEM_SHARPEDONITE
++	.2byte ITEM_CAMERUPTITE
++	.2byte ITEM_ALTARIANITE
++	.2byte ITEM_BANETTITE
++	.2byte ITEM_ABSOLITE
++	.2byte ITEM_GLALITITE
++	.2byte ITEM_SALAMENCITE
++	.2byte ITEM_METAGROSSITE
++	.2byte ITEM_LATIASITE
++	.2byte ITEM_LATIOSITE
++	.2byte ITEM_LOPUNNITE
++	.2byte ITEM_GARCHOMPITE
++	.2byte ITEM_LUCARIONITE
++	.2byte ITEM_ABOMASITE
++	.2byte ITEM_GALLADITE
++	.2byte ITEM_AUDINITE
++	.2byte ITEM_DIANCITE
++	.2byte ITEM_CLEFABLITE
++	.2byte ITEM_VICTREEBELITE
++	.2byte ITEM_STARMINITE
++	.2byte ITEM_DRAGONINITE
++	.2byte ITEM_MEGANIUMITE
++	.2byte ITEM_FERALIGITE
++	.2byte ITEM_SKARMORITE
++	.2byte ITEM_FROSLASSITE
++	.2byte ITEM_EMBOARITE
++	.2byte ITEM_EXCADRITE
++	.2byte ITEM_SCOLIPITE
++	.2byte ITEM_SCRAFTINITE
++	.2byte ITEM_EELEKTROSSITE
++	.2byte ITEM_CHANDELURITE
++	.2byte ITEM_CHESNAUGHTITE
++	.2byte ITEM_DELPHOXITE
++	.2byte ITEM_GRENINJITE
++	.2byte ITEM_PYROARITE
++	.2byte ITEM_FLOETTITE
++	.2byte ITEM_MALAMARITE
++	.2byte ITEM_BARBARACITE
++	.2byte ITEM_DRAGALGITE
++	.2byte ITEM_HAWLUCHANITE
++	.2byte ITEM_ZYGARDITE
++	.2byte ITEM_DRAMPANITE
++	.2byte ITEM_FALINKSITE
++	.2byte ITEM_HEATRANITE
++	.2byte ITEM_DARKRANITE
++	.2byte ITEM_ZERAORITE
++	.2byte ITEM_RAICHUNITE_X
++	.2byte ITEM_RAICHUNITE_Y
++	.2byte ITEM_CHIMECHITE
++	.2byte ITEM_ABSOLITE_Z
++	.2byte ITEM_STARAPTITE
++	.2byte ITEM_GARCHOMPITE_Z
++	.2byte ITEM_LUCARIONITE_Z
++	.2byte ITEM_GOLURKITE
++	.2byte ITEM_MEOWSTICITE
++	.2byte ITEM_CRABOMINITE
++	.2byte ITEM_GOLISOPITE
++	.2byte ITEM_MAGEARNITE
++	.2byte ITEM_SCOVILLAINITE
++	.2byte ITEM_BAXCALIBRITE
++	.2byte ITEM_TATSUGIRINITE
++	.2byte ITEM_GLIMMORANITE
++	.2byte ITEM_NONE
 diff --git c/data/scripts/movement.inc w/data/scripts/movement.inc
 index 786eb172..fe69072c 100644
 --- c/data/scripts/movement.inc
@@ -6259,9 +7190,40 @@ index 77a7542c..def27b04 100644
  
  #endif // GUARD_CONSTANTS_BATTLE_AI_H
 diff --git c/include/constants/flags.h w/include/constants/flags.h
-index d7a02311..51a0a8ea 100644
+index d7a02311..87412c3f 100644
 --- c/include/constants/flags.h
 +++ w/include/constants/flags.h
+@@ -52,18 +52,18 @@
+ #else
+ 
+ #define FLAG_UNUSED_0x020    0x20 // Unused Flag
+-#define FLAG_UNUSED_0x021    0x21 // Unused Flag
+-#define FLAG_UNUSED_0x022    0x22 // Unused Flag
+-#define FLAG_UNUSED_0x023    0x23 // Unused Flag
+-#define FLAG_UNUSED_0x024    0x24 // Unused Flag
+-#define FLAG_UNUSED_0x025    0x25 // Unused Flag
+-#define FLAG_UNUSED_0x026    0x26 // Unused Flag
+-#define FLAG_UNUSED_0x027    0x27 // Unused Flag
+-#define FLAG_UNUSED_0x028    0x28 // Unused Flag
+-#define FLAG_UNUSED_0x029    0x29 // Unused Flag
+-#define FLAG_UNUSED_0x02A    0x2A // Unused Flag
+-#define FLAG_UNUSED_0x02B    0x2B // Unused Flag
+-#define FLAG_UNUSED_0x02C    0x2C // Unused Flag
++#define FLAG_RECEIVED_MEGA_STARTER 0x21 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_MANECTITE 0x22 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_MAWILITE 0x23 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_ABSOLITE 0x24 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_GARDEVOIRITE 0x25 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_AGGRONITE 0x26 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_BANETTITE 0x27 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_CAMERUPTITE 0x28 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_SHARPEDONITE 0x29 // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_GLALITITE 0x2A // 3DS Mega progression reward
++#define FLAG_RECEIVED_MEGA_ALTARIANITE 0x2B // 3DS Mega progression reward
++#define FLAG_KANTO_FERRY_INTRO_SEEN 0x2C // First Hoenn ferry arrival in Vermilion
+ #define FLAG_UNUSED_0x02D    0x2D // Unused Flag
+ #define FLAG_UNUSED_0x02E    0x2E // Unused Flag
+ #define FLAG_UNUSED_0x02F    0x2F // Unused Flag
 @@ -453,7 +453,7 @@
  #define FLAG_REGISTERED_TRENT                (TRAINER_REGISTERED_FLAGS_START + REMATCH_TRENT)
  #define FLAG_REGISTERED_SAWYER               (TRAINER_REGISTERED_FLAGS_START + REMATCH_SAWYER)
@@ -11351,6 +12313,838 @@ index 28e8b87a..86b2de3b 100644
  
          for (i = 0; i < MON_PIC_SIZE; i++)
          {
+diff --git c/src/data/items.h w/src/data/items.h
+index c51a5acf..08ffbee9 100644
+--- c/src/data/items.h
++++ w/src/data/items.h
+@@ -5654,7 +5654,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_VENUSAURITE] =
+     {
+         .name = ITEM_NAME("Venusaurite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5672,7 +5672,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CHARIZARDITE_X] =
+     {
+         .name = ITEM_NAME("Charizardite X"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5690,7 +5690,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CHARIZARDITE_Y] =
+     {
+         .name = ITEM_NAME("Charizardite Y"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5708,7 +5708,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_BLASTOISINITE] =
+     {
+         .name = ITEM_NAME("Blastoisinite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5726,7 +5726,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_BEEDRILLITE] =
+     {
+         .name = ITEM_NAME("Beedrillite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5744,7 +5744,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_PIDGEOTITE] =
+     {
+         .name = ITEM_NAME("Pidgeotite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5762,7 +5762,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ALAKAZITE] =
+     {
+         .name = ITEM_NAME("Alakazite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5780,7 +5780,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SLOWBRONITE] =
+     {
+         .name = ITEM_NAME("Slowbronite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5798,7 +5798,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GENGARITE] =
+     {
+         .name = ITEM_NAME("Gengarite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5816,7 +5816,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_KANGASKHANITE] =
+     {
+         .name = ITEM_NAME("Kangaskhanite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5834,7 +5834,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_PINSIRITE] =
+     {
+         .name = ITEM_NAME("Pinsirite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5852,7 +5852,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GYARADOSITE] =
+     {
+         .name = ITEM_NAME("Gyaradosite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5870,7 +5870,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_AERODACTYLITE] =
+     {
+         .name = ITEM_NAME("Aerodactylite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5888,7 +5888,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MEWTWONITE_X] =
+     {
+         .name = ITEM_NAME("Mewtwonite X"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5906,7 +5906,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MEWTWONITE_Y] =
+     {
+         .name = ITEM_NAME("Mewtwonite Y"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5924,7 +5924,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_AMPHAROSITE] =
+     {
+         .name = ITEM_NAME("Ampharosite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5942,7 +5942,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_STEELIXITE] =
+     {
+         .name = ITEM_NAME("Steelixite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5960,7 +5960,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SCIZORITE] =
+     {
+         .name = ITEM_NAME("Scizorite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5978,7 +5978,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_HERACRONITE] =
+     {
+         .name = ITEM_NAME("Heracronite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -5996,7 +5996,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_HOUNDOOMINITE] =
+     {
+         .name = ITEM_NAME("Houndoominite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6014,7 +6014,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_TYRANITARITE] =
+     {
+         .name = ITEM_NAME("Tyranitarite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6032,7 +6032,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SCEPTILITE] =
+     {
+         .name = ITEM_NAME("Sceptilite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6050,7 +6050,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_BLAZIKENITE] =
+     {
+         .name = ITEM_NAME("Blazikenite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6068,7 +6068,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SWAMPERTITE] =
+     {
+         .name = ITEM_NAME("Swampertite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6086,7 +6086,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GARDEVOIRITE] =
+     {
+         .name = ITEM_NAME("Gardevoirite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6104,7 +6104,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SABLENITE] =
+     {
+         .name = ITEM_NAME("Sablenite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6122,7 +6122,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MAWILITE] =
+     {
+         .name = ITEM_NAME("Mawilite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6140,7 +6140,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_AGGRONITE] =
+     {
+         .name = ITEM_NAME("Aggronite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6158,7 +6158,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MEDICHAMITE] =
+     {
+         .name = ITEM_NAME("Medichamite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6176,7 +6176,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MANECTITE] =
+     {
+         .name = ITEM_NAME("Manectite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6194,7 +6194,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SHARPEDONITE] =
+     {
+         .name = ITEM_NAME("Sharpedonite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6212,7 +6212,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CAMERUPTITE] =
+     {
+         .name = ITEM_NAME("Cameruptite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6230,7 +6230,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ALTARIANITE] =
+     {
+         .name = ITEM_NAME("Altarianite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6248,7 +6248,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_BANETTITE] =
+     {
+         .name = ITEM_NAME("Banettite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6266,7 +6266,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ABSOLITE] =
+     {
+         .name = ITEM_NAME("Absolite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6284,7 +6284,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GLALITITE] =
+     {
+         .name = ITEM_NAME("Glalitite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6302,7 +6302,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SALAMENCITE] =
+     {
+         .name = ITEM_NAME("Salamencite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6320,7 +6320,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_METAGROSSITE] =
+     {
+         .name = ITEM_NAME("Metagrossite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6338,7 +6338,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_LATIASITE] =
+     {
+         .name = ITEM_NAME("Latiasite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6356,7 +6356,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_LATIOSITE] =
+     {
+         .name = ITEM_NAME("Latiosite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6374,7 +6374,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_LOPUNNITE] =
+     {
+         .name = ITEM_NAME("Lopunnite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6392,7 +6392,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GARCHOMPITE] =
+     {
+         .name = ITEM_NAME("Garchompite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6410,7 +6410,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_LUCARIONITE] =
+     {
+         .name = ITEM_NAME("Lucarionite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6428,7 +6428,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ABOMASITE] =
+     {
+         .name = ITEM_NAME("Abomasite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6446,7 +6446,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GALLADITE] =
+     {
+         .name = ITEM_NAME("Galladite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6464,7 +6464,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_AUDINITE] =
+     {
+         .name = ITEM_NAME("Audinite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6482,7 +6482,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_DIANCITE] =
+     {
+         .name = ITEM_NAME("Diancite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6500,7 +6500,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CLEFABLITE] =
+     {
+         .name = ITEM_NAME("Clefablite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6518,7 +6518,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_VICTREEBELITE] =
+     {
+         .name = ITEM_NAME("Victreebelite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6536,7 +6536,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_STARMINITE] =
+     {
+         .name = ITEM_NAME("Starminite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6554,7 +6554,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_DRAGONINITE] =
+     {
+         .name = ITEM_NAME("Dragoninite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6572,7 +6572,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MEGANIUMITE] =
+     {
+         .name = ITEM_NAME("Meganiumite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6590,7 +6590,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_FERALIGITE] =
+     {
+         .name = ITEM_NAME("Feraligite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6608,7 +6608,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SKARMORITE] =
+     {
+         .name = ITEM_NAME("Skarmorite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6626,7 +6626,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_FROSLASSITE] =
+     {
+         .name = ITEM_NAME("Froslassite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6644,7 +6644,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_EMBOARITE] =
+     {
+         .name = ITEM_NAME("Emboarite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6662,7 +6662,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_EXCADRITE] =
+     {
+         .name = ITEM_NAME("Excadrite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6680,7 +6680,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SCOLIPITE] =
+     {
+         .name = ITEM_NAME("Scolipite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6698,7 +6698,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SCRAFTINITE] =
+     {
+         .name = ITEM_NAME("Scraftinite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6716,7 +6716,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_EELEKTROSSITE] =
+     {
+         .name = ITEM_NAME("Eelektrossite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6734,7 +6734,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CHANDELURITE] =
+     {
+         .name = ITEM_NAME("Chandelurite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6752,7 +6752,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CHESNAUGHTITE] =
+     {
+         .name = ITEM_NAME("Chesnaughtite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6770,7 +6770,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_DELPHOXITE] =
+     {
+         .name = ITEM_NAME("Delphoxite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6788,7 +6788,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GRENINJITE] =
+     {
+         .name = ITEM_NAME("Greninjite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6806,7 +6806,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_PYROARITE] =
+     {
+         .name = ITEM_NAME("Pyroarite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6824,7 +6824,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_FLOETTITE] =
+     {
+         .name = ITEM_NAME("Floettite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6842,7 +6842,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MALAMARITE] =
+     {
+         .name = ITEM_NAME("Malamarite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6860,7 +6860,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_BARBARACITE] =
+     {
+         .name = ITEM_NAME("Barbaracite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6878,7 +6878,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_DRAGALGITE] =
+     {
+         .name = ITEM_NAME("Dragalgite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6896,7 +6896,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_HAWLUCHANITE] =
+     {
+         .name = ITEM_NAME("Hawluchanite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6914,7 +6914,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ZYGARDITE] =
+     {
+         .name = ITEM_NAME("Zygardite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6932,7 +6932,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_DRAMPANITE] =
+     {
+         .name = ITEM_NAME("Drampanite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6950,7 +6950,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_FALINKSITE] =
+     {
+         .name = ITEM_NAME("Falinksite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6968,7 +6968,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_HEATRANITE] =
+     {
+         .name = ITEM_NAME("Heatranite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -6986,7 +6986,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_DARKRANITE] =
+     {
+         .name = ITEM_NAME("Darkranite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7004,7 +7004,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ZERAORITE] =
+     {
+         .name = ITEM_NAME("Zeraorite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7022,7 +7022,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_RAICHUNITE_X] =
+     {
+         .name = ITEM_NAME("Raichunite X"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7040,7 +7040,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_RAICHUNITE_Y] =
+     {
+         .name = ITEM_NAME("Raichunite Y"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7058,7 +7058,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CHIMECHITE] =
+     {
+         .name = ITEM_NAME("Chimechite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7076,7 +7076,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_ABSOLITE_Z] =
+     {
+         .name = ITEM_NAME("Absolite Z"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7094,7 +7094,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_STARAPTITE] =
+     {
+         .name = ITEM_NAME("Staraptite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7112,7 +7112,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GARCHOMPITE_Z] =
+     {
+         .name = ITEM_NAME("Garchompite Z"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7130,7 +7130,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_LUCARIONITE_Z] =
+     {
+         .name = ITEM_NAME("Lucarionite Z"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7148,7 +7148,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GOLURKITE] =
+     {
+         .name = ITEM_NAME("Golurkite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7166,7 +7166,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MEOWSTICITE] =
+     {
+         .name = ITEM_NAME("Meowsticite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7184,7 +7184,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_CRABOMINITE] =
+     {
+         .name = ITEM_NAME("Crabominite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7202,7 +7202,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GOLISOPITE] =
+     {
+         .name = ITEM_NAME("Golisopite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7220,7 +7220,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_MAGEARNITE] =
+     {
+         .name = ITEM_NAME("Magearnite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7238,7 +7238,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_SCOVILLAINITE] =
+     {
+         .name = ITEM_NAME("Scovillainite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7256,7 +7256,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_BAXCALIBRITE] =
+     {
+         .name = ITEM_NAME("Baxcalibrite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7274,7 +7274,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_TATSUGIRINITE] =
+     {
+         .name = ITEM_NAME("Tatsugirinite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
+@@ -7292,7 +7292,7 @@ const struct ItemInfo gItemsInfo[] =
+     [ITEM_GLIMMORANITE] =
+     {
+         .name = ITEM_NAME("Glimmoranite"),
+-        .price = 0,
++        .price = 20000,
+         .holdEffect = HOLD_EFFECT_MEGA_STONE,
+         .description = COMPOUND_STRING(
+             "This stone enables\n"
 diff --git c/src/data/region_map/region_map_layout.h w/src/data/region_map/region_map_layout.h
 index 32ce9172..95a4e94f 100644
 --- c/src/data/region_map/region_map_layout.h
@@ -11361,6 +13155,555 @@ index 32ce9172..95a4e94f 100644
      {MAPSEC_NONE, MAPSEC_ROUTE_114, MAPSEC_ROUTE_114, MAPSEC_FALLARBOR_TOWN, MAPSEC_ROUTE_113, MAPSEC_ROUTE_113, MAPSEC_ROUTE_113, MAPSEC_ROUTE_113, MAPSEC_ROUTE_111, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_ROUTE_119, MAPSEC_FORTREE_CITY, MAPSEC_ROUTE_120, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE},
      {MAPSEC_NONE, MAPSEC_ROUTE_114, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_MT_CHIMNEY, MAPSEC_MT_CHIMNEY, MAPSEC_ROUTE_111, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_ROUTE_119, MAPSEC_NONE, MAPSEC_ROUTE_120, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE},
      {MAPSEC_ROUTE_115, MAPSEC_ROUTE_114, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_MT_CHIMNEY, MAPSEC_MT_CHIMNEY, MAPSEC_ROUTE_111, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_ROUTE_119, MAPSEC_NONE, MAPSEC_ROUTE_120, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_SAFARI_ZONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE, MAPSEC_NONE},
+diff --git c/src/data/tilesets/graphics.h w/src/data/tilesets/graphics.h
+index e1a44dca..402cd253 100644
+--- c/src/data/tilesets/graphics.h
++++ w/src/data/tilesets/graphics.h
+@@ -1627,27 +1627,7 @@ const u32 gTilesetTiles_UnionRoom[] = INCGFX_U32("data/tilesets/secondary/union_
+ 
+ #else
+ 
+-const u32 gTilesetTiles_Building_Frlg[] = INCGFX_U32("data/tilesets/primary/building_frlg/tiles.png", ".4bpp.smol");
+ 
+-const u16 gTilesetPalettes_Building_Frlg[][16] =
+-{
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/00.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/01.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/02.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/03.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/04.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/05.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/06.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/07.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/08.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/09.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/10.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/11.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/12.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/13.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/14.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/15.pal", ".gbapal"),
+-};
+ 
+ const u16 gTilesetPalettes_GenericBuilding1[][16] =
+ {
+@@ -1781,27 +1761,7 @@ const u16 gTilesetPalettes_LavenderTown[][16] =
+     INCGFX_U16("data/tilesets/secondary/lavender_town_frlg/palettes/15.pal", ".gbapal"),
+ };
+ 
+-const u32 gTilesetTiles_VermilionCity[] = INCGFX_U32("data/tilesets/secondary/vermilion_city_frlg/tiles.png", ".4bpp.fastSmol");
+ 
+-const u16 gTilesetPalettes_VermilionCity[][16] =
+-{
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/00.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/01.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/02.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/03.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/04.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/05.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/06.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/07.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/08.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/09.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/10.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/11.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/12.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/13.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/14.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/15.pal", ".gbapal"),
+-};
+ 
+ const u32 gTilesetTiles_CeladonCity[] = INCGFX_U32("data/tilesets/secondary/celadon_city_frlg/tiles.png", ".4bpp.fastSmol");
+ 
+@@ -1935,49 +1895,9 @@ const u16 gTilesetPalettes_Building[][16] =
+     INCGFX_U16("data/tilesets/primary/building/palettes/15.pal", ".gbapal"),
+ };
+ 
+-const u32 gTilesetTiles_Mart[] = INCGFX_U32("data/tilesets/secondary/mart_frlg/tiles.png", ".4bpp.fastSmol");
+ 
+-const u16 gTilesetPalettes_Mart[][16] =
+-{
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/00.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/01.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/02.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/03.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/04.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/05.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/06.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/07.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/08.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/09.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/10.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/11.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/12.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/13.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/14.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/15.pal", ".gbapal"),
+-};
+ 
+-const u32 gTilesetTiles_PokemonCenter_Frlg[] = INCGFX_U32("data/tilesets/secondary/pokemon_center_frlg/tiles.png", ".4bpp.fastSmol");
+ 
+-const u16 gTilesetPalettes_PokemonCenter_Frlg[][16] =
+-{
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/00.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/01.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/02.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/03.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/04.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/05.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/06.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/07.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/08.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/09.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/10.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/11.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/12.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/13.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/14.pal", ".gbapal"),
+-    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/15.pal", ".gbapal"),
+-};
+ 
+ const u32 gTilesetTiles_Cave_Frlg[] = INCGFX_U32("data/tilesets/secondary/cave_frlg/tiles.png", ".4bpp.fastSmol");
+ 
+@@ -3015,6 +2935,35 @@ const u16 gTilesetPalettes_DepartmentStore[][16] =
+ 
+ const u32 gTilesetTiles_DepartmentStore[] = INCGFX_U32("data/tilesets/secondary/department_store_frlg/tiles.png", ".4bpp.fastSmol");
+ 
++
++
++#endif // IS_FRLG
++
++// Shared with Emerald's contained Vermilion ferry visit.
++const u32 gTilesetTiles_Building_Frlg[] = INCGFX_U32("data/tilesets/primary/building_frlg/tiles.png", ".4bpp.smol");
++
++const u16 gTilesetPalettes_Building_Frlg[][16] =
++{
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/00.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/01.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/02.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/03.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/04.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/05.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/06.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/07.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/08.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/09.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/10.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/11.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/12.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/13.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/14.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/primary/building_frlg/palettes/15.pal", ".gbapal"),
++};
++
++const u32 gTilesetTiles_General_Frlg[] = INCGFX_U32("data/tilesets/primary/general_frlg/tiles.png", ".4bpp.smol");
++
+ const u16 ALIGNED(4) gTilesetPalettes_General_Frlg[][16] =
+ {
+     INCGFX_U16("data/tilesets/primary/general_frlg/palettes/00.pal", ".gbapal"),
+@@ -3035,6 +2984,68 @@ const u16 ALIGNED(4) gTilesetPalettes_General_Frlg[][16] =
+     INCGFX_U16("data/tilesets/primary/general_frlg/palettes/15.pal", ".gbapal"),
+ };
+ 
+-const u32 gTilesetTiles_General_Frlg[] = INCGFX_U32("data/tilesets/primary/general_frlg/tiles.png", ".4bpp.smol");
++const u32 gTilesetTiles_VermilionCity[] = INCGFX_U32("data/tilesets/secondary/vermilion_city_frlg/tiles.png", ".4bpp.fastSmol");
+ 
+-#endif // IS_FRLG
++const u16 gTilesetPalettes_VermilionCity[][16] =
++{
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/00.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/01.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/02.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/03.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/04.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/05.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/06.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/07.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/08.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/09.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/10.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/11.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/12.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/13.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/14.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/vermilion_city_frlg/palettes/15.pal", ".gbapal"),
++};
++
++const u32 gTilesetTiles_Mart[] = INCGFX_U32("data/tilesets/secondary/mart_frlg/tiles.png", ".4bpp.fastSmol");
++
++const u16 gTilesetPalettes_Mart[][16] =
++{
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/00.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/01.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/02.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/03.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/04.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/05.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/06.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/07.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/08.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/09.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/10.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/11.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/12.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/13.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/14.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/mart_frlg/palettes/15.pal", ".gbapal"),
++};
++
++const u32 gTilesetTiles_PokemonCenter_Frlg[] = INCGFX_U32("data/tilesets/secondary/pokemon_center_frlg/tiles.png", ".4bpp.fastSmol");
++
++const u16 gTilesetPalettes_PokemonCenter_Frlg[][16] =
++{
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/00.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/01.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/02.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/03.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/04.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/05.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/06.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/07.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/08.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/09.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/10.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/11.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/12.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/13.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/14.pal", ".gbapal"),
++    INCGFX_U16("data/tilesets/secondary/pokemon_center_frlg/palettes/15.pal", ".gbapal"),
++};
+diff --git c/src/data/tilesets/headers.h w/src/data/tilesets/headers.h
+index c7702c23..d8b5e242 100644
+--- c/src/data/tilesets/headers.h
++++ w/src/data/tilesets/headers.h
+@@ -836,27 +836,7 @@ const struct Tileset gTileset_UnionRoom =
+ #else
+ 
+ // FRLG tilesets
+-const struct Tileset gTileset_BuildingFrlg =
+-{
+-    .isCompressed = TRUE,
+-    .isSecondary = FALSE,
+-    .tiles = gTilesetTiles_Building_Frlg,
+-    .palettes = gTilesetPalettes_Building_Frlg,
+-    .metatiles = gMetatiles_Building_Frlg,
+-    .metatileAttributes = gMetatileAttributes_Building_Frlg,
+-    .callback = NULL,
+-};
+ 
+-const struct Tileset gTileset_General_Frlg =
+-{
+-    .isCompressed = TRUE,
+-    .isSecondary = FALSE,
+-    .tiles = gTilesetTiles_General_Frlg,
+-    .palettes = gTilesetPalettes_General_Frlg,
+-    .metatiles = gMetatiles_General_Frlg,
+-    .metatileAttributes = gMetatileAttributes_General_Frlg,
+-    .callback = InitTilesetAnim_General_Frlg,
+-};
+ 
+ const struct Tileset gTileset_PalletTown =
+ {
+@@ -913,16 +893,6 @@ const struct Tileset gTileset_LavenderTown =
+     .callback = NULL,
+ };
+ 
+-const struct Tileset gTileset_VermilionCity =
+-{
+-    .isCompressed = TRUE,
+-    .isSecondary = TRUE,
+-    .tiles = gTilesetTiles_VermilionCity,
+-    .palettes = gTilesetPalettes_VermilionCity,
+-    .metatiles = gMetatiles_VermilionCity,
+-    .metatileAttributes = gMetatileAttributes_VermilionCity,
+-    .callback = NULL,
+-};
+ 
+ const struct Tileset gTileset_CeladonCity =
+ {
+@@ -979,27 +949,7 @@ const struct Tileset gTileset_SaffronCity =
+     .callback = NULL,
+ };
+ 
+-const struct Tileset gTileset_Mart =
+-{
+-    .isCompressed = TRUE,
+-    .isSecondary = TRUE,
+-    .tiles = gTilesetTiles_Mart,
+-    .palettes = gTilesetPalettes_Mart,
+-    .metatiles = gMetatiles_Mart,
+-    .metatileAttributes = gMetatileAttributes_Mart,
+-    .callback = NULL,
+-};
+ 
+-const struct Tileset gTileset_PokemonCenterFrlg =
+-{
+-    .isCompressed = TRUE,
+-    .isSecondary = TRUE,
+-    .tiles = gTilesetTiles_PokemonCenter_Frlg,
+-    .palettes = gTilesetPalettes_PokemonCenter_Frlg,
+-    .metatiles = gMetatiles_PokemonCenter_Frlg,
+-    .metatileAttributes = gMetatileAttributes_PokemonCenter_Frlg,
+-    .callback = NULL,
+-};
+ 
+ const struct Tileset gTileset_Cave_Frlg =
+ {
+@@ -1541,3 +1491,59 @@ const struct Tileset gTileset_HallOfFame =
+ };
+ 
+ #endif // IS_FRLG
++
++// Shared with Emerald's contained Vermilion ferry visit.
++const struct Tileset gTileset_BuildingFrlg =
++{
++    .isCompressed = TRUE,
++    .isSecondary = FALSE,
++    .tiles = gTilesetTiles_Building_Frlg,
++    .palettes = gTilesetPalettes_Building_Frlg,
++    .metatiles = gMetatiles_Building_Frlg,
++    .metatileAttributes = gMetatileAttributes_Building_Frlg,
++    .callback = NULL,
++};
++
++const struct Tileset gTileset_General_Frlg =
++{
++    .isCompressed = TRUE,
++    .isSecondary = FALSE,
++    .tiles = gTilesetTiles_General_Frlg,
++    .palettes = gTilesetPalettes_General_Frlg,
++    .metatiles = gMetatiles_General_Frlg,
++    .metatileAttributes = gMetatileAttributes_General_Frlg,
++    .callback = InitTilesetAnim_General_Frlg,
++};
++
++const struct Tileset gTileset_VermilionCity =
++{
++    .isCompressed = TRUE,
++    .isSecondary = TRUE,
++    .tiles = gTilesetTiles_VermilionCity,
++    .palettes = gTilesetPalettes_VermilionCity,
++    .metatiles = gMetatiles_VermilionCity,
++    .metatileAttributes = gMetatileAttributes_VermilionCity,
++    .callback = NULL,
++};
++
++const struct Tileset gTileset_Mart =
++{
++    .isCompressed = TRUE,
++    .isSecondary = TRUE,
++    .tiles = gTilesetTiles_Mart,
++    .palettes = gTilesetPalettes_Mart,
++    .metatiles = gMetatiles_Mart,
++    .metatileAttributes = gMetatileAttributes_Mart,
++    .callback = NULL,
++};
++
++const struct Tileset gTileset_PokemonCenterFrlg =
++{
++    .isCompressed = TRUE,
++    .isSecondary = TRUE,
++    .tiles = gTilesetTiles_PokemonCenter_Frlg,
++    .palettes = gTilesetPalettes_PokemonCenter_Frlg,
++    .metatiles = gMetatiles_PokemonCenter_Frlg,
++    .metatileAttributes = gMetatileAttributes_PokemonCenter_Frlg,
++    .callback = NULL,
++};
+diff --git c/src/data/tilesets/metatiles.h w/src/data/tilesets/metatiles.h
+index f82ea00f..fdbc22b6 100644
+--- c/src/data/tilesets/metatiles.h
++++ w/src/data/tilesets/metatiles.h
+@@ -212,14 +212,10 @@ const u16 gMetatileAttributes_UnionRoom[] = INCBIN_U16("data/tilesets/secondary/
+ 
+ #else
+ 
+-const u16 gMetatiles_Building_Frlg[] = INCBIN_U16("data/tilesets/primary/building_frlg/metatiles.bin");
+-const u16 gMetatileAttributes_Building_Frlg[] = INCBIN_U16("data/tilesets/primary/building_frlg/metatile_attributes.bin");
+ 
+ const u16 gMetatiles_GenericBuilding1[] = INCBIN_U16("data/tilesets/secondary/generic_building_1_frlg/metatiles.bin");
+ const u16 gMetatileAttributes_GenericBuilding1[] = INCBIN_U16("data/tilesets/secondary/generic_building_1_frlg/metatile_attributes.bin");
+ 
+-const u16 gMetatiles_General_Frlg[] = INCBIN_U16("data/tilesets/primary/general_frlg/metatiles.bin");
+-const u16 gMetatileAttributes_General_Frlg[] = INCBIN_U16("data/tilesets/primary/general_frlg/metatile_attributes.bin");
+ 
+ const u16 gMetatiles_PalletTown[] = INCBIN_U16("data/tilesets/secondary/pallet_town_frlg/metatiles.bin");
+ const u16 gMetatileAttributes_PalletTown[] = INCBIN_U16("data/tilesets/secondary/pallet_town_frlg/metatile_attributes.bin");
+@@ -236,8 +232,6 @@ const u16 gMetatileAttributes_CeruleanCity[] = INCBIN_U16("data/tilesets/seconda
+ const u16 gMetatiles_LavenderTown[] = INCBIN_U16("data/tilesets/secondary/lavender_town_frlg/metatiles.bin");
+ const u16 gMetatileAttributes_LavenderTown[] = INCBIN_U16("data/tilesets/secondary/lavender_town_frlg/metatile_attributes.bin");
+ 
+-const u16 gMetatiles_VermilionCity[] = INCBIN_U16("data/tilesets/secondary/vermilion_city_frlg/metatiles.bin");
+-const u16 gMetatileAttributes_VermilionCity[] = INCBIN_U16("data/tilesets/secondary/vermilion_city_frlg/metatile_attributes.bin");
+ 
+ const u16 gMetatiles_CeladonCity[] = INCBIN_U16("data/tilesets/secondary/celadon_city_frlg/metatiles.bin");
+ const u16 gMetatileAttributes_CeladonCity[] = INCBIN_U16("data/tilesets/secondary/celadon_city_frlg/metatile_attributes.bin");
+@@ -287,11 +281,7 @@ const u16 gMetatileAttributes_HoennBuilding[] = INCBIN_U16("data/tilesets/second
+ const u16 gMetatiles_BikeShop_Frlg[] = INCBIN_U16("data/tilesets/secondary/bike_shop_frlg/metatiles.bin");
+ const u16 gMetatileAttributes_BikeShop_Frlg[] = INCBIN_U16("data/tilesets/secondary/bike_shop_frlg/metatile_attributes.bin");
+ 
+-const u16 gMetatiles_Mart[] = INCBIN_U16("data/tilesets/secondary/mart_frlg/metatiles.bin");
+-const u16 gMetatileAttributes_Mart[] = INCBIN_U16("data/tilesets/secondary/mart_frlg/metatile_attributes.bin");
+ 
+-const u16 gMetatiles_PokemonCenter_Frlg[] = INCBIN_U16("data/tilesets/secondary/pokemon_center_frlg/metatiles.bin");
+-const u16 gMetatileAttributes_PokemonCenter_Frlg[] = INCBIN_U16("data/tilesets/secondary/pokemon_center_frlg/metatile_attributes.bin");
+ 
+ const u16 gMetatiles_Cave_Frlg[] = INCBIN_U16("data/tilesets/secondary/cave_frlg/metatiles.bin");
+ const u16 gMetatileAttributes_Cave_Frlg[] = INCBIN_U16("data/tilesets/secondary/cave_frlg/metatile_attributes.bin");
+@@ -408,3 +398,24 @@ const u16 gMetatiles_HallOfFame[] = INCBIN_U16("data/tilesets/secondary/hall_of_
+ const u16 gMetatileAttributes_HallOfFame[] = INCBIN_U16("data/tilesets/secondary/hall_of_fame_frlg/metatile_attributes.bin");
+ 
+ #endif // IS_FRLG
++
++// Shared with Emerald's contained Vermilion ferry visit.
++const u16 gMetatiles_Building_Frlg[] = INCBIN_U16("data/tilesets/primary/building_frlg/metatiles.bin");
++
++const u16 gMetatileAttributes_Building_Frlg[] = INCBIN_U16("data/tilesets/primary/building_frlg/metatile_attributes.bin");
++
++const u16 gMetatiles_General_Frlg[] = INCBIN_U16("data/tilesets/primary/general_frlg/metatiles.bin");
++
++const u16 gMetatileAttributes_General_Frlg[] = INCBIN_U16("data/tilesets/primary/general_frlg/metatile_attributes.bin");
++
++const u16 gMetatiles_VermilionCity[] = INCBIN_U16("data/tilesets/secondary/vermilion_city_frlg/metatiles.bin");
++
++const u16 gMetatileAttributes_VermilionCity[] = INCBIN_U16("data/tilesets/secondary/vermilion_city_frlg/metatile_attributes.bin");
++
++const u16 gMetatiles_Mart[] = INCBIN_U16("data/tilesets/secondary/mart_frlg/metatiles.bin");
++
++const u16 gMetatileAttributes_Mart[] = INCBIN_U16("data/tilesets/secondary/mart_frlg/metatile_attributes.bin");
++
++const u16 gMetatiles_PokemonCenter_Frlg[] = INCBIN_U16("data/tilesets/secondary/pokemon_center_frlg/metatiles.bin");
++
++const u16 gMetatileAttributes_PokemonCenter_Frlg[] = INCBIN_U16("data/tilesets/secondary/pokemon_center_frlg/metatile_attributes.bin");
+diff --git c/src/data/trainers.party w/src/data/trainers.party
+index fbe4a37f..10bd6a14 100644
+--- c/src/data/trainers.party
++++ w/src/data/trainers.party
+@@ -608,7 +608,7 @@ Crobat
+ Level: 41
+ IVs: 18 HP / 18 Atk / 18 Def / 18 SpA / 18 SpD / 18 Spe
+ 
+-Sharpedo
++Sharpedo @ Sharpedonite
+ Level: 43
+ IVs: 18 HP / 18 Atk / 18 Def / 18 SpA / 18 SpD / 18 Spe
+ 
+@@ -4629,7 +4629,7 @@ IVs: 30 HP / 30 Atk / 30 Def / 30 SpA / 30 SpD / 30 Spe
+ - Strength
+ - Facade
+ 
+-Absol @ Sitrus Berry
++Absol @ Absolite
+ Level: 49
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Aerial Ace
+@@ -4664,7 +4664,7 @@ IVs: 30 HP / 30 Atk / 30 Def / 30 SpA / 30 SpD / 30 Spe
+ - Will O Wisp
+ - Feint Attack
+ 
+-Sableye
++Sableye @ Sablenite
+ Level: 50
+ IVs: 30 HP / 30 Atk / 30 Def / 30 SpA / 30 SpD / 30 Spe
+ - Shadow Ball
+@@ -4707,7 +4707,7 @@ IVs: 30 HP / 30 Atk / 30 Def / 30 SpA / 30 SpD / 30 Spe
+ - Hail
+ - Ice Ball
+ 
+-Glalie
++Glalie @ Glalitite
+ Level: 50
+ IVs: 30 HP / 30 Atk / 30 Def / 30 SpA / 30 SpD / 30 Spe
+ - Light Screen
+@@ -4782,7 +4782,7 @@ IVs: 30 HP / 30 Atk / 30 Def / 30 SpA / 30 SpD / 30 Spe
+ - Dragon Breath
+ - Earthquake
+ 
+-Salamence @ Sitrus Berry
++Salamence @ Salamencite
+ Level: 55
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Flamethrower
+@@ -5026,7 +5026,7 @@ IVs: 26 HP / 26 Atk / 26 Def / 26 SpA / 26 SpD / 26 Spe
+ - Steel Wing
+ - Aerial Ace
+ 
+-Altaria @ Oran Berry
++Altaria @ Altarianite
+ Level: 33
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Earthquake
+@@ -6285,7 +6285,7 @@ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Amnesia
+ - Hyper Beam
+ 
+-Gyarados
++Gyarados @ Gyaradosite
+ Level: 56
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Dragon Dance
+@@ -11021,7 +11021,7 @@ Crobat
+ Level: 38
+ IVs: 18 HP / 18 Atk / 18 Def / 18 SpA / 18 SpD / 18 Spe
+ 
+-Camerupt
++Camerupt @ Cameruptite
+ Level: 39
+ IVs: 18 HP / 18 Atk / 18 Def / 18 SpA / 18 SpD / 18 Spe
+ 
+@@ -13547,7 +13547,7 @@ Crobat
+ Level: 43
+ IVs: 18 HP / 18 Atk / 18 Def / 18 SpA / 18 SpD / 18 Spe
+ 
+-Camerupt
++Camerupt @ Cameruptite
+ Level: 44
+ IVs: 18 HP / 18 Atk / 18 Def / 18 SpA / 18 SpD / 18 Spe
+ 
+@@ -15199,7 +15199,7 @@ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Steel Wing
+ - Aerial Ace
+ 
+-Altaria @ Chesto Berry
++Altaria @ Altarianite
+ Level: 45
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Aerial Ace
+@@ -15257,7 +15257,7 @@ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Steel Wing
+ - Aerial Ace
+ 
+-Altaria @ Chesto Berry
++Altaria @ Altarianite
+ Level: 50
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Aerial Ace
+@@ -15315,7 +15315,7 @@ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Steel Wing
+ - Aerial Ace
+ 
+-Altaria @ Chesto Berry
++Altaria @ Altarianite
+ Level: 55
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Aerial Ace
+@@ -15373,7 +15373,7 @@ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Steel Wing
+ - Aerial Ace
+ 
+-Altaria @ Chesto Berry
++Altaria @ Altarianite
+ Level: 60
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Sky Attack
+@@ -15907,7 +15907,7 @@ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Aerial Ace
+ - Slash
+ 
+-Metagross @ Sitrus Berry
++Metagross @ Metagrossite
+ Level: 78
+ IVs: 31 HP / 31 Atk / 31 Def / 31 SpA / 31 SpD / 31 Spe
+ - Earthquake
 diff --git c/src/daycare.c w/src/daycare.c
 index 264f0100..a0c77e2e 100644
 --- c/src/daycare.c
@@ -18759,7 +21102,7 @@ index f84336aa..1c809db7 100644
      gTasks[taskId].tCoeffTarget = coeffTarget;
  
 diff --git c/src/party_menu.c w/src/party_menu.c
-index 7c6393d6..ee7af05e 100644
+index 7c6393d6..b17abbc3 100644
 --- c/src/party_menu.c
 +++ w/src/party_menu.c
 @@ -1,4 +1,7 @@
@@ -19122,7 +21465,19 @@ index 7c6393d6..ee7af05e 100644
          CursorCb_Cancel1(taskId);
  }
  
-@@ -4991,7 +5199,7 @@ void Task_AbilityCapsule(u8 taskId)
+@@ -4306,6 +4514,11 @@ static void DisplayCantUseSurfMessage(void)
+ 
+ bool32 SetUpFieldMove_Fly(void)
+ {
++    // The visitor port has no integrated Kanto Fly destinations yet.
++    // FRLG world-map flags overlap Hoenn flags; use the ferry to return.
++    if (gSaveBlock1Ptr->location.mapGroup == MAP_GROUP(MAP_KANTO_VISIT_VERMILION))
++        return FALSE;
++
+     if (!CheckFollowerNPCFlag(FOLLOWER_NPC_FLAG_CAN_LEAVE_ROUTE))
+         return FALSE;
+ 
+@@ -4991,7 +5204,7 @@ void Task_AbilityCapsule(u8 taskId)
          }
          break;
      case 2:
@@ -19131,7 +21486,7 @@ index 7c6393d6..ee7af05e 100644
          {
          case 0:
              tState++;
-@@ -5076,7 +5284,7 @@ void Task_AbilityPatch(u8 taskId)
+@@ -5076,7 +5289,7 @@ void Task_AbilityPatch(u8 taskId)
          }
          break;
      case 2:
@@ -19140,7 +21495,7 @@ index 7c6393d6..ee7af05e 100644
          {
          case 0:
              tState++;
-@@ -5176,7 +5384,7 @@ void Task_Mint(u8 taskId)
+@@ -5176,7 +5389,7 @@ void Task_Mint(u8 taskId)
          }
          break;
      case 2:
@@ -19149,7 +21504,7 @@ index 7c6393d6..ee7af05e 100644
          {
          case 0:
              tState++;
-@@ -5401,7 +5609,14 @@ static void ShowMoveSelectWindow(u8 slot)
+@@ -5401,7 +5614,14 @@ static void ShowMoveSelectWindow(u8 slot)
  
  static void Task_HandleWhichMoveInput(u8 taskId)
  {
@@ -19164,7 +21519,7 @@ index 7c6393d6..ee7af05e 100644
  
      if (input != MENU_NOTHING_CHOSEN)
      {
-@@ -5607,7 +5822,7 @@ static void Task_LearnedMove(u8 taskId)
+@@ -5607,7 +5827,7 @@ static void Task_LearnedMove(u8 taskId)
      if (gPartyMenu.learnMoveState == 0)
      {
          AdjustFriendship(mon, FRIENDSHIP_EVENT_LEARN_TMHM);
@@ -19173,7 +21528,7 @@ index 7c6393d6..ee7af05e 100644
              RemoveBagItem(item, 1);
      }
      GetMonNickname(mon, gStringVar1);
-@@ -5629,7 +5844,7 @@ static void Task_DoLearnedMoveFanfareAfterText(u8 taskId)
+@@ -5629,7 +5849,7 @@ static void Task_DoLearnedMoveFanfareAfterText(u8 taskId)
  
  static void Task_LearnNextMoveOrClosePartyMenu(u8 taskId)
  {
@@ -19182,7 +21537,7 @@ index 7c6393d6..ee7af05e 100644
      {
          if (gPartyMenu.learnMoveState == 1)
          {
-@@ -5655,7 +5870,7 @@ static void Task_ReplaceMoveYesNo(u8 taskId)
+@@ -5655,7 +5875,7 @@ static void Task_ReplaceMoveYesNo(u8 taskId)
  
  static void Task_HandleReplaceMoveYesNoInput(u8 taskId)
  {
@@ -19191,7 +21546,7 @@ index 7c6393d6..ee7af05e 100644
      {
      case 0:
          DisplayPartyMenuMessage(gText_WhichMoveToForget, TRUE);
-@@ -5770,7 +5985,7 @@ static void Task_HandleStopLearningMoveYesNoInput(u8 taskId)
+@@ -5770,7 +5990,7 @@ static void Task_HandleStopLearningMoveYesNoInput(u8 taskId)
  {
      struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][gPartyMenu.slotId];
  
@@ -19200,7 +21555,7 @@ index 7c6393d6..ee7af05e 100644
      {
      case 0:
          GetMonNickname(mon, gStringVar1);
-@@ -5927,7 +6142,7 @@ static void UpdateMonDisplayInfoAfterRareCandy(u8 slot, struct Pokemon *mon)
+@@ -5927,7 +6147,7 @@ static void UpdateMonDisplayInfoAfterRareCandy(u8 slot, struct Pokemon *mon)
  
  static void Task_DisplayLevelUpStatsPg1(u8 taskId)
  {
@@ -19209,7 +21564,7 @@ index 7c6393d6..ee7af05e 100644
      {
          PlaySE(SE_SELECT);
          DisplayLevelUpStatsPg1(taskId);
-@@ -5937,7 +6152,7 @@ static void Task_DisplayLevelUpStatsPg1(u8 taskId)
+@@ -5937,7 +6157,7 @@ static void Task_DisplayLevelUpStatsPg1(u8 taskId)
  
  static void Task_DisplayLevelUpStatsPg2(u8 taskId)
  {
@@ -19218,7 +21573,7 @@ index 7c6393d6..ee7af05e 100644
      {
          PlaySE(SE_SELECT);
          DisplayLevelUpStatsPg2(taskId);
-@@ -5969,7 +6184,7 @@ static void Task_TryLearnNewMoves(u8 taskId)
+@@ -5969,7 +6189,7 @@ static void Task_TryLearnNewMoves(u8 taskId)
  {
      u16 learnMove;
  
@@ -19227,7 +21582,7 @@ index 7c6393d6..ee7af05e 100644
      {
          RemoveLevelUpStatsWindow();
          for (; sInitialLevel <= sFinalLevel; sInitialLevel++)
-@@ -7208,7 +7423,7 @@ static void Task_HandleSwitchItemsFromBagYesNoInput(u8 taskId)
+@@ -7208,7 +7428,7 @@ static void Task_HandleSwitchItemsFromBagYesNoInput(u8 taskId)
  {
      enum Item item;
  
@@ -19236,7 +21591,7 @@ index 7c6393d6..ee7af05e 100644
      {
      case 0: // Yes, switch items
          item = gPartyMenu.bagItem;
-@@ -7403,7 +7618,7 @@ static void Task_ValidateChosenHalfParty(u8 taskId)
+@@ -7403,7 +7623,7 @@ static void Task_ValidateChosenHalfParty(u8 taskId)
  
  static void Task_ContinueChoosingHalfParty(u8 taskId)
  {
@@ -19245,7 +21600,7 @@ index 7c6393d6..ee7af05e 100644
      {
          PlaySE(SE_SELECT);
          DisplayPartyMenuStdMessage(PARTY_MSG_CHOOSE_MON);
-@@ -8624,3 +8839,35 @@ s8 Test_UpdatePartySelectionSingleLayout(s8 slotId, s8 movementDir, bool8 choose
+@@ -8624,3 +8844,35 @@ s8 Test_UpdatePartySelectionSingleLayout(s8 slotId, s8 movementDir, bool8 choose
      return slotId;
  }
  #endif
@@ -24085,7 +26440,7 @@ index 2ab8f37b..7bb60ae5 100644
      u16 scrollOffset;
  };
 diff --git c/src/pokedex.c w/src/pokedex.c
-index d36708ff..3a037fff 100644
+index d36708ff..8edbef2d 100644
 --- c/src/pokedex.c
 +++ w/src/pokedex.c
 @@ -161,6 +161,36 @@ static void PrintSelectorArrow(u32);
@@ -24195,7 +26550,18 @@ index d36708ff..3a037fff 100644
          {
              sPokedexView->menuIsOpen = FALSE;
              gTasks[taskId].func = Task_HandlePokedexInput;
-@@ -1749,7 +1788,10 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1721,7 +1760,9 @@ static void Task_ClosePokedex(u8 taskId)
+         DestroyTask(taskId);
+         SetMainCallback2(CB2_ReturnToFieldWithOpenMenu);
+         m4aMPlayVolumeControl(&gMPlayInfo_BGM, TRACKS_ALL, 0x100);
+-        Free(sPokedexView);
++        // Normal capture does not allocate a view, but its shared cleanup
++        // releases one for HGSS. Do not leave it pointing into a reused heap.
++        FREE_AND_SET_NULL(sPokedexView);
+     }
+ }
+ 
+@@ -1749,7 +1790,10 @@ static void Task_HandleSearchResultsInput(u8 taskId)
      }
      else
      {
@@ -24207,7 +26573,7 @@ index d36708ff..3a037fff 100644
          {
              u32 a;
  
-@@ -1762,7 +1804,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1762,7 +1806,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
              PlaySE(SE_PIN);
              FreeWindowAndBgBuffers();
          }
@@ -24216,7 +26582,7 @@ index d36708ff..3a037fff 100644
          {
              HandleDestroyStatBars_HGSS();
              HandleDestroyStatBarsBg_HGSS();
-@@ -1772,7 +1814,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1772,7 +1816,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
              gTasks[taskId].func = Task_HandleSearchResultsStartMenuInput;
              PlaySE(SE_SELECT);
          }
@@ -24225,7 +26591,7 @@ index d36708ff..3a037fff 100644
          {
              BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
              gTasks[taskId].tLoadScreenTaskId = LoadSearchMenu();
-@@ -1781,7 +1823,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1781,7 +1825,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
              PlaySE(SE_PC_LOGIN);
              FreeWindowAndBgBuffers();
          }
@@ -24234,7 +26600,7 @@ index d36708ff..3a037fff 100644
          {
              HandleDestroyStatBars_HGSS();
              BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
-@@ -1816,7 +1858,10 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
+@@ -1816,7 +1860,10 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
      }
      else
      {
@@ -24246,7 +26612,7 @@ index d36708ff..3a037fff 100644
          {
              switch (sPokedexView->menuCursorPos)
              {
-@@ -1852,7 +1897,7 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
+@@ -1852,7 +1899,7 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
          }
  
          //Exit menu when Start or B is pressed
@@ -24255,7 +26621,7 @@ index d36708ff..3a037fff 100644
          {
              sPokedexView->menuIsOpen = FALSE;
              gTasks[taskId].func = Task_HandleSearchResultsInput;
-@@ -2030,11 +2075,11 @@ void LoadPokedexBgPalette(bool8 isSearchResults)
+@@ -2030,11 +2077,11 @@ void LoadPokedexBgPalette(bool8 isSearchResults)
          return;
  
      if (isSearchResults == TRUE)
@@ -24270,7 +26636,7 @@ index d36708ff..3a037fff 100644
      LoadPalette(GetOverworldTextboxPalettePtr(), BG_PLTT_ID(15), PLTT_SIZE_4BPP);
  }
  
-@@ -2116,6 +2161,11 @@ void CreatePokedexList(u8 dexMode, u8 order)
+@@ -2116,6 +2163,11 @@ void CreatePokedexList(u8 dexMode, u8 order)
              if (temp_isHoennDex)
              {
                  temp_dexNum = RegionalToNationalOrder(i + 1);
@@ -24282,7 +26648,7 @@ index d36708ff..3a037fff 100644
              }
              else
              {
-@@ -2535,7 +2585,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
+@@ -2535,7 +2587,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
      u16 startingPos;
      u8 scrollDir = 0;
  
@@ -24294,7 +26660,7 @@ index d36708ff..3a037fff 100644
      {
          scrollDir = 1;
          selectedMon = GetNextPosition(1, selectedMon, 0, sPokedexView->pokemonListCount - 1);
-@@ -2544,7 +2598,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
+@@ -2544,7 +2600,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
          sPokedexView->justScrolled = TRUE;
          PlaySE(SE_DEX_SCROLL);
      }
@@ -24306,7 +26672,7 @@ index d36708ff..3a037fff 100644
      {
          scrollDir = 2;
          selectedMon = GetNextPosition(0, selectedMon, 0, sPokedexView->pokemonListCount - 1);
-@@ -2605,7 +2663,11 @@ static void UpdateSelectedMonSpriteId(void)
+@@ -2605,7 +2665,11 @@ static void UpdateSelectedMonSpriteId(void)
      {
          u16 spriteId = sPokedexView->monSpriteIds[i];
  
@@ -24318,7 +26684,7 @@ index d36708ff..3a037fff 100644
              sPokedexView->selectedMonSpriteId = spriteId;
      }
  }
-@@ -2618,7 +2680,11 @@ static bool8 TryDoInfoScreenScroll(void)
+@@ -2618,7 +2682,11 @@ static bool8 TryDoInfoScreenScroll(void)
      if (sPokedexView->sEvoScreenData.fromEvoPage)
          return FALSE;
  
@@ -24330,7 +26696,7 @@ index d36708ff..3a037fff 100644
      {
          nextPokemon = selectedPokemon;
          while (nextPokemon != 0)
-@@ -2643,7 +2709,11 @@ static bool8 TryDoInfoScreenScroll(void)
+@@ -2643,7 +2711,11 @@ static bool8 TryDoInfoScreenScroll(void)
              return TRUE;
          }
      }
@@ -24342,7 +26708,7 @@ index d36708ff..3a037fff 100644
      {
          nextPokemon = selectedPokemon;
          while (nextPokemon < sPokedexView->pokemonListCount - 1)
-@@ -3053,7 +3123,7 @@ static void SpriteCB_Scrollbar(struct Sprite *sprite)
+@@ -3053,7 +3125,7 @@ static void SpriteCB_Scrollbar(struct Sprite *sprite)
      if (sPokedexView->currentPage != PAGE_MAIN && sPokedexView->currentPage != PAGE_SEARCH_RESULTS)
          DestroySprite(sprite);
      else
@@ -24351,7 +26717,7 @@ index d36708ff..3a037fff 100644
  }
  
  static void SpriteCB_ScrollArrow(struct Sprite *sprite)
-@@ -3352,7 +3422,10 @@ void Task_HandleInfoScreenInput(u8 taskId)
+@@ -3352,7 +3424,10 @@ void Task_HandleInfoScreenInput(u8 taskId)
          PlaySE(SE_DEX_SCROLL);
          return;
      }
@@ -24363,7 +26729,7 @@ index d36708ff..3a037fff 100644
      {
          BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 16, RGB_BLACK);
          gTasks[taskId].func = Task_ExitInfoScreen;
-@@ -3363,7 +3436,7 @@ void Task_HandleInfoScreenInput(u8 taskId)
+@@ -3363,7 +3438,7 @@ void Task_HandleInfoScreenInput(u8 taskId)
      if (TryHandleInfoScreenInput_HGSS(taskId))
          return;
  
@@ -24372,7 +26738,7 @@ index d36708ff..3a037fff 100644
      {
          switch (sPokedexView->selectedScreen)
          {
-@@ -3664,7 +3737,10 @@ void Task_HandleCryScreenInput(u8 taskId)
+@@ -3664,7 +3739,10 @@ void Task_HandleCryScreenInput(u8 taskId)
      else
          LoadPlayArrowPalette(FALSE);
  
@@ -24384,7 +26750,7 @@ index d36708ff..3a037fff 100644
      {
          LoadPlayArrowPalette(TRUE);
          CryScreenPlayButton(NationalPokedexNumToSpeciesForm(sPokedexListItem->dexNum));
-@@ -3672,7 +3748,7 @@ void Task_HandleCryScreenInput(u8 taskId)
+@@ -3672,7 +3750,7 @@ void Task_HandleCryScreenInput(u8 taskId)
      }
      else if (!gPaletteFade.active)
      {
@@ -24393,7 +26759,7 @@ index d36708ff..3a037fff 100644
          {
              BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
              m4aMPlayContinue(&gMPlayInfo_BGM);
-@@ -3681,7 +3757,7 @@ void Task_HandleCryScreenInput(u8 taskId)
+@@ -3681,7 +3759,7 @@ void Task_HandleCryScreenInput(u8 taskId)
              PlaySE(SE_PC_OFF);
              return;
          }
@@ -24402,7 +26768,7 @@ index d36708ff..3a037fff 100644
           || (JOY_NEW(L_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
          {
              BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
-@@ -3691,7 +3767,7 @@ void Task_HandleCryScreenInput(u8 taskId)
+@@ -3691,7 +3769,7 @@ void Task_HandleCryScreenInput(u8 taskId)
              PlaySE(SE_DEX_PAGE);
              return;
          }
@@ -24411,7 +26777,7 @@ index d36708ff..3a037fff 100644
           || (JOY_NEW(R_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
          {
              if (!sPokedexListItem->owned)
-@@ -3854,14 +3930,17 @@ void Task_LoadSizeScreen(u8 taskId)
+@@ -3854,14 +3932,17 @@ void Task_LoadSizeScreen(u8 taskId)
  
  void Task_HandleSizeScreenInput(u8 taskId)
  {
@@ -24431,7 +26797,7 @@ index d36708ff..3a037fff 100644
       || (JOY_NEW(L_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
      {
          BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
-@@ -3869,6 +3948,15 @@ void Task_HandleSizeScreenInput(u8 taskId)
+@@ -3869,6 +3950,15 @@ void Task_HandleSizeScreenInput(u8 taskId)
          gTasks[taskId].func = Task_SwitchScreensFromSizeScreen;
          PlaySE(SE_DEX_PAGE);
      }
@@ -24447,7 +26813,7 @@ index d36708ff..3a037fff 100644
  }
  
  static void Task_SwitchScreensFromSizeScreen(u8 taskId)
-@@ -3886,6 +3974,11 @@ static void Task_SwitchScreensFromSizeScreen(u8 taskId)
+@@ -3886,6 +3976,11 @@ static void Task_SwitchScreensFromSizeScreen(u8 taskId)
          case 2:
              gTasks[taskId].func = Task_LoadCryScreen;
              break;
@@ -24459,7 +26825,7 @@ index d36708ff..3a037fff 100644
          }
      }
  }
-@@ -4004,6 +4097,11 @@ u32 Pokedex_CreateCaughtMonSprite(enum Species species, s32 x, s32 y)
+@@ -4004,6 +4099,11 @@ u32 Pokedex_CreateCaughtMonSprite(enum Species species, s32 x, s32 y)
      return spriteId;
  }
  
@@ -24471,7 +26837,7 @@ index d36708ff..3a037fff 100644
  static void Task_DisplayCaughtMonDexPage(u8 taskId)
  {
      u8 spriteId;
-@@ -4057,7 +4155,11 @@ static void Task_DisplayCaughtMonDexPage(u8 taskId)
+@@ -4057,7 +4157,11 @@ static void Task_DisplayCaughtMonDexPage(u8 taskId)
          LoadDexMonPalette(taskId, FALSE);
          gSprites[spriteId].oam.priority = 0;
          BeginNormalPaletteFade(PALETTES_ALL, 0, 0x10, 0, RGB_BLACK);
@@ -24483,7 +26849,7 @@ index d36708ff..3a037fff 100644
          gTasks[taskId].tState++;
          break;
      case 5:
-@@ -4096,11 +4198,11 @@ void Task_HandleCaughtMonPageInput(u8 taskId)
+@@ -4096,11 +4200,11 @@ void Task_HandleCaughtMonPageInput(u8 taskId)
      // Flicker caught screen color
      else if (++gTasks[taskId].tPalTimer & 16)
      {
@@ -24497,7 +26863,7 @@ index d36708ff..3a037fff 100644
      }
  }
  
-@@ -5097,7 +5199,7 @@ static void Task_LoadSearchMenu(u8 taskId)
+@@ -5097,7 +5201,7 @@ static void Task_LoadSearchMenu(u8 taskId)
                  CopyToBgTilemapBuffer(3, gPokedexSearchMenuHoenn_Tilemap, 0, 0);
              else
                  CopyToBgTilemapBuffer(3, gPokedexSearchMenuNational_Tilemap, 0, 0);
@@ -24506,7 +26872,7 @@ index d36708ff..3a037fff 100644
              gMain.state = 1;
          }
          break;
-@@ -5171,13 +5273,16 @@ void Task_SwitchToSearchMenuTopBar(u8 taskId)
+@@ -5171,13 +5275,16 @@ void Task_SwitchToSearchMenuTopBar(u8 taskId)
  
  static void Task_HandleSearchTopBarInput(u8 taskId)
  {
@@ -24525,7 +26891,7 @@ index d36708ff..3a037fff 100644
      {
          switch (gTasks[taskId].tTopBarItem)
          {
-@@ -5230,6 +5335,9 @@ static void Task_HandleSearchMenuInput(u8 taskId)
+@@ -5230,6 +5337,9 @@ static void Task_HandleSearchMenuInput(u8 taskId)
  {
      const u8 (*movementMap)[4];
  
@@ -24535,7 +26901,7 @@ index d36708ff..3a037fff 100644
      if (gTasks[taskId].tTopBarItem != SEARCH_TOPBAR_SEARCH)
      {
          if (!IsNationalPokedexEnabled())
-@@ -5245,14 +5353,14 @@ static void Task_HandleSearchMenuInput(u8 taskId)
+@@ -5245,14 +5355,14 @@ static void Task_HandleSearchMenuInput(u8 taskId)
              movementMap = sSearchMovementMap_SearchNatDex;
      }
  
@@ -24552,7 +26918,7 @@ index d36708ff..3a037fff 100644
      {
          if (gTasks[taskId].tMenuItem == SEARCH_OK)
          {
-@@ -5355,7 +5463,10 @@ static void Task_WaitAndCompleteSearch(u8 taskId)
+@@ -5355,7 +5465,10 @@ static void Task_WaitAndCompleteSearch(u8 taskId)
  
  static void Task_SearchCompleteWaitForInput(u8 taskId)
  {
@@ -24564,7 +26930,7 @@ index d36708ff..3a037fff 100644
      {
          if (sPokedexView->pokemonListCount != 0)
          {
-@@ -5402,13 +5513,19 @@ static void Task_HandleSearchParameterInput(u8 taskId)
+@@ -5402,13 +5515,19 @@ static void Task_HandleSearchParameterInput(u8 taskId)
      s16 *scrollOffset;
      u16 maxOption;
      bool8 moved;
@@ -24585,7 +26951,7 @@ index d36708ff..3a037fff 100644
      {
          PlaySE(SE_PIN);
          ClearSearchParameterBoxText();
-@@ -5418,7 +5535,7 @@ static void Task_HandleSearchParameterInput(u8 taskId)
+@@ -5418,7 +5537,7 @@ static void Task_HandleSearchParameterInput(u8 taskId)
          CopyBgTilemapBufferToVram(3);
          return;
      }
@@ -24594,7 +26960,7 @@ index d36708ff..3a037fff 100644
      {
          PlaySE(SE_BALL);
          ClearSearchParameterBoxText();
-@@ -5913,3 +6030,631 @@ void LoadSpriteSilhouettePalette(u32 spriteId)
+@@ -5913,3 +6032,631 @@ void LoadSpriteSilhouettePalette(u32 spriteId)
  {
      LoadPalette(sSizeScreenSilhouette_Pal, OBJ_PLTT_ID2(gSprites[spriteId].oam.paletteNum), PLTT_SIZE_4BPP);
  }
@@ -32388,3 +34754,34 @@ index dd6a0c88..95bb4538 100644
                  if (TryGenerateWildMon(gWildMonHeaders[headerId].encounterTypes[timeOfDay].waterMonsInfo, WILD_AREA_WATER, WILD_CHECK_REPEL | WILD_CHECK_KEEN_EYE) == TRUE)
                  {
                      gIsSurfingEncounter = TRUE;
+diff --git c/tools/mapjson/mapjson.cpp w/tools/mapjson/mapjson.cpp
+index d05467ab..50c160bf 100644
+--- c/tools/mapjson/mapjson.cpp
++++ w/tools/mapjson/mapjson.cpp
+@@ -750,7 +750,7 @@ void process_groups(string groups_filepath, vector<string> &map_filepaths, strin
+         }
+         string map_name = json_to_string(map_data, "name");
+ 
+-        if ((version == "emerald" && region != "REGION_HOENN")
++        if ((version == "emerald" && region != "REGION_HOENN" && !map_data["include_in_emerald"].bool_value())
+          || (version == "firered" && region != "REGION_KANTO")) {
+             invalid_maps.push_back(map_name);
+         }
+@@ -790,7 +790,7 @@ string generate_layout_headers_text(Json layouts_data) {
+             else if (version == "firered")
+                 layout_version = "frlg";
+         }
+-        if ((version == "emerald" && layout_version != "emerald")
++        if ((version == "emerald" && layout_version != "emerald" && !layout["include_in_emerald"].bool_value())
+          || (version == "firered" && layout_version != "frlg"))
+             continue;
+         string layoutName = json_to_string(layout, "name");
+@@ -848,7 +848,7 @@ string generate_layouts_table_text(Json layouts_data) {
+             else if (version == "firered")
+                 layout_version = "frlg";
+         }
+-        if ((version == "emerald" && layout_version != "emerald") || (version == "firered" && layout_version != "frlg")) {
++        if ((version == "emerald" && layout_version != "emerald" && !layout["include_in_emerald"].bool_value()) || (version == "firered" && layout_version != "frlg")) {
+             text << "\t.4byte NULL\n";
+         } else {
+             string layout_name = json_to_string(layout, "name", true);

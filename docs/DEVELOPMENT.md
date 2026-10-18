@@ -86,6 +86,101 @@ and VRAM behave differently there.
 
 ## Host tests
 
+### Expansion Mega Evolution progression
+
+The expansion patch gives the Mega Ring and the chosen starter's stone during
+Steven's Route 118 meeting after the fifth badge. The ground-floor Devon employee
+in Rustboro also grants these rewards, so saves past that meeting can catch up.
+The starter must be fully evolved and hold its stone; press START at battle move
+selection to select Mega Evolution. The engine limits it to once per trainer per
+battle and restores the normal form afterward.
+
+Devon grants additional one-time gifts according to badges:
+
+| Badges | Stones |
+| --- | --- |
+| 6 | Manectite, Mawilite, Absolite |
+| 7 | Gardevoirite, Aggronite, Banettite |
+| 8 | Cameruptite, Sharpedonite, Glalitite, Altarianite |
+
+Alternative sources share the same receipt flags and badge requirements:
+Wattson's New Mauville reward conversation (Manectite), the Fossil Maniac's
+brother on Route 114 (Mawilite), and the berry-giving woman on Route 120
+(Absolite). Devon can supply any of these missed gifts. After the Hall of Fame,
+the employee opens a shop containing all 92 defined Mega Stones at 20,000 each,
+including duplicates. This does not make their matching species obtainable.
+Primal Orbs and other battle gimmicks are not included.
+
+Boss teams retain their species, levels and moves; one held item changes to a
+Mega Stone: Winona's Altaria (including rematches), Maxie's Camerupt at the Magma
+Hideout and Mossdeep, Archie's Sharpedo, Sidney's Absol, Phoebe's Sableye,
+Glacia's first Glalie, Drake's Salamence, Wallace's Gyarados and Steven's
+Metagross. The early Mt. Chimney Maxie fight is unchanged. Tate and Liza and
+Juan retain their teams without Megas.
+
+Reward flags occupy previously unused Emerald flags 0x21–0x2B, avoiding 0x20
+(the expansion's Exp. Share flag). Successful gifts are recorded individually;
+a full bag leaves the failed gift available for a later attempt. No save layout
+changes are needed. Route 118's movement selector in VAR_0x8008 is preserved.
+
+`make -C build/expansion/3ds_port verify-mega-progression PYTHON=python3`
+executes the production reward scripts in a bounded host model to check starter
+choices, badge gates, full-bag failures, retries, existing saves and duplicate
+prevention, and audits boss items and shop stock. It is included in expansion
+`make verify`. It also compiles the game's actual Mega eligibility function to
+check the ring requirement, matching-stone requirement, opponent eligibility
+and once-per-battle restriction. Hardware acceptance should additionally check the Steven event,
+Devon shop, START selection, a player/boss transformation, and post-battle form
+restoration. Host checks do not replace these in-game checks.
+
+### Slateport–Vermilion visitor ferry
+
+After `FLAG_SYS_GAME_CLEAR` is set, Slateport Harbour's existing ferry attendant
+offers a free trip to Vermilion before the normal Hoenn destination menu.
+Declining preserves access to Lilycove and the Battle Frontier. The outbound
+journey uses the existing S.S. Tidal boarding/departure movement and lands at
+Vermilion's southern dock. A sailor there offers free return passage to
+Slateport; stepping onto any of the three dock exit tiles also offers a return
+after moving the player back from the trigger. Returning requires no ticket,
+money, badge or introductory-event flag.
+
+This is a contained visitor area, not an enabled FRLG campaign. Three maps in
+the appended `gMapGroup_KantoVisit` group reuse the original Vermilion, Pokémon
+Center and Mart layouts. Existing map IDs and FRLG scripts remain unchanged.
+The city has no connections to Routes 6/11 and only the Center and Mart doors
+are open; other entrances have attendants. Original FRLG badges, story flags,
+trainer IDs, ticket checks and hidden items are deliberately absent because
+those namespaces overlap with Emerald's. The arrival dialogue explains the
+current visitor limits and the return route.
+
+The visitor map JSON and its three original layouts opt into Emerald generation
+with `include_in_emerald: true`. The patch extends the upstream mapjson tool to
+honor that opt-in without changing the layouts' FRLG tile format. Five required
+tilesets are shared between game versions. When regenerating the patch, explicitly
+stage the tracked upstream `tools/mapjson/mapjson.cpp` change: the usual broad
+`':!tools'` exclusion would otherwise omit it. Also stage the new maps'
+`scripts.inc` files explicitly, since the generated-map-include exclusion matches
+those source scripts too.
+
+The introduction runs once, recorded in the previously unused Emerald flag
+0x2C (`FLAG_KANTO_FERRY_INTRO_SEEN`). The Center heals the party without changing
+the Hoenn respawn location, and the Mart sells standard late-game supplies.
+Fly is disabled within the visitor group: the original Kanto Fly destinations
+still point to excluded FRLG campaign maps and use overlapping world-map flags.
+There is no save layout change and existing Champion saves need no migration.
+
+`make -C build/expansion/3ds_port verify-kanto-ferry PYTHON=python3` checks the
+Champion gate, existing ferry menu fallback, both return entry points and
+cancellation, introduction persistence, healing, reciprocal building warps,
+isolated scripts and passable/unoccupied ferry landing tiles. It is included
+in expansion `make verify`, including an audit of the linked map group, script
+pointers, FRLG layouts and tilesets in `build/gamedata_image.elf`. Hardware
+acceptance still needs the actual boarding
+animation, first/repeat arrival, Center/Mart visit, saving/reloading in Kanto,
+return trip and the original Lilycove/Battle Frontier destinations checked.
+
+### Other host checks
+
 The SDK-free day/night clock and lighting tests can also run separately:
 `make -C 3ds_port verify-daynight`. They are included in `make verify` and CI.
 `make -C 3ds_port verify-clock-store` exercises save-bound clock state, CRCs,
@@ -131,3 +226,19 @@ python tools/release_audit.py --repo . --strict
 ```
 
 must pass; CI runs it on every push.
+
+### Capture crash after using the Pokédex (18 October 2026)
+
+Expansion's normal Pokédex close freed `sPokedexView` without clearing it.
+Battle startup reuses the game heap; the shared caught-mon cleanup (which also
+serves HGSS) could then free battle data through that dangling pointer. Hardware
+`crash_dump_00000039.dmp` failed later in `FreeAllWindowBuffers` at battle end.
+`Task_ClosePokedex` now uses `FREE_AND_SET_NULL`. The regression executes the
+production close and capture cleanup functions across heap reuse, repeated
+normal captures, HGSS cleanup, and active fades:
+
+```sh
+python3 3ds_port/tests/pokedex_lifetime_test.py --tree build/expansion
+```
+
+It is included in the expansion `make verify` target.
