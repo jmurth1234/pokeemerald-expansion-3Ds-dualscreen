@@ -130,9 +130,11 @@ git -C build/expansion worktree remove --force /tmp/exp-check
   TILE_SIZE_4BPP` (and `<= offset`) and bail. This was the cause of the garbled
   battle foreground: bogus gimmick-indicator sheets (tags `0xDEDE`+) freed the
   healthbox tile ranges, and battlers then reused tiles 0–159.
-- `LoadCompressedSpriteSheet` must size the sheet from the **decompressed**
-  length, not the declared `src->size` (several battle sheets disagree), or it
-  copies past the buffer and reserves the wrong number of tiles.
+- `LoadCompressedSpriteSheet` must honor a nonzero declared `src->size`, capped
+  at the **decompressed** length. Some healthboxes declare more than the data;
+  health bars deliberately use only 0x100/0x120 bytes of a shared 0x800 blank
+  asset. Using the full asset for four bars wastes 222 OBJ tiles and hangs the
+  Mossdeep partner battle during send-out. Regression: `verify-compressed-sheet`.
 - `gen_asset_table.py` scans `ROOT/src` where `ROOT` is the build tree (e.g.
   `build/expansion`). It generates `build/assets/...` on demand; some expansion
   assets (e.g. gimmick indicator PNGs) are not produced and land in the "stub

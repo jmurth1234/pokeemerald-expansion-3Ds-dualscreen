@@ -13746,28 +13746,22 @@ index 264f0100..a0c77e2e 100644
      if (daycare->stepCounter < GetEggCycleLength())
          return FALSE;
 diff --git c/src/decompress.c w/src/decompress.c
-index 8030c726..137ccdbf 100644
+index 8030c726..590c93ec 100644
 --- c/src/decompress.c
 +++ w/src/decompress.c
-@@ -207,8 +207,24 @@ static inline u32 DoLoadCompressedSpriteSheet(const struct CompressedSpriteSheet
+@@ -207,8 +207,18 @@ static inline u32 DoLoadCompressedSpriteSheet(const struct CompressedSpriteSheet
  
  u32 LoadCompressedSpriteSheet(const struct CompressedSpriteSheet *src)
  {
 -    void *buffer = malloc_and_decompress(src->data, NULL);
 -    u32 ret = DoLoadCompressedSpriteSheet(src, buffer);
-+    /*
-+     * Size the sheet by what actually decompressed, not the declared size.
-+     * The two disagree for several battle sheets (the singles opponent
-+     * healthbox declares 0x1000 but decompresses to 0x800), and trusting the
-+     * declaration made LoadSpriteSheet copy 0x800 bytes of heap past the
-+     * buffer and reserve twice the OBJ tiles it needed - which collided with
-+     * the battler sprite's tiles and garbled both.
-+     */
++    // A sheet may intentionally use only a prefix (e.g. health bars use a
++    // shared blank image). Honor that size, but never read past decompression.
 +    u32 size = 0;
 +    void *buffer = malloc_and_decompress(src->data, &size);
 +    struct SpriteSheet dest;
 +
-+    if (size == 0)
++    if (size == 0 || (src->size != 0 && src->size < size))
 +        size = src->size;
 +    dest.data = buffer;
 +    dest.size = size;
@@ -13776,7 +13770,7 @@ index 8030c726..137ccdbf 100644
      Free(buffer);
  
      return ret;
-@@ -260,6 +276,11 @@ void HandleLoadSpecialPokePicIsEgg(bool32 isFrontPic, void *dest, enum Species s
+@@ -260,6 +270,11 @@ void HandleLoadSpecialPokePicIsEgg(bool32 isFrontPic, void *dest, enum Species s
  //  VRAM version
  void DecompressDataWithHeaderVram(const u32 *src, void *dest)
  {
@@ -13788,7 +13782,7 @@ index 8030c726..137ccdbf 100644
      union CompressionHeader header;
      CpuCopy32(src, &header, 8);
      switch (header.smol.mode)
-@@ -288,6 +309,9 @@ void DecompressDataWithHeaderVram(const u32 *src, void *dest)
+@@ -288,6 +303,9 @@ void DecompressDataWithHeaderVram(const u32 *src, void *dest)
  //  WRAM version
  void DecompressDataWithHeaderWram(const u32 *src, void *dest)
  {
@@ -13798,7 +13792,7 @@ index 8030c726..137ccdbf 100644
      union CompressionHeader header;
      CpuCopy32(src, &header, 8);
      switch (header.smol.mode)
-@@ -403,10 +427,24 @@ static IWRAM_DATA u32 sCurrState = 0;
+@@ -403,10 +421,24 @@ static IWRAM_DATA u32 sCurrState = 0;
  
  extern void FastUnsafeCopy32(void *, const void *, u32 size);
  
@@ -13823,7 +13817,7 @@ index 8030c726..137ccdbf 100644
  }
  
  // The reason for macros and unrolling the loops stems from the following:
-@@ -513,6 +551,7 @@ LOOP_STORE:
+@@ -513,6 +545,7 @@ LOOP_STORE:
  //  Dark Egg magic
  ARM_FUNC __attribute__((no_reorder)) static void SwitchToArmCallLOtANS(const u32 *data, u32 *ykTable, void *resultVec, void *resultVecEnd, void (*decodeFunction)(const u32 *data, u32 *ykTable, void *resultVec, void *resultVecEnd))
  {
@@ -13831,7 +13825,7 @@ index 8030c726..137ccdbf 100644
      decodeFunction(data, ykTable, resultVec, resultVecEnd);
  }
  
-@@ -593,6 +632,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
+@@ -593,6 +626,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
  
  ARM_FUNC __attribute__((no_reorder)) static void SwitchToArmCallDecodeSymtANS(const u32 *data, u32 *ykTable, u16 *resultVec, u16 *resultVecEnd, void (*decodeFunction)(const u32 *data, u32 *ykTable, u16 *resultVec, u16 *resultVecEnd))
  {
@@ -13839,7 +13833,7 @@ index 8030c726..137ccdbf 100644
      decodeFunction(data, ykTable, resultVec, resultVecEnd);
  }
  
-@@ -769,6 +809,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
+@@ -769,6 +803,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
  //  Dark Egg magic
  ARM_FUNC __attribute__((no_reorder)) static u32 SwitchToArmCallSymDeltaANS(const u32 *data, u32 *ykTable, u16 *resultVec, u16 *resultVecEnd, u32 (*decodeFunction)(const u32 *data, u32 *ykTable, u16 *resultVec, u16 *resultVecEnd))
  {
@@ -13847,7 +13841,7 @@ index 8030c726..137ccdbf 100644
      return decodeFunction(data, ykTable, resultVec, resultVecEnd);
  }
  
-@@ -929,6 +970,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
+@@ -929,6 +964,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
  //  Dark Egg magic
  ARM_FUNC __attribute__((no_reorder)) static void SwitchToArmCallDecodeInstructions(u32 headerLoSize, const u8 *loVec, const u16 *symVec, void *dest, void (*decodeFunction)(u32 headerLoSize, const u8 *loVec, const u16 *symVec, void *dest))
  {
@@ -13855,7 +13849,7 @@ index 8030c726..137ccdbf 100644
      decodeFunction(headerLoSize, loVec, symVec, dest);
  }
  
-@@ -1077,6 +1119,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
+@@ -1077,6 +1113,7 @@ ARM_FUNC __attribute__((flatten, noinline, no_reorder)) __attribute__((optimize(
  
  ARM_FUNC __attribute__((no_reorder)) static void SwitchToArmCallDecodeTileNumbers(u16 *tileNumbers, u32 arraySize, void (*decodeFunction)(u16 *tileNumbers, u32 arraySize))
  {
@@ -13863,7 +13857,7 @@ index 8030c726..137ccdbf 100644
      decodeFunction(tileNumbers, arraySize);
  }
  
-@@ -1330,6 +1373,23 @@ static void UNUSED StitchObjectsOn8x8Canvas(s32 object_size, s32 object_count, u
+@@ -1330,6 +1367,23 @@ static void UNUSED StitchObjectsOn8x8Canvas(s32 object_size, s32 object_count, u
  
  u32 GetDecompressedDataSize(const u32 *ptr)
  {
@@ -13887,7 +13881,7 @@ index 8030c726..137ccdbf 100644
      union CompressionHeader *header = (union CompressionHeader *)ptr;
      switch (header->smol.mode)
      {
-@@ -1393,6 +1453,7 @@ extern const u32 LZ77UnCompWRAMOptimized_end[];
+@@ -1393,6 +1447,7 @@ extern const u32 LZ77UnCompWRAMOptimized_end[];
  
  ARM_FUNC static void SwitchToArmCallFastLZ77(const u32 *src, void *dest, void (*funcPtr)(const u32 *src, void *dest))
  {

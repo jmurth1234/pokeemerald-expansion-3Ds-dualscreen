@@ -282,3 +282,27 @@ allocations, widths 1–240, one to three visible lines, both scroll modes, long
 words, ordinary messages, manual breaks and clear-page separators. The old
 code reproduces the same invalid word-pointer access; the fixed code preserves
 characters and string bounds. This check is part of expansion `make verify`.
+
+### Mossdeep partner-battle hang (19 October 2026)
+
+The Space Center Maxie/Tabitha battle with Steven froze after the send-out
+message without generating a dump. Reproducing the battle from a copy of the
+hardware save under Azahar/GDB reached `FatalfCrashScreen` from `CreateSprite`
+inside `StartSendOutAnim` for battler 3. The reported “Out of sprite slots”
+also covers tile allocation failure: only 48 consecutive OBJ tiles remained
+when the second opponent needed 64. `CrashScreen` then stuck in its GBA
+`BusyWaitForVBlank`, explaining the frozen display and lack of continued logs.
+
+The compressed-sheet loader had reserved the full 0x800-byte blank asset for
+each health bar even though the player/opponent bars request just 0x100/0x120.
+Four bars consumed 256 tiles instead of 34. The loader now honors a nonzero
+requested size capped at the decompressed size. This retains the earlier
+short-payload protection for the singles opponent healthbox while reclaiming
+222 tiles in a four-battler battle.
+
+`verify-compressed-sheet` covers prefix-sized health bars, undersized payloads,
+matching sizes and unspecified sizes under ASan/UBSan; it is part of expansion
+`make verify`. The fixed Azahar/GDB replay created all four battler sprites
+(ids 22, 21, 15, 24) and reached `HandleInputChooseAction`, with health-bar
+ranges of 8/9/8/9 tiles. Hardware acceptance is the Space Center battle through
+all four send-outs, with intact health bars and subsequent battle turns.
