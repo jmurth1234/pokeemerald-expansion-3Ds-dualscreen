@@ -16892,6 +16892,21 @@ index 1e357d7d..097f9cd6 100644
          REG_IME = IMEBackup;
      }
  }
+diff --git c/src/line_break.c w/src/line_break.c
+index 1031b9b9..2ef95612 100644
+--- c/src/line_break.c
++++ w/src/line_break.c
+@@ -343,6 +343,10 @@ void BreakSubStringAutomatic(u8 *src, u32 maxWidth, u32 screenLines, u8 fontId,
+                     currWordIndex++;
+                 }
+             }
++            // The estimate can exceed the populated lines (e.g. one wide word).
++            // Unused entries have no words pointer and must not be emitted.
++            if (!shouldTryAgain)
++                totalLines = currLineIndex + 1;
+         } while (shouldTryAgain);
+         //u32 currBadness = GetStringBadness(stringLines, totalLines, maxWidth);
+         BuildNewString(stringLines, totalLines, screenLines, src, toggleScrollPrompt);
 diff --git c/src/link.c w/src/link.c
 index 2f9105cc..bc3ef0e5 100644
 --- c/src/link.c

@@ -267,3 +267,18 @@ production constructor and frame-copy request code with 255 dirty allocation
 patterns and repeated copies under ASan/UBSan. It is included in expansion
 `make verify`. Hardware acceptance: view berry tags, then choose a berry and
 start the Berry Blender after using other menus.
+
+### Battle message wrapping crash (19 October 2026)
+
+`crash_dump_00000042.dmp` failed in `BuildNewString` at `0x0031f290` while
+expanding a battle message. The second line had zero words and an uninitialized
+word pointer (`0x99a0aa99`). Automatic wrapping can reserve more lines than it
+populates, particularly for a single word wider than the line. It now passes
+the actual populated line count to the string builder after layout succeeds.
+This also avoids inserting a spurious break over the string terminator.
+
+`verify-line-break` runs the production wrapper under ASan/UBSan with poisoned
+allocations, widths 1–240, one to three visible lines, both scroll modes, long
+words, ordinary messages, manual breaks and clear-page separators. The old
+code reproduces the same invalid word-pointer access; the fixed code preserves
+characters and string bounds. This check is part of expansion `make verify`.
