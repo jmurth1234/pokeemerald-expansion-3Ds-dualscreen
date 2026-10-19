@@ -1,4 +1,4 @@
-"""Exercise expansion Pokédex cleanup across heap reuse and a later capture."""
+"""Exercise full Pokédex closing frames, heap reuse and later captures."""
 import argparse
 from pathlib import Path
 import subprocess
@@ -45,6 +45,16 @@ static int owner; /* 1 = Pokédex view; 2 = battle data reusing that allocation 
 static int bg[2], bgFrees;
 static bool national, shiny;
 static void (*callback)(void);
+static int animated, oamBuilt, fadesUpdated;
+static void Task_ClosePokedex(u8 taskId);
+static void RunTasks(void) { Task_ClosePokedex(0); }
+static void AnimateSprites(void) {
+    /* Remaining interface sprites read the view during their callbacks. */
+    assert(sPokedexView != NULL && owner == 1);
+    ++animated;
+}
+static void BuildOamBuffer(void) { ++oamBuilt; }
+static void UpdatePaletteFade(void) { ++fadesUpdated; }
 static void Free(void *p) {
     if (p == &reused) {
         assert(owner != 0);
@@ -70,6 +80,7 @@ static void SetGpuReg(int reg, int value) { (void)reg; (void)value; }
 static void *GetBgTilemapBuffer(int id) { assert(id == 2 || id == 3); return &bg[id - 2]; }
 static void LoadDexMonPalette(unsigned id, bool32 isShiny) { assert(id == 0); shiny = isShiny; }
 '''
+    harness += function(source, 'static void CB2_Pokedex(void)\n{')
     harness += function(source, 'static void Task_ClosePokedex(u8 taskId)\n{')
     harness += function(source, 'static void Task_ExitCaughtMonPage(u8 taskId)\n{')
     harness += r'''
@@ -80,11 +91,13 @@ int main(void) {
         sPokedexView = &reused;
         reused = (struct View){1, 3};
         gPaletteFade.active = true;
-        Task_ClosePokedex(0);
+        CB2_Pokedex();
         assert(owner == 1 && sPokedexView == &reused);
         gPaletteFade.active = false;
-        Task_ClosePokedex(0);
+        CB2_Pokedex();
         assert(owner == 0 && viewFrees == cycle + 1);
+        assert(animated == cycle + 1 && oamBuilt == cycle + 1
+               && fadesUpdated == cycle + 1);
         assert(save.pokedex.mode == (national ? 1 : DEX_MODE_HOENN));
         assert(save.pokedex.order == 3 && callback == CB2_ReturnToFieldWithOpenMenu);
 
@@ -117,7 +130,7 @@ int main(void) {
                         '-fsanitize=address,undefined', '-g', str(path / 'test.c'),
                         '-o', str(path / 'test')], check=True)
         subprocess.run([str(path / 'test')], check=True)
-    print('PASS: Pokédex close, heap reuse, repeated normal captures, HGSS cleanup, fade gates')
+    print('PASS: full Pokédex closing frame, live/fading sprite updates, heap reuse, repeated normal captures, HGSS cleanup, fade gates')
 
 
 if __name__ == '__main__':

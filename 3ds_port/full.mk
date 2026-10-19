@@ -766,7 +766,10 @@ verify-pokedex-capture:
 
 ifneq ($(PORT_EXPANSION_DEF),)
 .PHONY: verify-expansion-sprites
-verify: verify-expansion-sprites verify-mega-progression verify-kanto-ferry verify-pokedex-lifetime
+verify: verify-expansion-sprites verify-mega-progression verify-kanto-ferry verify-pokedex-lifetime verify-berry-sprite
+.PHONY: verify-berry-sprite
+verify-berry-sprite:
+	"$(PYTHON)" -B tests/berry_sprite_test.py --tree "$(ROOT)" --cc "$(HOSTCC)"
 .PHONY: verify-pokedex-lifetime
 verify-pokedex-lifetime:
 	"$(PYTHON)" -B tests/pokedex_lifetime_test.py --tree "$(ROOT)" --cc "$(HOSTCC)"

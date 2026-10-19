@@ -242,3 +242,28 @@ python3 3ds_port/tests/pokedex_lifetime_test.py --tree build/expansion
 ```
 
 It is included in the expansion `make verify` target.
+
+The follow-up `crash_dump_00000040.dmp` faulted in
+`SpriteCB_ScrollArrow` at `0x00368198`: `RunTasks` closed the Pokédex and
+cleared the view, but `CB2_Pokedex` still animated its interface sprites in
+the same frame. The frame callback now returns after tasks if the view was
+released. The regression runs the production frame callback during the fade
+and on the closing frame, and rejects sprite updates after view release.
+
+### Berry Blender graphics crash (19 October 2026)
+
+Hardware `crash_dump_00000041.dmp` faulted in `CpuSet` at `0x00435838`,
+copying a 2,048-byte berry sprite from invalid address `0xdefc9e85` during
+`VBlankCB_BerryBlender`. `CreateBerrySprite` initialized the original frame
+fields individually but left the port's added `offset` field as old heap
+contents. The frame resolver added those contents to the graphics pointer.
+The shared berry constructor now initializes the whole descriptor, covering
+both the berry tag screen and spinning Blender berries. Other dynamically
+allocated frame tables in trainer pictures and the slot machine already use
+`AllocZeroed`.
+
+`make -C build/expansion/3ds_port verify-berry-sprite PYTHON=python3` runs the
+production constructor and frame-copy request code with 255 dirty allocation
+patterns and repeated copies under ASan/UBSan. It is included in expansion
+`make verify`. Hardware acceptance: view berry tags, then choose a berry and
+start the Berry Blender after using other menus.
